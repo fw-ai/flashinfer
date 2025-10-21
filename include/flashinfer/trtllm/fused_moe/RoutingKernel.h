@@ -250,19 +250,25 @@ struct Data : public DataBase {
   tg::Dtype mDtypeExpW{tg::Dtype::Fp32};
   tg::Dtype mDtypeElt{tg::Dtype::Bfloat16};
 
+  void const* mPtrRoutingBias;
+
+  bool mSigmoidBeforeTopK{false};
   bool mDoSoftmaxBeforeTopK{false};
   bool mNormTopkProb{true};  // Default value is true for Qwen3 model
   bool mApplySoftmaxAfterTopK{false};
 };
 
-template <typename InputT_, typename OutputT_, bool DoSoftmaxBeforeTopK_, bool UsePdl_>
+template <typename InputT_, typename OutputT_, bool DoSoftmaxBeforeTopK_, bool DoSigmoidBeforeTopK_,
+          bool UsePdl_>
 struct KernelParams : public KernelParamsBase<InputT_, OutputT_, UsePdl_> {
   using InputT = InputT_;
   using OutputT = OutputT_;
 
   static constexpr bool DoSoftmaxBeforeTopK = DoSoftmaxBeforeTopK_;
+  static constexpr bool DoSigmoidBeforeTopK = DoSigmoidBeforeTopK_;
 
   PackedScoreIdx<OutputT>* mPtrExpertIdx = nullptr;
+  InputT const* mPtrRoutingBias = nullptr;
 
   int32_t mTopK = 0;
 
@@ -277,6 +283,7 @@ struct KernelParams : public KernelParamsBase<InputT_, OutputT_, UsePdl_> {
     params.mNormTopkProb = data.mNormTopkProb;
     params.mApplySoftmaxAfterTopK = data.mApplySoftmaxAfterTopK;
     params.mTopK = data.mTopK;
+    params.mPtrRoutingBias = static_cast<InputT const*>(data.mPtrRoutingBias);
     return params;
   }
 };
