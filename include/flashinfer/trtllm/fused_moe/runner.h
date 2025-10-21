@@ -48,8 +48,10 @@ enum class RoutingMethodType : int64_t {
   RenormalizeNaive = 4,
   // TopK only (no softmax)
   TopK = 5,
+  // SigmoidTopK -> TopK -> Renormalize
+  SigmoidRenormalize = 6,
   // Unspecified
-  Unspecified = 6,
+  Unspecified = 7,
 };
 
 inline int32_t maybeGetMinTokenCount(int32_t numPaddedTokens, int32_t hiddenSize,
