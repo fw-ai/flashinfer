@@ -133,7 +133,9 @@ void Runner::run(void* routingLogits, void* routingBias, int32_t numTokens, int3
     moe::dev::routing::routingLlama4::run(routingData, stream);
   } else if (routingMethodType == RoutingMethodType::Renormalize         /* default */
              || routingMethodType == RoutingMethodType::RenormalizeNaive /* Softmax -> TopK */
-             || routingMethodType == RoutingMethodType::TopK /* TopK only (no softmax) */) {
+             || routingMethodType == RoutingMethodType::TopK /* TopK only (no softmax) */
+             || routingMethodType ==
+                    RoutingMethodType::SigmoidRenormalize /* Sigmoid -> TopK -> Renormalize */) {
     moe::dev::routing::routingRenormalize::Data routingData;
 
     //
@@ -143,11 +145,14 @@ void Runner::run(void* routingLogits, void* routingBias, int32_t numTokens, int3
     routingData.mDtypeExpW = btg::Dtype::Bfloat16;
     // routingData.mDtypeElt = dtypeElt; // no-op for now as hidden_state is not input
     routingData.mUsePdl = true;
+    routingData.mSigmoidBeforeTopK = routingMethodType == RoutingMethodType::SigmoidRenormalize;
     routingData.mDoSoftmaxBeforeTopK = routingMethodType == RoutingMethodType::RenormalizeNaive;
-    routingData.mNormTopkProb = routingMethodType == RoutingMethodType::RenormalizeNaive;
+    routingData.mNormTopkProb = routingMethodType == RoutingMethodType::RenormalizeNaive ||
+                                routingMethodType == RoutingMethodType::SigmoidRenormalize;
     routingData.mApplySoftmaxAfterTopK = routingMethodType == RoutingMethodType::Renormalize;
 
     routingData.mPtrScores = routingLogits;
+    routingData.mPtrRoutingBias = routingBias;
 
     //
     // Outputs
