@@ -70,7 +70,7 @@ __forceinline__ __device__ void routingTopKExperts(
         auto expertIdx = warpTopKExpertIdx[laneIdx];
         warpTopKScore[laneIdx] -= static_cast<DataType>(ptrRoutingBias[expertIdx]);
       }
-    } 
+    }
   }
 
   // Normalize the scores
@@ -109,8 +109,8 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts)
   using OutputT = typename KernelParams::OutputT;
   using InputT = typename KernelParams::InputT;
   using BaseType = 
-	  std::conditional_t<KernelParams::DoSoftmaxBeforeTopK || KernelParams::DoSigmoidBeforeTopK,
-	                     float, InputT>;
+      std::conditional_t<KernelParams::DoSoftmaxBeforeTopK || KernelParams::DoSigmoidBeforeTopK,
+	                 float, InputT>;
   using TypePacked = PackedScoreIdx<BaseType>;
   int constexpr MaxNumExperts = KernelParams::MaxNumExperts;
 
