@@ -182,23 +182,26 @@ namespace moe::dev {
 #define LAUNCH_ROUTING_WITH_NUM_EXPERTS(data, coopLaunch, kernel, numBlocks, numThreads, smemSize, \
                                         stream, extraFlag1, extraFlag2, numExperts)                \
   if (data.mDtypeExpW == tg::Dtype::Fp32 && extraFlag1) {                                          \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float, numExperts, true), kernel, numBlocks,    \
-               numThreads, smemSize, stream);                                                      \
+    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float, numExperts, true, false), kernel,        \
+               numBlocks, numThreads, smemSize, stream);                                           \
   } else if (data.mDtypeExpW == tg::Dtype::Fp32 && extraFlag2) {                                   \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float, numExperts, false), kernel, numBlocks,   \
-               numThreads, smemSize, stream);                                                      \
+    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float, numExperts, false, true), kernel,        \
+               numBlocks, numThreads, smemSize, stream);                                           \
   } else if (data.mDtypeExpW == tg::Dtype::Fp32) {                                                 \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float, numExperts, false), kernel, numBlocks,   \
-               numThreads, smemSize, stream);                                                      \
+    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(float, float, numExperts, false, false), kernel,       \
+               numBlocks, numThreads, smemSize, stream);                                           \
   } else if (data.mDtypeExpW == tg::Dtype::Bfloat16 && extraFlag1) {                               \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16, numExperts, true),       \
-               kernel, numBlocks, numThreads, smemSize, stream);                                   \
+    LAUNCH_PDL(data, coopLaunch,                                                                   \
+               LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16, numExperts, true, false), kernel,          \
+               numBlocks, numThreads, smemSize, stream);                                           \
   } else if (data.mDtypeExpW == tg::Dtype::Bfloat16 && extraFlag2) {                               \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16, numExperts, true),       \
-               kernel, numBlocks, numThreads, smemSize, stream);                                   \
+    LAUNCH_PDL(data, coopLaunch,                                                                   \
+               LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16, numExperts, false, true), kernel,          \
+               numBlocks, numThreads, smemSize, stream);                                           \
   } else if (data.mDtypeExpW == tg::Dtype::Bfloat16) {                                             \
-    LAUNCH_PDL(data, coopLaunch, LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16, numExperts, false),      \
-               kernel, numBlocks, numThreads, smemSize, stream);                                   \
+    LAUNCH_PDL(data, coopLaunch,                                                                   \
+               LAUNCH_ESC(__nv_bfloat16, __nv_bfloat16, numExperts, false, false), kernel,         \
+               numBlocks, numThreads, smemSize, stream);                                           \
   } else {                                                                                         \
     FLASHINFER_WARN("Unsupported dtypeExpW");                                                      \
   }
