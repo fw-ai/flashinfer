@@ -108,7 +108,7 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts)
   // types used in this kernel
   using OutputT = typename KernelParams::OutputT;
   using InputT = typename KernelParams::InputT;
-  using BaseType = std::conditional_t<KernelParams::DoSoftmaxBeforeTopK, float, InputT>;
+  using BaseType = std::conditional_t<KernelParams::DoSoftmaxBeforeTopK || KernelParams::DoSigmoidBeforeTopK, float, InputT>;
   using TypePacked = PackedScoreIdx<BaseType>;
   int constexpr MaxNumExperts = KernelParams::MaxNumExperts;
 
@@ -159,10 +159,10 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts)
 
     BaseType minScore = BaseType{-INFINITY};
     if (validToken) {
-      routingTopKExperts<BaseType, InputT, VecSize, KernelParams::DoSoftmaxBeforeTopK>(
+      routingTopKExperts<BaseType, InputT, VecSize, KernelParams::DoSoftmaxBeforeTopK, KernelParams::DoSigmoidBeforeTopK>(
           warp, score, idx, warpTopKScore, warpTopKExpertIdx, laneIdx, params.mNumExperts,
           params.mTopK, params.mPtrScores + scoreOffset, params.mNormTopkProb,
-          params.mApplySoftmaxAfterTopK);
+          params.mApplySoftmaxAfterTopK, params.mPtrRoutingBias);
 
       if (laneIdx < params.mTopK) {
         int offset = warpIdx * MaxNumExperts + warpTopKExpertIdx[laneIdx];
@@ -520,7 +520,7 @@ void run(Data const& data, void* stream) {
       LAUNCH_ROUTING_RENORMALIZE(data, false, routingInitExpertCounts,
                                  (2 * data.mNumExperts - 1) / numThreadsHist + 1, numThreadsHist,
                                  /*smemSize=*/0,  // No dynamic smem
-                                 stream, data.mDoSoftmaxBeforeTopK);
+                                 stream, data.mDoSoftmaxBeforeTopK, data.mSigmoidBeforeTopK);
     }
     LAUNCH_ROUTING_RENORMALIZE(data, false, routingIndicesHistogramKernel, numBlocksHistogram,
                                numThreadsHist,

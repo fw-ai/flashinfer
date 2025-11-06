@@ -1020,6 +1020,7 @@ def backend_requirement(
             # Whether the given backend exists in the API
             return backend in backend_checks
 
+<<<<<<< HEAD
         def suitable_auto_backends(cc, *args, **kwargs):
             if common_check is not None and not common_check(*args, **kwargs):
                 return False
@@ -1061,6 +1062,8 @@ def backend_requirement(
                 capability = major * 10 + minor
             return capability
 
+=======
+>>>>>>> a113dc40 (Rebase v0.5.1 (#1))
         # @brief: Wrapper function that calls the orignal, decorated function, after applying a number of checks.
         # @note that here we manually apply defaults to the arguments in the wrapper function when doing validation.
         @functools.wraps(func)
@@ -1077,13 +1080,53 @@ def backend_requirement(
                 bound_args.apply_defaults()
                 # Convert to kwargs for validation functions
                 kwargs_with_defaults = dict(bound_args.arguments)
+<<<<<<< HEAD
                 backend = kwargs_with_defaults.get("backend")
                 capability = _get_capability(*args, **kwargs)
+                if not has_backend_choices() and common_check is None:
+=======
+
+                backend = kwargs_with_defaults.get("backend")
+
+                capability = None
+                # Find the first tensor argument.
+                # Assume all tensors are on the same device/capability.
+                # We could consider check all tensors at a performance cost.
+                tensor_arg = None
+                for value in kwargs_with_defaults.values():
+                    if isinstance(value, torch.Tensor):
+                        tensor_arg = value
+                        break
+
+                if tensor_arg is not None:
+                    # Get compute capability from the first tensor
+                    # Assume all tensors are on the same device/capability
+                    major, minor = get_compute_capability(tensor_arg.device)
+                    capability = major * 10 + minor
+
                 if not has_backend_choices() and common_check is None:
                     raise ValueError(
                         f"Invalid @backend_requirement decorator usage: no backend choices and no common_check for {func.__name__}"
                     )
 
+                if has_backend_choices():
+                    if not is_backend_supported(backend, capability):
+                        extra = f" with capability {capability}" if capability else ""
+                        raise BackendSupportedError(
+                            f"{func.__name__} does not support backend '{backend}'{extra}"
+                        )
+                else:
+                    if not is_compute_capability_supported(capability):
+                        raise BackendSupportedError(
+                            f"{func.__name__} does not support compute capability {capability}"
+                        )
+                if not _is_problem_size_supported(**kwargs_with_defaults):
+>>>>>>> a113dc40 (Rebase v0.5.1 (#1))
+                    raise ValueError(
+                        f"Invalid @backend_requirement decorator usage: no backend choices and no common_check for {func.__name__}"
+                    )
+
+<<<<<<< HEAD
                 if has_backend_choices():
                     if backend == "auto":
                         if not suitable_auto_backends(
@@ -1120,6 +1163,8 @@ def backend_requirement(
                     capability = _get_capability(*args, **kwargs)
                     suitable_auto_backends(capability, *args, **kwargs)
 
+=======
+>>>>>>> a113dc40 (Rebase v0.5.1 (#1))
             return func(*args, **kwargs)
 
         wrapper.is_backend_supported = is_backend_supported

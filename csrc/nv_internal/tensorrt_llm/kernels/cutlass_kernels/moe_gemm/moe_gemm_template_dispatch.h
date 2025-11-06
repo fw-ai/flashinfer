@@ -760,9 +760,9 @@ void MoeGemmRunner<T, WeightType, OutputType, ScaleBiasType>::dispatchToArch(
     if constexpr (!is_fp4) {
       if constexpr (use_fp8 || use_w4afp8) {
 #if defined(ENABLE_FP8)
-        static_assert(!std::is_same_v<OutputType, __nv_fp8_e4m3> &&
-                          !std::is_same_v<OutputType, __nv_fp8_e5m2>,
-                      "FP8 GEMM Output not supported");
+      static_assert(
+          !std::is_same_v<OutputType, __nv_fp8_e4m3> && !std::is_same_v<OutputType, __nv_fp8_e5m2>,
+          "FP8 GEMM Output not supported");
 #endif
 
         TLLM_CHECK_WITH_INFO(sm_ == 89,
@@ -996,6 +996,9 @@ void MoeGemmRunner<T, WeightType, OutputType, ScaleBiasType>::moeGemmBiasAct(
       break;
     case ActivationType::Geglu:
       runGemm<cutlass_extensions::EpilogueOpDefaultFtGelu>(inputs, hopper_inputs);
+      break;
+    case ActivationType::Relu2:
+      TLLM_THROW("Relu2 is not supported.");
       break;
     case ActivationType::InvalidType:
       TLLM_THROW("Activation type for fpA_intB must be valid.");

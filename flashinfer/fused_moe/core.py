@@ -70,8 +70,10 @@ class RoutingMethodType(IntEnum):
     RenormalizeNaive = (4,)
     # TopK only (no softmax)
     TopK = (5,)
+    # GLM: Sigmoid -> TopK -> Renormalize
+    SigmoidRenormalize = (6,)
     # Unspecified
-    Unspecified = 6
+    Unspecified = 7
 
 
 # Copied from csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/common.h
@@ -1905,6 +1907,9 @@ def trtllm_bf16_moe(
             - 2: DeepSeekV3 (Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups -> Top8 experts)
             - 3: Llama4 (Top1 -> Sigmoid)
             - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
+            - 5: TopK only (no softmax)
+            - 6: SigmoidRenormalize: Sigmoid -> TopK -> Renormalize
+            - 7: Unspecified
         use_shuffled_weight: Whether to use shuffled weight layout for optimization (default: True).
         weight_layout: Weight layout format (default: WeightLayout.BlockMajorK).
             - 0: MajorK - K-major layout [Mn, K]
@@ -2168,6 +2173,9 @@ def trtllm_fp4_block_scale_moe(
             - 2: DeepSeekV3 (Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups -> Top8 experts)
             - 3: Llama4 (Top1 -> Sigmoid)
             - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
+            - 5: TopK only (no softmax)
+            - 6: SigmoidRenormalize: Sigmoid -> TopK -> Renormalize
+            - 7: Unspecified
         do_finalize (bool): Whether to finalize the output (default: False)
         enable_pdl (Optional[bool]): Whether to enable Programmatic Dependent Launch (PDL). Auto-enabled for >= sm90.
         gated_act_type (int): Type of gated activation function (default: 0)
@@ -2299,6 +2307,8 @@ def trtllm_fp4_block_scale_routed_moe(
             - 2: DeepSeekV3 (Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups -> Top8 experts)
             - 3: Llama4 (Top1 -> Sigmoid)
             - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
+            - 5: TopK only (no softmax)
+            - 6: SigmoidRenormalize: Sigmoid -> TopK -> Renormalize
         do_finalize (bool): Whether to finalize the output (default: False)
         gated_act_type (int): Type of gated activation function (default: 0)
             - 0: SwiGlu

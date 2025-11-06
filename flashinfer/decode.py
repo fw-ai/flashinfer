@@ -2479,6 +2479,8 @@ def xqa_batch_decode_with_kv_cache(
 
     return out
 
+    return out
+
 
 def _check_trtllm_gen_mla_shape(
     query,

@@ -75,6 +75,8 @@ inline std::string serializeMoeRoutingMethodType(RoutingMethodType routingMethod
       return "RenormalizeNaive";
     case RoutingMethodType::TopK:
       return "TopK";
+    case RoutingMethodType::SigmoidRenormalize:
+      return "SigmoidRenormalize";
     default:
       return "InvalidRountingMethod";  // TODO throw error
   };

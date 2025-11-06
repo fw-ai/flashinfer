@@ -772,7 +772,9 @@ class Fp8BlockScaleLauncher : public FusedMoeLauncher {
     } else if (static_cast<RoutingMethodType>(routing_method_type) ==
                    RoutingMethodType::Renormalize ||
                static_cast<RoutingMethodType>(routing_method_type) ==
-                   RoutingMethodType::RenormalizeNaive) {
+                   RoutingMethodType::RenormalizeNaive ||
+               static_cast<RoutingMethodType>(routing_method_type) ==
+                   RoutingMethodType::SigmoidRenormalize) {
       TVM_FFI_ICHECK(args->top_k <= 10 && args->top_k > 0)
           << "Current routing kernel (no groups, renormalize) only supports top_k<=10 && top_k>0.";
     } else if (static_cast<RoutingMethodType>(routing_method_type) == RoutingMethodType::Llama4) {
