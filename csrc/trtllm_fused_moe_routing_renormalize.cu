@@ -441,7 +441,9 @@ void run(Data const& data, void* stream) {
   TVM_FFI_ICHECK_LE(data.mPaddingLog2, 8)
       << "Routing kernel expects padding log2 < 8, got " << data.mPaddingLog2;
 
-  bool const useSiEgleBlock = data.mNumTokens <= BlockKernelMaxNumTokens;
+  // FIXME: routingIndicesBlockKernel breaks the vllm + gpt-oss DeepEP
+  // bool const useSingleBlock = data.mNumTokens <= BlockKernelMaxNumTokens;
+  bool const useSingleBlock = false;
 
   bool const useSingleCluster =
       data.mNumTokens <= ((data.mPtrScores != nullptr || data.mPtrTopKIds != nullptr)
