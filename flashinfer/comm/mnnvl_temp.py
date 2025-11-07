@@ -40,6 +40,7 @@ from typing import List
 
 import torch
 
+from ..jit import gen_comm_alltoall_module
 
 class CpType(IntEnum):
     # CP type for ulysses parallelism
