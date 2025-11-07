@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# 
-# Code imported from TensorRT-LLM - its a newer version of mnnvl.py
-# Avoids updating mnnvl.py to avoid merge conflicts
-# We can delete this file once the new changes from trtllm are upstreamed.
+"""
+Code imported from TensorRT-LLM
+its a newer version of mnnvl.py that's faster and supports nvfp4
+Avoids updating mnnvl.py to avoid merge conflicts
+We can delete this file once the new changes from trtllm are upstreamed.
+"""
 import ctypes
 import os
 import platform
