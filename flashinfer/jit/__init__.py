@@ -73,6 +73,7 @@ from .core import current_compilation_context as current_compilation_context
 from .cubin_loader import setup_cubin_loader
 from .comm import gen_comm_alltoall_module as gen_comm_alltoall_module
 from .comm import gen_trtllm_mnnvl_comm_module as gen_trtllm_mnnvl_comm_module
+from .comm_temp import gen_comm_alltoall_temp_module as gen_comm_alltoall_temp_module
 from .comm import gen_trtllm_comm_module as gen_trtllm_comm_module
 from .comm import gen_vllm_comm_module as gen_vllm_comm_module
 from .comm import gen_nvshmem_module as gen_nvshmem_module

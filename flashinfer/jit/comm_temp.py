@@ -19,7 +19,7 @@ from . import env as jit_env
 import shlex
 import os
 
-def gen_comm_alltoall_module() -> JitSpec:
+def gen_comm_alltoall_temp_module() -> JitSpec:
     return gen_jit_spec(
         "comm_temp",
         [
