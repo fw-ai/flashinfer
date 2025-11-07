@@ -78,7 +78,7 @@ class DtypeUtils {
   DtypeUtils() = default;
 };
 
-class FusedMoeRunner : public tvm::ffi::ModuleObj {
+class FusedMoeRunnerFiFiFi : public tvm::ffi::ModuleObj {
  public:
   template <typename TypeAct, typename TypeWeight, bool NeedQuant = false>
   std::unique_ptr<kernels::CutlassMoeFCRunnerInterface> switch_output_type(DLDataType output_type) {
@@ -113,7 +113,7 @@ class FusedMoeRunner : public tvm::ffi::ModuleObj {
     }
   };
 
-  FusedMoeRunner(DLDataType activation_dtype, DLDataType weight_dtype, DLDataType output_dtype,
+  FusedMoeRunnerFiFiFi(DLDataType activation_dtype, DLDataType weight_dtype, DLDataType output_dtype,
                  bool use_deepseek_fp8_block_scale, bool use_w4_group_scaling,
                  bool use_mxfp8_act_scaling) {
     mActivationDtype = activation_dtype;
@@ -1089,7 +1089,7 @@ class FusedMoeRunner : public tvm::ffi::ModuleObj {
 tvm::ffi::Module init(DLDataType activation_dtype, DLDataType weight_dtype, DLDataType output_dtype,
                       bool use_deepseek_fp8_block_scale, bool use_w4_group_scaling,
                       bool use_mxfp8_act_scaling) {
-  auto ptr = tvm::ffi::make_object<FusedMoeRunner>(activation_dtype, weight_dtype, output_dtype,
+  auto ptr = tvm::ffi::make_object<FusedMoeRunnerFiFiFi>(activation_dtype, weight_dtype, output_dtype,
                                                    use_deepseek_fp8_block_scale,
                                                    use_w4_group_scaling, use_mxfp8_act_scaling);
   return tvm::ffi::Module(ptr);
