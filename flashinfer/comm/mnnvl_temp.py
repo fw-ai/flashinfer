@@ -18,6 +18,7 @@ its a newer version of mnnvl.py that's faster and supports nvfp4
 Avoids updating mnnvl.py to avoid merge conflicts
 We can delete this file once the new changes from trtllm are upstreamed.
 """
+from abc import ABC, abstractmethod
 import ctypes
 import os
 import platform
@@ -748,6 +749,21 @@ def _check_cu_result(cu_func_ret):
             raise RuntimeError(cu_func_ret)
         return None
 
+class CommBackend(ABC):
+    """Abstract communication backend interface"""
+
+    @abstractmethod
+    def Get_rank(self) -> int: ...
+
+    @abstractmethod
+    def Get_size(self) -> int: ...
+
+    @abstractmethod
+    def allgather(self, data: int) -> List[int]: ...
+
+    @abstractmethod
+    def Split(self, color: int, key: int) -> "CommBackend": ...
+
 class MnnvlMemory:
     initialized: bool = False
 
@@ -786,7 +802,7 @@ class MnnvlMemory:
         )
 
     @staticmethod
-    def initialize():
+    def initialize(comm_backend: CommBackend):
         if not MnnvlMemory.initialized:
             # use a dummy torch CUDA tensor to trigger CUDA context initialization
             _ = torch.empty(1, device="cuda")
@@ -796,15 +812,13 @@ class MnnvlMemory:
             except pynvml.NVMLError_Uninitialized:
                 pynvml.nvmlInit()
             MnnvlMemory.initialized = True
+            MnnvlMemory.comm_backend = comm_backend
 
     @staticmethod
     def get_comm(mapping: Mapping):
         if MnnvlMemory.comm is not None:
             return MnnvlMemory.comm
-        pg = None
-        if firedist.is_initialized():
-            pg = firedist.get_moe_process_group() or firedist.get_process_group()
-        comm = TorchCommBackendAdapter(group=pg).Split(
+        comm = MnnvlMemory.comm_backend.Split(
             mapping.pp_rank * mapping.cp_size + mapping.cp_rank, mapping.tp_rank
         )
         MnnvlMemory.comm = comm
