@@ -40,7 +40,7 @@ from typing import List
 
 import torch
 
-from ..jit import gen_comm_alltoall_module
+from ..jit import gen_comm_alltoall_temp_module
 
 class CpType(IntEnum):
     # CP type for ulysses parallelism
@@ -1076,12 +1076,12 @@ class MnnvlMoe:
             return MnnvlMoe.moe_workspace_tensor
 
         MnnvlMoe.moe_mapping = mapping
-        workspace_size_per_rank = torch.ops.fireworks.get_moe_commworkspace_size_per_rank(
+        workspace_size_per_rank = gen_comm_alltoall_temp_module().get_moe_commworkspace_size_per_rank(
             mapping.tp_size
         )
         MnnvlMoe.moe_workspace = MnnvlMemory(mapping, workspace_size_per_rank)
         MnnvlMoe.moe_workspace_tensor = MnnvlMoe.moe_workspace.as_torch_strided_tensor(torch.uint64)
-        torch.ops.fireworks.moe_initialize_workspace(
+        gen_comm_alltoall_temp_module().moe_initialize_workspace(
             MnnvlMoe.moe_workspace_tensor, mapping.tp_rank, mapping.tp_size
         )
         torch.cuda.synchronize()
@@ -1093,7 +1093,7 @@ class MnnvlMoe:
         if MnnvlMoe.moe_prepare_workspace_tensor is not None:
             assert mapping == MnnvlMoe.moe_mapping, "only one moe mapping supported now"
             return MnnvlMoe.moe_prepare_workspace_tensor
-        workspace_size_per_rank = torch.ops.fireworks.get_moe_prepare_workspace_size_per_rank(
+        workspace_size_per_rank = gen_comm_alltoall_temp_module().get_moe_prepare_workspace_size_per_rank(
             mapping.tp_size
         )
         MnnvlMoe.moe_prepare_workspace = MnnvlMemory(mapping, workspace_size_per_rank)
@@ -1130,7 +1130,7 @@ class MnnvlMoe:
             local_recv_rank_indices,
             backward_local_recv_rank_indices,
             gathered_expert_statics,
-        ) = torch.ops.fireworks.mnnvl_moe_alltoallv_prepare_without_allgather(
+        ) = gen_comm_alltoall_temp_module().mnnvl_moe_alltoallv_prepare_without_allgather(
             expert_ids,
             expert_statics,
             workspace,
@@ -1194,7 +1194,7 @@ class MnnvlMoe:
             recv_rank_count_cumsum,
             recv_rank_local_indices,
             backward_recv_rank_local_indices,
-        ) = torch.ops.fireworks.moe_comm_prepare_indices(
+        ) = gen_comm_alltoall_temp_module().moe_comm_prepare_indices(
             gathered_target_rank_ids,
             real_rank_token_count_cumsum,
             max_token_count_per_rank,
@@ -1219,7 +1219,7 @@ class MnnvlMoe:
                 device=torch.device("cuda"),
             )
 
-        torch.ops.fireworks.moe_local_gather(
+        gen_comm_alltoall_temp_module().moe_local_gather(
             recv_rank_count_cumsum,
             local_gather_indices,
             gathered_expert_ids,
@@ -1280,7 +1280,7 @@ class MnnvlMoe:
                     )
 
             # Process only valid tensors
-            output_tensors = torch.ops.trtllm.moe_comm(
+            output_tensors = gen_comm_alltoall_temp_module().moe_comm(
                 valid_tensors,
                 alltoall_info.send_rank_count_cumsum,
                 alltoall_info.send_rank_local_indices,
@@ -1321,7 +1321,7 @@ class MnnvlMoe:
         do_reduce: bool = True,
     ):
         assert x.dim() == 2, "2D tensor supported, please reshape."
-        output_tensors = torch.ops.fireworks.moe_comm(
+        output_tensors = gen_comm_alltoall_temp_module().moe_comm(
             [x],
             alltoall_info.recv_rank_count_cumsum,
             alltoall_info.recv_rank_local_indices,
