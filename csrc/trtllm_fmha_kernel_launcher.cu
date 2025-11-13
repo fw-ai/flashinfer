@@ -373,7 +373,7 @@ void trtllm_paged_attention_context(
     kv_stride_heads *= 2;
     kv_stride_batch *= 2;
   }
-  
+
   const auto stream = get_stream(query.device());
   void* output_sf_ptr =
       out_scale_factor.has_value() ? out_scale_factor.value().data_ptr() : nullptr;

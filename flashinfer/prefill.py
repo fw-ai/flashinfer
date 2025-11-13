@@ -3519,11 +3519,12 @@ def trtllm_batch_context_with_kv_cache(
     else:
         raise ValueError(f"Invalid out_dtype: {out_dtype}")
 
-    if isinstance(bmm1_scale, torch.Tensor):
-        assert bmm1_scale.dtype == torch.float32
-        bmm1_scale = bmm1_scale * log2e
-    if isinstance(bmm2_scale, torch.Tensor):
-        assert bmm2_scale.dtype == torch.float32
+    bmm1_scale = (
+        bmm1_scale.item() if isinstance(bmm1_scale, torch.Tensor) else bmm1_scale
+    )
+    bmm2_scale = (
+        bmm2_scale.item() if isinstance(bmm2_scale, torch.Tensor) else bmm2_scale
+    )
 
     k_cache_scale = None
     v_cache_scale = None
