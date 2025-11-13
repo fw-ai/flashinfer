@@ -2079,6 +2079,7 @@ def trtllm_batch_decode_with_kv_cache(
     backend: str = "auto",
     q_len_per_req: Optional[int] = 1,
     o_scale: Optional[float] = 1.0,
+    kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
@@ -2300,6 +2301,11 @@ def trtllm_batch_decode_with_kv_cache(
         if isinstance(bmm2_scale, torch.Tensor):
             assert bmm2_scale.dtype == torch.float32
 
+        k_cache_scale = None
+        v_cache_scale = None
+        if kv_cache_scales is not None:
+            k_cache_scale, v_cache_scale = kv_cache_scales
+
         run_func(
             out,
             out_scale_factor,
@@ -2325,6 +2331,8 @@ def trtllm_batch_decode_with_kv_cache(
             enable_pdl,
             workspace_buffer.numel() * workspace_buffer.element_size(),
             sinks,
+            k_cache_scale,
+            v_cache_scale,
         )
 
         return (
