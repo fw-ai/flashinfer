@@ -146,24 +146,26 @@ def bench_trtllm_gen_fused_moe_autotuner_fp8(
     )
 
     if is_block_scale:
-        assert activation_type == ActivationType.Swiglu.value, (
-            "Only Swiglu activation is supported for FP8 block scale MoE."
-        )
-        fn = partial(
-            trtllm_fp8_block_scale_moe,
-            routing_logits=routing_logits,
-            routing_bias=routing_bias,
-            num_experts=num_experts,
-            top_k=top_k,
-            n_group=8,
-            topk_group=4,
-            intermediate_size=intermediate_size,
-            local_expert_offset=0,
-            local_num_experts=num_experts,
-            routed_scaling_factor=2.5,
-            routing_method_type=RoutingMethodType.DeepSeekV3.value,
-            use_shuffled_weight=quant_mode == "MxFP8xMxFP8",
-            weight_layout=WeightLayout.MajorK.value,
+        fn = lambda: trtllm_fp8_block_scale_moe(
+            routing_logits,
+            routing_bias,
+            hidden_states,
+            hidden_states_scale,
+            w13,
+            w13_scale,
+            w2,
+            w2_scale,
+            num_experts,
+            top_k,
+            8,  # n_group
+            4,  # topk_group
+            intermediate_size,
+            0,  # local_expert_offset
+            num_experts,
+            2.5,  # routed_scaling_factor
+            RoutingMethodType.DeepSeekV3.value,
+            True,  # use_shuffled_weight
+            WeightLayout.BlockMajorK.value,  # weight_layout
             enable_pdl=enable_pdl,
             tune_max_num_tokens=num_tokens
             if tune_max_num_tokens is None
@@ -173,28 +175,27 @@ def bench_trtllm_gen_fused_moe_autotuner_fp8(
             else Fp8QuantizationType.MxFp8,
         )
     else:
-        fn = partial(
-            trtllm_fp8_per_tensor_scale_moe,
-            routing_logits=routing_logits.to(torch.bfloat16),
-            routing_bias=None,
-            output1_scales_scalar=output1_scale_scalar,
-            output1_scales_gate_scalar=output1_scales_gate_scalar,
-            output2_scales_scalar=output2_scale_scalar,
-            num_experts=num_experts,
-            top_k=top_k,
-            n_group=None,
-            topk_group=None,
-            intermediate_size=intermediate_size,
-            local_expert_offset=0,
-            local_num_experts=num_experts,
-            routed_scaling_factor=1.0,
-            use_routing_scales_on_input=False,
-            routing_method_type=RoutingMethodType.TopK.value,
-            enable_pdl=enable_pdl,
-            tune_max_num_tokens=num_tokens
-            if tune_max_num_tokens is None
-            else tune_max_num_tokens,
-            activation_type=activation_type,
+        fn = lambda: trtllm_fp8_per_tensor_scale_moe(
+            routing_logits,
+            None,  # routing_bias
+            hidden_states,
+            w13,
+            output1_scale_scalar,
+            output1_scales_gate_scalar,
+            w2,
+            output2_scale_scalar,
+            num_experts,
+            top_k,
+            None,  # n_group
+            None,  # topk_group
+            intermediate_size,
+            0,  # local_expert_offset
+            num_experts,
+            1.0,  # routed_scaling_factor
+            False,  # use_routing_scales_on_input
+            RoutingMethodType.TopK.value,
+            enable_pdl,
+            num_tokens if tune_max_num_tokens is None else tune_max_num_tokens,
         )
     input_kwargs = {
         "hidden_states": hidden_states,
@@ -328,32 +329,37 @@ def bench_trtllm_gen_fused_moe_autotuner_fp4(
     output2_scale_scalar = torch.tensor(
         [hidden_states_global_scale * w2_global_scale] * num_experts, device=device
     )
-    fn = partial(
-        trtllm_fp4_block_scale_moe,
-        routing_logits=routing_logits,
-        routing_bias=None,
-        gemm1_alpha=None,
-        gemm1_beta=None,
-        gemm1_clamp_limit=None,
-        output1_scale_scalar=output1_scale_scalar,
-        output1_scale_gate_scalar=output1_scale_gate_scalar,
-        output2_scale_scalar=output2_scale_scalar,
-        num_experts=num_experts,
-        top_k=top_k,
-        n_group=None,
-        topk_group=None,
-        intermediate_size=intermediate_size,
-        local_expert_offset=0,
-        local_num_experts=num_experts,
-        routed_scaling_factor=None,
-        routing_method_type=RoutingMethodType.Renormalize.value,
-        do_finalize=True,
-        enable_pdl=enable_pdl,
-        activation_type=activation_type,
-        output=None,
-        tune_max_num_tokens=num_tokens
-        if tune_max_num_tokens is None
-        else tune_max_num_tokens,
+    fn = lambda: trtllm_fp4_block_scale_moe(
+        routing_logits,
+        None,  # routing_bias
+        hidden_states,
+        hidden_states_scale,
+        w13,
+        w13_scale,
+        bias13,
+        None,  # gemm1_alpha
+        None,  # gemm1_beta
+        None,  # gemm1_clamp_limit
+        w2,
+        w2_scale,
+        bias2,
+        output1_scale_scalar,
+        output1_scale_gate_scalar,
+        output2_scale_scalar,
+        num_experts,
+        top_k,
+        None,  # n_group
+        None,  # topk_group
+        intermediate_size,
+        0,  # local_expert_offset
+        num_experts,
+        None,  # routed_scaling_factor
+        RoutingMethodType.Renormalize.value,
+        True,
+        enable_pdl,
+        GatedActType.SwiGlu.value,  # gated_act_type
+        None,
+        num_tokens if tune_max_num_tokens is None else tune_max_num_tokens,
     )
 
     input_kwargs = {

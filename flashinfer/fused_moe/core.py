@@ -2363,7 +2363,7 @@ def trtllm_fp8_per_tensor_scale_moe(
         when do_finalize=True, returns the final MoE output.
         otherwise, returns the intermediate results (gemm2_output, expert_weights, expanded_idx_to_permuted_idx) that need further processing.
     """
-    result = get_trtllm_moe_sm100_module().trtllm_fp8_per_tensor_scale_moe(
+    return get_trtllm_moe_sm100_module().trtllm_fp8_per_tensor_scale_moe(
         routing_logits,
         routing_bias,
         hidden_states,

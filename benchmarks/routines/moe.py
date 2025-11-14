@@ -1286,16 +1286,7 @@ def testTrtllmFp8BlockScaleMoe(args):
         print(f"[VVERBOSE] gemm1_weights_fp8.shape = {gemm1_weights_fp8.shape}")
         print(f"[VVERBOSE] gemm2_weights_fp8.shape = {gemm2_weights_fp8.shape}")
 
-    def run_fp8_block_moe(
-        routing_logits,
-        routing_bias,
-        hidden_states,
-        hidden_states_scale,
-        kernel_gemm1_weights,
-        gemm1_weights_scale,
-        kernel_gemm2_weights,
-        gemm2_weights_scale,
-    ):
+    def run_fp8_block_moe():
         # Quantize hidden states to FP8 for block scale MOE
         hidden_states_fp8 = hidden_states.to(torch.float8_e4m3fn)
         # Note: FP8 block scale MOE expects int64_t for n_group/topk_group, not Optional[int64_t]
