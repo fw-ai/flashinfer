@@ -499,10 +499,7 @@ def trtllm_mnnvl_fused_allreduce_add_rmsnorm(
     "get_allreduce_mnnvl_workspace is deprecated, use MNNVLAllReduceFusionWorkspace class to manage the workspace instead"
 )
 def get_allreduce_mnnvl_workspace(
-    mapping: Mapping,
-    dtype: torch.dtype,
-    comm_backend_for_handle_transfer: Optional[CommBackend] = None,
-    buffer_size_in_bytes: Optional[int] = None,
+    mapping: Mapping, dtype: torch.dtype, buffer_size_in_bytes: Optional[int] = None
 ) -> Tuple[McastGPUBuffer, torch.Tensor, int]:
     """Get workspace buffers needed for multi-node NVLink all-reduce operation.
 
@@ -601,16 +598,11 @@ def trtllm_mnnvl_all_reduce(
             f"The input tensor must be 2D, got {len(inp.shape)}D. The shape is {inp.shape}."
         )
 
-    # buffer_M is no longer used in this kernel but let's keep this check for consistency in behavior.
     if inp.shape[0] > buffer_M:
         raise ValueError(
             f"The number of tokens in the input tensor {inp.shape[0]} is greater than the buffer_M {buffer_M}. This is not supported. Please increase the workspace size, or decrease the amount of tokens to at most {buffer_M}."
         )
 
-    # Even in legacy code, this should only be used when we implement the fused allreduce+rmsnorm.
-    assert wait_for_results and (out is not None), (
-        "Calling the legacy trtllm_mnnvl_all_reduce with wait_for_results=False is not supported. Please use trtllm_mnnvl_allreduce instead."
-    )
     module = get_trtllm_mnnvl_comm_module()
     module.trtllm_mnnvl_allreduce_fusion(
         inp,

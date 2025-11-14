@@ -238,55 +238,13 @@ def row_linear_residual_norm_fusion_forward_legacy(
 """Helper function to run the core MNNVL AllReduce test logic"""
 
 
-def prepare_test_data(seq_len: int, hidden_size: int, dtype: torch.dtype, fusion: bool):
-    # Use torch.distributed for communication between ranks
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-
-    if rank == 0:
-        x_full = torch.randn((world_size, seq_len, hidden_size), dtype=dtype)
-        residual = torch.randn((seq_len, hidden_size), dtype=dtype)
-        norm_weight = torch.randn((hidden_size,), dtype=dtype)
-    else:
-        x_full = None
-        residual = None
-        norm_weight = None
-
-    # Use torch.distributed broadcast_object_list for Python object broadcasting
-    data_list = [x_full, residual, norm_weight]
-    dist.broadcast_object_list(data_list, src=0)
-    x_full, residual, norm_weight = data_list
-
-    x_full = x_full.cuda()
-    residual = residual.cuda()
-    norm_weight = norm_weight.cuda()
-
-    x_local = x_full[rank, :, :]
-    reference_output: Tuple[torch.Tensor, ...] = None
-    if fusion:
-        # Fused case: AllReduce + Residual Add + RMS Norm
-        allreduce_result = torch.sum(x_full, dim=0)  # AllReduce result
-        residual_out = allreduce_result + residual  # Add residual
-        norm_out = rmsnorm(
-            residual_out, norm_weight, torch.finfo(dtype).eps, enable_pdl=False
-        )
-
-        reference_output = (norm_out, residual_out)
-    else:
-        # Non-fused case: Only AllReduce
-        allreduce_result = torch.sum(x_full, dim=0)  # AllReduce result
-        reference_output = (allreduce_result,)
-    return (x_local, residual, norm_weight), reference_output
-
-
 def run_mnnvl_ar_full(
     monkeypatch,
     seq_lens: list[int],
     fusion: bool,
     dtype: torch.dtype,
     hidden_size: int,
-    legacy_explicit_workspace_bytes: Optional[int] = None,
-    legacy_api: bool = False,
+    explicit_workspace_bytes: int | None = None,
 ):
     """Core test logic for MNNVL AllReduce operations.
 
@@ -298,6 +256,7 @@ def run_mnnvl_ar_full(
         hidden_size: Hidden dimension size
         explicit_workspace_bytes: If provided, use this workspace size instead of default
     """
+    monkeypatch.setenv("TRTLLM_FORCE_MNNVL_AR", "1")  # force multi-node allreduce.
 
     gpus_per_node = torch.cuda.device_count()
 
@@ -342,15 +301,14 @@ def run_mnnvl_ar_full(
     failure_message = ""
 
     try:
-        if legacy_api:
-            mcast_buffer_mnnvl, buffer_flags_mnnvl, max_num_elements_mnnvl = (
-                trtllm_mnnvl_ar.get_allreduce_mnnvl_workspace(
-                    mapping,
-                    dtype,
-                    comm_backend_for_handle_transfer=comm_backend,
-                    buffer_size_in_bytes=legacy_explicit_workspace_bytes,
-                )
+        # Get workspace buffers using MPI rank - allocate once per seq_lens list and reuse within the list
+        # This workspace is sized for the maximum expected sequence length and can be reused within each list
+        # Each parameterized list gets its own fresh workspace allocation
+        mcast_buffer_mnnvl, buffer_flags_mnnvl, max_num_elements_mnnvl = (
+            trtllm_mnnvl_ar.get_allreduce_mnnvl_workspace(
+                mapping, dtype, buffer_size_in_bytes=explicit_workspace_bytes
             )
+        )
 
             multicast_ptr = mcast_buffer_mnnvl.get_multicast_ptr()
             buffer_ptrs_dev = mcast_buffer_mnnvl.get_buffer_ptrs_dev()
@@ -422,16 +380,18 @@ def run_mnnvl_ar_full(
         rank_failed = True
         failure_message = f"FAILED[rank={rank}]: seq_lens={seq_lens}, fusion={fusion}, dtype={dtype} failed: {e}"
         print(failure_message)
-        print(traceback.format_exc())
 
-        # Gather failure status from all ranks using torch.distributed
-        all_failures = [None] * world_size
-        dist.all_gather_object(all_failures, rank_failed)
+        # Gather failure status from all ranks for logging
+        all_failures = MPI.COMM_WORLD.allgather(rank_failed)
 
         if any(all_failures):
             failed_ranks = [i for i, failed in enumerate(all_failures) if failed]
             if rank == 0:
                 print(f"Test failed on ranks: {failed_ranks}")
+
+        # Cleanup before re-raising
+        if "mcast_buffer_mnnvl" in locals():
+            del mcast_buffer_mnnvl
 
         # Re-raise the original exception so it can be caught by pytest.raises in negative tests
         raise
@@ -443,40 +403,88 @@ def run_mnnvl_ar_full(
         if "mcast_buffer_mnnvl" in locals():
             del mcast_buffer_mnnvl
 
-    # Final synchronization using torch.distributed barrier
-    dist.barrier()
+    # Final synchronization and check for failures across all ranks
+    trtllm_mnnvl_ar.mpi_barrier()
 
 
 """Test with default workspace size"""
 
-# Multi-gpu test: mpirun -np 4 pytest tests/comm/test_trtllm_mnnvl_allreduce.py -vv -s
-# Multi-node test:srun -A coreai_libraries_cudnn -N4 --container-image=<flashinfer_image> -J --mpi=pmix -- bash -c 'hostname && cd <path_to_flashinfer> && pip install -e . && python -m pytest tests/comm/test_trtllm_mnnvl_allreduce.py'
+
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [1],
+        [4],
+        [15],
+        [27, 11, 24],
+        [127],
+    ],
+)
+@pytest.mark.parametrize("fusion", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("hidden_size", [2048, 4096, 5120, 7168, 8192])
+def test_mnnvl_allreduce_default_workspace(
+    monkeypatch, seq_lens: list[int], fusion: bool, dtype: torch.dtype, hidden_size: int
+):
+    """Test MNNVL AllReduce with default workspace size."""
+    run_mnnvl_ar_full(monkeypatch, seq_lens, fusion, dtype, hidden_size)
+
+
+"""Test with explicit workspace size"""
 
 
 @pytest.mark.parametrize(
     "seq_lens",
-    [[1], [4], [15], [27, 11, 24, 256], [127], [998, 2048]],
+    [
+        [1, 4, 180],
+    ],
 )
 @pytest.mark.parametrize("fusion", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("hidden_size", [2880, 5120, 7168, 8192, 16384])
-def test_mnnvl_allreduce_refactored(
+@pytest.mark.parametrize("hidden_size", [2048, 4096, 5120, 7168, 8192])
+def test_mnnvl_allreduce_explicit_workspace(
     monkeypatch, seq_lens: list[int], fusion: bool, dtype: torch.dtype, hidden_size: int
 ):
-    """Test MNNVL AllReduce with refactored API."""
+    """Test MNNVL AllReduce with explicitly calculated workspace size."""
+    # Calculate workspace to fit the maximum sequence length
+    # buffer shape: [3, 2, buffer_tokens, hidden_dim]
+    explicit_workspace_bytes = 3 * 2 * dtype.itemsize * hidden_size * max(seq_lens)
     run_mnnvl_ar_full(
-        monkeypatch, seq_lens, fusion, dtype, hidden_size, legacy_api=False
+        monkeypatch,
+        seq_lens,
+        fusion,
+        dtype,
+        hidden_size,
+        explicit_workspace_bytes=explicit_workspace_bytes,
     )
 
 
-@pytest.mark.parametrize("seq_lens", [[1], [4], [15], [27, 11, 24], [127]])
+"""Negative test: workspace too small"""
+
+
 @pytest.mark.parametrize("fusion", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("hidden_size", [2048, 4096, 5120, 7168, 8192, 16384])
-def test_mnnvl_allreduce_legacy(
-    monkeypatch, seq_lens: list[int], fusion: bool, dtype: torch.dtype, hidden_size: int
+@pytest.mark.parametrize("hidden_size", [2048, 4096])
+def test_mnnvl_allreduce_workspace_too_small(
+    monkeypatch, fusion: bool, dtype: torch.dtype, hidden_size: int
 ):
-    """Test MNNVL AllReduce with legacy API."""
-    run_mnnvl_ar_full(
-        monkeypatch, seq_lens, fusion, dtype, hidden_size, legacy_api=True
-    )
+    """Test that MNNVL AllReduce fails gracefully when workspace is too small."""
+    # Use a large sequence length that won't fit in a small workspace
+    seq_len = 180
+
+    # Create a workspace that's too small (only enough for 10 tokens)
+    small_workspace_bytes = 3 * 2 * dtype.itemsize * hidden_size * 10
+
+    # Expect a ValueError with a message about buffer_M being too small
+    with pytest.raises((ValueError, RuntimeError)) as exc_info:
+        run_mnnvl_ar_full(
+            monkeypatch,
+            [seq_len],
+            fusion,
+            dtype,
+            hidden_size,
+            explicit_workspace_bytes=small_workspace_bytes,
+        )
+
+    # Verify the error message contains the expected text
+    assert "greater than the buffer_M" in str(exc_info.value)
