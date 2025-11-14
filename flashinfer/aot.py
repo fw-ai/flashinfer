@@ -34,6 +34,44 @@ from .compilation_context import CompilationContext
 from .jit import JitSpec, build_jit_specs
 from .jit import env as jit_env
 from .jit.activation import act_func_def_str, gen_act_and_mul_module
+from .jit.cascade import gen_cascade_module
+from .jit.fp4_quantization import (
+    gen_fp4_quantization_sm90_module,
+    gen_fp4_quantization_sm100_module,
+    gen_fp4_quantization_sm103_module,
+    gen_fp4_quantization_sm110_module,
+    gen_fp4_quantization_sm120_module,
+    gen_fp4_quantization_sm121_module,
+)
+from .jit.fp8_quantization import gen_mxfp8_quantization_sm100_module
+from .jit.fused_moe import (
+    gen_cutlass_fused_moe_sm120_module,
+    gen_cutlass_fused_moe_sm103_module,
+    gen_cutlass_fused_moe_sm100_module,
+    gen_cutlass_fused_moe_sm90_module,
+    gen_trtllm_gen_fused_moe_sm100_module,
+)
+from .jit.gemm import (
+    gen_gemm_module,
+    gen_gemm_sm90_module,
+    gen_gemm_sm100_module,
+    gen_gemm_sm100_module_cutlass_fp4,
+    gen_gemm_sm100_module_cutlass_fp8,
+    gen_tgv_gemm_sm10x_module,
+    gen_gemm_sm120_module,
+    gen_gemm_sm120_module_cutlass_fp4,
+    gen_trtllm_gen_gemm_module,
+    gen_trtllm_low_latency_gemm_module,
+)
+from .jit.spdlog import gen_spdlog_module
+from .jit.mla import gen_mla_module
+from .jit.norm import gen_norm_module
+from .jit.page import gen_page_module
+from .jit.quantization import gen_quantization_module
+from .jit.rope import gen_rope_module
+from .jit.sampling import gen_sampling_module
+from .jit.tllm_utils import gen_trtllm_utils_module
+from .jit.xqa import gen_xqa_module, gen_xqa_module_mla
 from .jit.attention import (
     gen_batch_attention_module,
     gen_batch_decode_module,
