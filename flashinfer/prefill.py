@@ -3873,7 +3873,3 @@ def fmha_v2_prefill_deepseek(
         is_e4m3,
         is_bf16_output,
     )
-    if return_lse:
-        return out, lse
-    else:
-        return out
