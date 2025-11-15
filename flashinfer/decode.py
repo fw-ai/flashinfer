@@ -1920,6 +1920,9 @@ class TrtllmGenDecodeModule:
             enable_pdl,
             workspace_size,
             sinks,
+            None,
+            None,
+            None,
         )
         return out
 
@@ -2080,6 +2083,8 @@ def trtllm_batch_decode_with_kv_cache(
     q_len_per_req: Optional[int] = 1,
     o_scale: Optional[float] = 1.0,
     kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
@@ -2306,6 +2311,14 @@ def trtllm_batch_decode_with_kv_cache(
         if kv_cache_scales is not None:
             k_cache_scale, v_cache_scale = kv_cache_scales
 
+        if return_lse and lse is None:
+            lse = torch.empty(
+                query.shape[0],
+                query.shape[1],
+                device=query.device,
+                dtype=torch.float32,
+            )
+
         run_func(
             out,
             out_scale_factor,
@@ -2333,13 +2346,18 @@ def trtllm_batch_decode_with_kv_cache(
             sinks,
             k_cache_scale,
             v_cache_scale,
+            lse
         )
 
-        return (
+        out = (
             out
             if out_dtype != "nvfp4"
             else FP4Tensor(out, out_scale_factor, o_sf_start_index, query.shape)
         )
+        if return_lse:
+            return out, lse
+        else:
+            return out
     else:
         raise KeyError(f"Backend {backend} not supported")
 
@@ -2550,6 +2568,8 @@ def trtllm_batch_decode_with_kv_cache_mla(
     bmm1_scale: Union[float, torch.Tensor] = 1.0,
     bmm2_scale: Union[float, torch.Tensor] = 1.0,
     sinks: Optional[List[torch.Tensor]] = None,
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
     enable_pdl: bool = None,
     backend: str = "auto",
 ) -> torch.Tensor:
@@ -2661,10 +2681,10 @@ def trtllm_batch_decode_with_kv_cache_mla(
             out_shape = query.shape[:-1] + (kv_lora_rank,)
             out = torch.empty(out_shape, dtype=torch.bfloat16, device=query.device)
         else:
-            batch_size, _, num_q_heads, _ = query.shape
+            batch_size, q_len_per_request, num_q_heads, _ = query.shape
             check_shape_dtype_device(
                 out,
-                [batch_size, num_q_heads, kv_lora_rank],
+                [batch_size, q_len_per_request, num_q_heads, kv_lora_rank],
                 torch.bfloat16,
                 query.device,
                 "out",
@@ -2675,6 +2695,15 @@ def trtllm_batch_decode_with_kv_cache_mla(
             bmm1_scale = bmm1_scale * log2e
         if isinstance(bmm2_scale, torch.Tensor):
             assert bmm2_scale.dtype == torch.float32
+
+        if return_lse and lse is None:
+            lse = torch.empty(
+                query.shape[0],
+                query.shape[1],
+                query.shape[2],
+                device=query.device,
+                dtype=torch.float32,
+            )
 
         run_func(
             out,
@@ -2696,9 +2725,15 @@ def trtllm_batch_decode_with_kv_cache_mla(
             enable_pdl,
             workspace_buffer.numel() * workspace_buffer.element_size(),
             sinks,
+            None,
+            None,
+            lse,
         )
 
-        return out
+        if return_lse:
+            return out, lse
+        else:
+            return out
     else:
         raise ValueError(f"Backend {backend} not supported")
 
