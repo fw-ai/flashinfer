@@ -508,6 +508,8 @@ def trtllm_batch_decode_with_kv_cache_mla(
     bmm1_scale: Union[float, torch.Tensor] = 1.0,
     bmm2_scale: Union[float, torch.Tensor] = 1.0,
     sinks: Optional[List[torch.Tensor]] = None,
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
     enable_pdl: bool = None,
     backend: str = "auto",
 ) -> torch.Tensor:
@@ -630,6 +632,15 @@ def trtllm_batch_decode_with_kv_cache_mla(
         max_q_len = query.size(1)
         query = query.flatten(0, 1)  # [B*S, H, D]
 
+        if return_lse and lse is None:
+            lse = torch.empty(
+                query.shape[0],
+                query.shape[1],
+                query.shape[2],
+                device=query.device,
+                dtype=torch.float32,
+            )
+
         run_func(
             out,
             None,  # fp4 output not supported in wrapper api yet.
@@ -656,9 +667,13 @@ def trtllm_batch_decode_with_kv_cache_mla(
             None,  # cum_seq_lens_q
             None,  # k_cache_scale
             None,  # v_cache_scale
+            lse,
         )
 
-        return out
+        if return_lse:
+            return out, lse
+        else:
+            return out
     else:
         raise ValueError(f"Backend {backend} not supported")
 
