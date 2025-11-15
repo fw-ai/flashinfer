@@ -1861,6 +1861,7 @@ class TrtllmGenDecodeModule:
             None,  # cum_seq_lens_q
             None,  # k_cache_scale
             None,  # v_cache_scale
+            None,  # lse
         )
         return out
 
@@ -2025,6 +2026,8 @@ def trtllm_batch_decode_with_kv_cache(
     max_q_len: Optional[int] = None,
     cum_seq_lens_q: Optional[torch.Tensor] = None,
     kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
@@ -2254,6 +2257,14 @@ def trtllm_batch_decode_with_kv_cache(
             assert max_q_len is not None
             batch_size = cum_seq_lens_q.size(0) - 1
 
+        if return_lse and lse is None:
+            lse = torch.empty(
+                query.shape[0],
+                query.shape[1],
+                device=query.device,
+                dtype=torch.float32,
+            )
+
         run_func(
             out,
             out_scale_factor,
@@ -2280,9 +2291,14 @@ def trtllm_batch_decode_with_kv_cache(
             cum_seq_lens_q,
             k_cache_scale,
             v_cache_scale,
+            lse,
         )
 
-        return out if out_dtype != "nvfp4" else FP4Tensor(out, out_scale_factor, o_sf_start_index, query.shape)
+        out = out if out_dtype != "nvfp4" else FP4Tensor(out, out_scale_factor, o_sf_start_index, query.shape)
+        if return_lse:
+            return out, lse
+        else:
+            return out
     else:
         raise KeyError(f"Backend {backend} not supported")
 
