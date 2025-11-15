@@ -508,9 +508,11 @@ def trtllm_batch_decode_with_kv_cache_mla(
     bmm1_scale: Union[float, torch.Tensor] = 1.0,
     bmm2_scale: Union[float, torch.Tensor] = 1.0,
     sinks: Optional[List[torch.Tensor]] = None,
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
     enable_pdl: bool = None,
     backend: str = "auto",
-) -> torch.Tensor:
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Parameters
     ----------
@@ -628,6 +630,16 @@ def trtllm_batch_decode_with_kv_cache_mla(
 
         batch_size = query.size(0)
         max_q_len = query.size(1)
+
+        if return_lse and lse is None:
+            lse = torch.empty(
+                batch_size,
+                max_q_len,
+                query.shape[2],
+                device=query.device,
+                dtype=torch.float32,
+            )
+
         query = query.flatten(0, 1)  # [B*S, H, D]
 
         run_func(
@@ -656,9 +668,13 @@ def trtllm_batch_decode_with_kv_cache_mla(
             None,  # cum_seq_lens_q
             None,  # k_cache_scales
             None,  # v_cache_scales
+            lse,
         )
 
-        return out
+        if return_lse:
+            return out, lse
+        else:
+            return out
     else:
         raise ValueError(f"Backend {backend} not supported")
 

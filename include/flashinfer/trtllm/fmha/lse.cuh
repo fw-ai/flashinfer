@@ -23,23 +23,27 @@ limitations under the License.
 
 namespace flashinfer {
 
-__global__ void ComputeLSEFromMDKernel(float2* __restrict__ md, float* __restrict__ lse, int n) {
+__global__ void ComputeLSEFromMDKernel(float2* __restrict__ md, float* __restrict__ lse, int num_tokens, int num_heads, int lse_stride_tokens, int lse_stride_heads) {
   int elem_idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (elem_idx >= n) return;
+  if (elem_idx >= num_tokens * num_heads) return;
 #if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   asm volatile("griddepcontrol.wait;");
 #endif
   float2 md_elem = md[elem_idx];
   float m = md_elem.x;
   float d = md_elem.y;
-  lse[elem_idx] = math::log2e * m + math::ptx_log2(d);
+  int token_idx = elem_idx / num_heads;
+  int head_idx  = elem_idx % num_heads;
+  int elem_idx_lse = token_idx * lse_stride_tokens + head_idx * lse_stride_heads;
+  lse[elem_idx_lse] = m + math::loge2 * math::ptx_log2(d);
 #if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   asm volatile("griddepcontrol.launch_dependents;");
 #endif
 }
 
-inline cudaError_t ComputeLSEFromMD(float2* md, float* lse, int n, bool launch_with_pdl,
-                                    cudaStream_t stream) {
+inline cudaError_t ComputeLSEFromMD(float2* md, float* lse, int num_tokens, int num_heads, int lse_stride_tokens, int lse_stride_heads, 
+                                    bool launch_with_pdl, cudaStream_t stream) {
+  int n = num_tokens * num_heads;
   int num_threads = std::min(1024, UpPowerOfTwo(n));
   int num_blocks = ceil_div(n, num_threads);
   cudaLaunchConfig_t config;
@@ -53,7 +57,7 @@ inline cudaError_t ComputeLSEFromMD(float2* md, float* lse, int n, bool launch_w
   config.numAttrs = 1;
   config.attrs = attrs;
 
-  FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, ComputeLSEFromMDKernel, md, lse, n));
+  FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, ComputeLSEFromMDKernel, md, lse, num_tokens, num_heads, lse_stride_tokens, lse_stride_heads));
   return cudaSuccess;
 }
 
