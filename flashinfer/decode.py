@@ -2705,6 +2705,15 @@ def trtllm_batch_decode_with_kv_cache_mla(
                 dtype=torch.float32,
             )
 
+        if return_lse and lse is None:
+            lse = torch.empty(
+                query.shape[0],
+                query.shape[1],
+                query.shape[2],
+                device=query.device,
+                dtype=torch.float32,
+            )
+
         run_func(
             out,
             None,  # fp4 output not supported in wrapper api yet.
