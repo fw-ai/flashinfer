@@ -178,7 +178,6 @@ void trtllm_paged_attention_launcher(
 
     runner_params.cumSeqLensQPtr = cum_seq_lens_q;
     runner_params.cumSeqLensKvPtr = cum_seq_lens_kv;
-
     runner_params.softmaxStatsPtr = float_allocator.aligned_alloc<float2>(
       sizeof(float2) * num_qo_heads * runner_params.mSumOfSeqLensQ, 16,
       "trtllm_gen_softmax_workspace");
@@ -487,6 +486,7 @@ void trtllm_ragged_attention_launcher(
     int64_t batch_size, int64_t window_left, int64_t sm_count, bool enable_pdl, bool is_causal,
     int64_t k_stride_keys_values, int64_t k_stride_heads, int64_t k_stride_batch,
     int64_t v_stride_keys_values, int64_t v_stride_heads, int64_t v_stride_batch,
+    int64_t lse_stride_tokens, int64_t lse_stride_heads,
     int64_t workspace_size, cudaStream_t stream) {
   if (num_qo_heads % num_kv_heads != 0) {
     std::ostringstream err_msg;
@@ -543,6 +543,8 @@ void trtllm_ragged_attention_launcher(
   runner_params.mMaskType =
       is_causal ? TrtllmGenAttentionMaskType::Causal : TrtllmGenAttentionMaskType::Dense;
   runner_params.lsePtr = lse;
+  runner_params.lseStrideTokens = lse_stride_tokens;
+  runner_params.lseStrideHeads = lse_stride_heads;
 
   AlignedAllocator float_allocator(workspace_buffer, workspace_size);
   size_t max_batch_size = 8192;
@@ -584,9 +586,13 @@ void trtllm_ragged_attention(TensorView out, TensorView query, TensorView key, T
     attention_sinks_ptr = static_cast<float*>(attention_sinks.value().data_ptr());
   }
   float* lse_ptr = nullptr;
+  int lse_stride_tokens = 0;
+  int lse_stride_heads = 0;
   if (lse.has_value()) {
     TVM_FFI_ICHECK_EQ(lse.value().dtype(), dl_float32) << "lse must be a float tensor";
     lse_ptr = static_cast<float*>(lse.value().data_ptr());
+    lse_stride_tokens = lse.value().stride(0);
+    lse_stride_heads = lse.value().stride(1);
   }
   TVM_FFI_ICHECK_EQ(out.ndim(), 3) << "out must be a 3D tensor";
   TVM_FFI_ICHECK_EQ(query.ndim(), 3) << "query must be a 3D tensor";
@@ -637,7 +643,7 @@ void trtllm_ragged_attention(TensorView out, TensorView query, TensorView key, T
       num_qo_heads, num_kv_heads, head_dim_qk, head_dim_v, sum_seq_q, sum_seq_kv, bmm1_scale_value,
       bmm2_scale_value, bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, batch_size, window_left,
       sm_count, enable_pdl, is_causal, k_stride_keys_values, k_stride_heads, k_stride_batch,
-      v_stride_keys_values, v_stride_heads, v_stride_batch, workspace_size, stream);
+      v_stride_keys_values, v_stride_heads, v_stride_batch, lse_stride_tokens, lse_stride_heads, workspace_size, stream);
 }
 
 namespace trtllm_cubin_loader {
