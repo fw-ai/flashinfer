@@ -1051,18 +1051,18 @@ def get_trtllm_moe_sm100_module():
             else:
                 hidden_states_scale = None
             # sanity checks to ensure that dynamic tensors have the correct shapes
-            assert output.shape[0] == num_tokens, (
-                "output's first dimension must be batch size."
-            )
-            assert topk_ids.shape[0] == num_tokens, (
-                "topk_ids's first dimension must be batch size."
-            )
-            assert expert_weights.shape[0] == num_tokens, (
-                "expert_weights's first dimension must be batch size."
-            )
-            assert hidden_states.shape[0] == num_tokens, (
-                "hidden_states's first dimension must be batch size."
-            )
+            assert (
+                output.shape[0] == num_tokens
+            ), "output's first dimension must be batch size."
+            assert (
+                topk_ids.shape[0] == num_tokens
+            ), "topk_ids's first dimension must be batch size."
+            assert (
+                expert_weights.shape[0] == num_tokens
+            ), "expert_weights's first dimension must be batch size."
+            assert (
+                hidden_states.shape[0] == num_tokens
+            ), "hidden_states's first dimension must be batch size."
             assert hidden_states_scale is None or (
                 hidden_states_scale.dim() == 2
                 and hidden_states_scale.shape[0] == num_tokens
@@ -1671,9 +1671,9 @@ def get_trtllm_moe_sm100_module():
         tune_max_num_tokens: int = 8192,
     ) -> List[torch.Tensor]:
         if routing_logits is None:
-            assert topk_ids is not None, (
-                "either topk_ids or routing_logits must be provided."
-            )
+            assert (
+                topk_ids is not None
+            ), "either topk_ids or routing_logits must be provided."
             assert topk_ids.dtype == torch.int32, "topk_ids must be an int32 tensor."
             routing_dtype = torch.bfloat16
         else:
@@ -1727,9 +1727,11 @@ def get_trtllm_moe_sm100_module():
         )
         inputs = [
             output,
-            torch.empty(num_tokens, num_experts, dtype=routing_dtype, device="meta")
-            if routing_logits is None
-            else routing_logits,
+            (
+                torch.empty(num_tokens, num_experts, dtype=routing_dtype, device="meta")
+                if routing_logits is None
+                else routing_logits
+            ),
             topk_ids,
             expert_weights,
             hidden_states,
@@ -1908,7 +1910,7 @@ def trtllm_bf16_moe(
             - 3: Llama4 (Top1 -> Sigmoid)
             - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
             - 5: TopK only (no softmax)
-            - 6: SigmoidRenormalize: Sigmoid -> TopK -> Renormalize
+            - 6: SigmoidRenormalize: (Sigmoid -> TopK -> Renormalize)
             - 7: Unspecified
         use_shuffled_weight: Whether to use shuffled weight layout for optimization (default: True).
         weight_layout: Weight layout format (default: WeightLayout.BlockMajorK).
@@ -2174,7 +2176,7 @@ def trtllm_fp4_block_scale_moe(
             - 3: Llama4 (Top1 -> Sigmoid)
             - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
             - 5: TopK only (no softmax)
-            - 6: SigmoidRenormalize: Sigmoid -> TopK -> Renormalize
+            - 6: SigmoidRenormalize: (Sigmoid -> TopK -> Renormalize)
             - 7: Unspecified
         do_finalize (bool): Whether to finalize the output (default: False)
         enable_pdl (Optional[bool]): Whether to enable Programmatic Dependent Launch (PDL). Auto-enabled for >= sm90.
@@ -2308,7 +2310,8 @@ def trtllm_fp4_block_scale_routed_moe(
             - 3: Llama4 (Top1 -> Sigmoid)
             - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
             - 5: TopK only (no softmax)
-            - 6: SigmoidRenormalize: Sigmoid -> TopK -> Renormalize
+            - 6: SigmoidRenormalize: (Sigmoid -> TopK -> Renormalize)
+            - 7: Unspecified
         do_finalize (bool): Whether to finalize the output (default: False)
         gated_act_type (int): Type of gated activation function (default: 0)
             - 0: SwiGlu

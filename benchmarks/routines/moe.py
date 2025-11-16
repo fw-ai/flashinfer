@@ -127,9 +127,10 @@ def parse_moe_args(line, parser):
             "llama4",
             "renormalize_naive",
             "topk",
+            "sigmoid_renormalize",
         ],
         help=(
-            "Routing method: renormalize | deepseek_v3 | llama4 | renormalize_naive | topk."
+            "Routing method: renormalize | deepseek_v3 | llama4 | renormalize_naive | topk | sigmoid_renormalize."
         ),
     )
     parser.add_argument(
@@ -242,6 +243,7 @@ def parse_moe_args(line, parser):
         "llama4": 3,
         "renormalize_naive": 4,
         "topk": 5,
+        "sigmoid_renormalize": 6,
     }
     args.routing_method_type = routing_method_name_to_type[args.routing_method]
 
@@ -306,7 +308,7 @@ def create_trtllm_moe_test_data(
             routing_logits = torch.randn(
                 (num_tokens, num_experts), device=device, dtype=torch.float32
             )
-        else:  # All other routing methods (Renormalize, RenormalizeNaive, Llama4) - use bfloat16
+        else:  # All other routing methods (Renormalize, RenormalizeNaive, Llama4, SigmoidRenormalize) - use bfloat16
             routing_logits = torch.randn(
                 (num_tokens, num_experts), device=device, dtype=torch.bfloat16
             )
@@ -1028,6 +1030,7 @@ def testCutlassFusedMoe(args):
                 input_sf=input_sf,
                 output=out,
             )
+
     else:
         raise ValueError(f"Unknown cutlass_variant: {variant}")
 
