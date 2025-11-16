@@ -296,22 +296,38 @@ inline size_t runFp4GemmImpl(void* D, void const* A, void const* B, void const* 
       float const* global_sf, int m, int n, int k, int batch_count, CutlassGemmConfig gemmConfig,          \
       char* workspace, const size_t workspaceBytes, cudaStream_t stream, int* occupancy) {                 \
     using Fp4GemmOperator = Fp4Gemm_##T##_##CTA_M_##_##CTA_N_##_##CTA_K_;                                  \
-    return runFp4GemmImpl<Fp4GemmOperator>(D, A, B, input_sf, weight_sf, global_sf, m, n, k,               \
-                                           batch_count, workspace, workspaceBytes, stream, "");            \
-  }                                                                                                        \
-                                                                                                           \
-  /* StreamK scheduler launcher - uses common helper functions */                                          \
-  template <>                                                                                              \
-  size_t genericFp4GemmKernelLauncherStreamK<T, cute::Int<CTA_M_>, cute::Int<CTA_N_>,                      \
-                                             cute::Int<CTA_K_>, cute::Int<CGA_M_>,                         \
-                                             cute::Int<CGA_N_>, cute::Int<CGA_K_>, XSM_>(                  \
-      void* D, void const* A, void const* B, void const* input_sf, void const* weight_sf,                  \
-      float const* global_sf, int m, int n, int k, int batch_count, CutlassGemmConfig gemmConfig,          \
-      char* workspace, const size_t workspaceBytes, cudaStream_t stream, int* occupancy) {                 \
-    using Fp4GemmOperator = Fp4Gemm_##T##_##CTA_M_##_##CTA_N_##_##CTA_K_##_StreamK;                        \
-    return runFp4GemmImpl<Fp4GemmOperator>(D, A, B, input_sf, weight_sf, global_sf, m, n, k,               \
-                                           batch_count, workspace, workspaceBytes, stream,                 \
-                                           " StreamK");                                                    \
+    Fp4GemmOperator gemm;                                                                                  \
+    auto args = prepareGemmArgs_##T##_##CTA_M_##_##CTA_N_##_##CTA_K_(                                      \
+        D, A, B, input_sf, weight_sf, global_sf, m, n, k, batch_count);                                    \
+    /* // Return workspace size */                                                                         \
+    if (!A && !B && !D) {                                                                                  \
+      return gemm.get_workspace_size(args);                                                                \
+    }                                                                                                      \
+    if (gemm.get_workspace_size(args) > workspaceBytes) {                                                  \
+      std::string errMsg("Requested workspace size insufficient. Required " +                              \
+                         std::to_string(gemm.get_workspace_size(args)) + ", got " +                        \
+                         std::to_string(workspaceBytes));                                                  \
+      throw std::runtime_error("[FP4 gemm Runner] " + errMsg);                                             \
+    }                                                                                                      \
+    auto can_implement = gemm.can_implement(args);                                                         \
+    if (can_implement != cutlass::Status::kSuccess) {                                                      \
+      std::string errMsg = "FP4 Gemm cutlass kernel will fail for params. Error: " +                       \
+                           std::string(cutlass::cutlassGetStatusString(can_implement));                    \
+      throw std::runtime_error("[FP4 gemm Runner] " + errMsg);                                             \
+    }                                                                                                      \
+    auto initStatus = gemm.initialize(args, workspace, stream);                                            \
+    if (initStatus != cutlass::Status::kSuccess) {                                                         \
+      std::string errMsg = "Failed to initialize cutlass FP4 gemm on sm120. Error: " +                     \
+                           std::string(cutlass::cutlassGetStatusString(initStatus));                       \
+      throw std::runtime_error("[FP4 gemm Runner] " + errMsg);                                             \
+    }                                                                                                      \
+    auto runStatus = gemm.run(args, workspace, stream, nullptr, /*enablePDL=*/true);                       \
+    if (runStatus != cutlass::Status::kSuccess) {                                                          \
+      std::string errMsg = "Failed to run cutlass FP4 gemm on sm120. Error: " +                            \
+                           std::string(cutlass::cutlassGetStatusString(runStatus));                        \
+      throw std::runtime_error("[FP4 gemm Runner] " + errMsg);                                             \
+    }                                                                                                      \
+    return gemm.get_workspace_size(args);                                                                  \
   }
 
 #endif
