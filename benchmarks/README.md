@@ -155,33 +155,34 @@ The output CSV will contain detailed metrics including:
 | `--autotune`             | Enable autotune for supported operation (`trtllm` and `cutlass` backends for `mm_fp4` and `bmm_fp8` routines)|
 
 ### MOE Flags
-| Flag                     | Description                                                                                                 |
-|--------------------------|-------------------------------------------------------------------------------------------------------------|
-| `--num_tokens`           | Number of input tokens                                                                                     |
-| `--hidden_size`          | Hidden dimension size                                                                                      |
-| `--intermediate_size`    | Intermediate dimension size (FF layer dimension)                                                           |
-| `--num_experts`          | Total number of experts                                                                                    |
-| `--top_k`                | Number of experts to route to per token                                                                    |
-| `--n_group`              | Number of expert groups (for DeepSeek routing). Default: 1                                                 |
-| `--topk_group`           | Number of groups to consider for top-k routing. Default: 1                                                 |
-| `--routed_scaling_factor`| Scaling factor for routing. Default: 2.5                                                                   |
-| `--local_expert_offset`  | Offset of local experts in global expert space. Default: 0                                                 |
-| `--local_num_experts`    | Number of experts handled by this device. Default: equals num_experts                                      |                                                                    |
-| `--routing_method`       | Routing method: `renormalize`, `deepseek_v3`, `llama4`, `renormalize_naive`. Default: `deepseek_v3`.       |
-| `--use_shuffled_weight`  | Whether to use shuffled weight layout                                                                      |
-| `--weight_layout`        | Weight layout: 0=MajorK, 1=MajorMn,  2=BlockMajorK. Default: 0                                             |
-| `--use_routing_bias`     | Whether to use routing bias                                                                                |
-| `--use_routing_scales_on_input` | Whether to use routing scales on input (for Llama4 routing)                                         |
-| `--input_dtype`          | Data type of the input hidden states. Default: bfloat16                                                    |
-| `--weight_dtype`         | Data type of the weights (before quantization). Default: bfloat16                                          |
-| `--cutlass_variant`      | CUTLASS MoE variant: `base` (no quant), `fp8` (per-tensor FP8), `nvfp4` (FP4 block-scale)                   |
-| `--quantized_input`      | For `nvfp4` only: quantize input activations to FP4                                                         |
-| `--tp_size`              | Tensor-parallel world size                                                                                  |
-| `--tp_rank`              | Tensor-parallel rank                                                                                        |
-| `--ep_size`              | Expert-parallel world size                                                                                  |
-| `--ep_rank`              | Expert-parallel rank                                                                                        |
-| `--gated_act`            | Gated activation function: `swiglu` (default) or `geglu`                                                   |
-| `--autotune`             | Enable autotune for supported operation                                                                     |
+
+| Flag                              | Description                                                                                                   |
+|------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| `--num_tokens`                    | Number of input tokens                                                                                        |
+| `--hidden_size`                   | Hidden dimension size                                                                                         |
+| `--intermediate_size`             | Intermediate dimension size (FF layer dimension)                                                              |
+| `--num_experts`                   | Total number of experts                                                                                       |
+| `--top_k`                         | Number of experts to route to per token                                                                       |
+| `--n_group`                       | Number of expert groups (for DeepSeek routing). Default: 1                                                    |
+| `--topk_group`                    | Number of groups to consider for top-k routing. Default: 1                                                    |
+| `--routed_scaling_factor`         | Scaling factor for routing. Default: 2.5                                                                      |
+| `--local_expert_offset`           | Offset of local experts in global expert space. Default: 0                                                    |
+| `--local_num_experts`             | Number of experts handled by this device. Default: equals num_experts                                         |
+| `--routing_method`                | Routing method: `renormalize`, `deepseek_v3`, `llama4`, `renormalize_naive`, `sigmoid_renormalize`. Default: `deepseek_v3`. |
+| `--use_shuffled_weight`           | Whether to use shuffled weight layout                                                                         |
+| `--weight_layout`                 | Weight layout: 0=MajorK, 1=MajorMn, 2=BlockMajorK. Default: 0                                                 |
+| `--use_routing_bias`              | Whether to use routing bias                                                                                   |
+| `--use_routing_scales_on_input`   | Whether to use routing scales on input (for Llama4 routing)                                                   |
+| `--input_dtype`                   | Data type of the input hidden states. Default: bfloat16                                                       |
+| `--weight_dtype`                  | Data type of the weights (before quantization). Default: bfloat16                                             |
+| `--cutlass_variant`               | CUTLASS MoE variant: `base` (no quant), `fp8` (per-tensor FP8), `nvfp4` (FP4 block-scale)                    |
+| `--quantized_input`               | For `nvfp4` only: quantize input activations to FP4                                                           |
+| `--tp_size`                       | Tensor-parallel world size                                                                                    |
+| `--tp_rank`                       | Tensor-parallel rank                                                                                          |
+| `--ep_size`                       | Expert-parallel world size                                                                                    |
+| `--ep_rank`                       | Expert-parallel rank                                                                                          |
+| `--gated_act`                     | Gated activation function: `swiglu` (default) or `geglu`                                                      |
+| `--autotune`                      | Enable autotune for supported operation                                                                       |
 
 ### MOE Routing Method Compatibility
 
