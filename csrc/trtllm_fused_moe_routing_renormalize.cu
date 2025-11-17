@@ -28,27 +28,50 @@ static constexpr int MaxNumTokensSingleCluster = NumBlocksPerCluster * NumThread
 static constexpr int MaxNumTokensSingleClusterScores = NumBlocksPerCluster * NumWarps;
 static constexpr int BlockKernelMaxNumTokens = 4;
 
-template <typename DataType, typename InputType, int VecSize, bool DoSoftmaxBeforeTopK>
+template <typename DataType, typename InputType, int VecSize, bool DoSoftmaxBeforeTopK,
+          bool SigmoidBeforeTopK>
 __forceinline__ __device__ void routingTopKExperts(
     cg::thread_block_tile<WarpSize> const& warp, DataType (&score)[VecSize],
     int32_t (&idx)[VecSize], DataType (&warpTopKScore)[MaxNumTopExperts],
     int32_t (&warpTopKExpertIdx)[MaxNumTopExperts], int32_t const laneIdx, int32_t const numExperts,
     int32_t topK, InputType const* ptrScores, bool const normTopkProb,
-    bool const applySoftmaxAfterTopK) {
+    bool const applySoftmaxAfterTopK, InputType const* ptrRoutingBias) {
   DataType minScore = DataType{-INFINITY};
 
   for (int i = 0; i < VecSize; i++) {
     auto expertIdx = i * WarpSize + laneIdx;
-    auto newScore = expertIdx < numExperts ? static_cast<DataType>(ptrScores[expertIdx]) : minScore;
+    auto newScore = minScore;
+    if (expertIdx < numExperts) {
+      if constexpr (SigmoidBeforeTopK) {
+        auto fScore = static_cast<float>(ptrScores[expertIdx]);
+        fScore = sigmoid_accurate(fScore);
+        if (ptrRoutingBias != nullptr) {
+          fScore += static_cast<float>(ptrRoutingBias[expertIdx]);
+        }
+        newScore = static_cast<DataType>(fScore);
+      } else {
+        newScore = ptrScores[expertIdx];
+      }
+    }
     score[i] = newScore;
     idx[i] = expertIdx;
   }
+
   if constexpr (DoSoftmaxBeforeTopK) {
     calcSoftmax(warp, score);
   }
 
   // Get the top-k scores and their corresponding expert indices
   topk::reduceTopK(warp, warpTopKScore, warpTopKExpertIdx, score, idx, minScore, topK);
+
+  if constexpr (SigmoidBeforeTopK) {
+    if (ptrRoutingBias != nullptr) {
+      if (laneIdx < topK) {
+        auto expertIdx = warpTopKExpertIdx[laneIdx];
+        warpTopKScore[laneIdx] -= static_cast<DataType>(ptrRoutingBias[expertIdx]);
+      }
+    }
+  }
 
   // Normalize the scores
   if constexpr (DoSoftmaxBeforeTopK) {
@@ -67,6 +90,13 @@ __forceinline__ __device__ void routingTopKExperts(
       if (laneIdx < topK) {
         warpTopKScore[laneIdx] = softmaxScore;
       }
+    } else if (normTopkProb) {
+      float sum = laneIdx < topK ? static_cast<float>(warpTopKScore[laneIdx]) : 0.0f;
+      sum = cg::reduce(warp, sum, cg::plus<float>());
+      if (laneIdx < topK) {
+        warpTopKScore[laneIdx] =
+            static_cast<DataType>(static_cast<float>(warpTopKScore[laneIdx]) / sum);
+      }
     }
     // If applySoftmaxAfterTopK is false, we keep the raw TopK values without softmax
   }
@@ -78,7 +108,7 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts)
   // types used in this kernel
   using OutputT = typename KernelParams::OutputT;
   using InputT = typename KernelParams::InputT;
-  using BaseType = std::conditional_t<KernelParams::DoSoftmaxBeforeTopK, float, InputT>;
+  using BaseType = std::conditional_t<KernelParams::DoSoftmaxBeforeTopK || KernelParams::DoSigmoidBeforeTopK, float, InputT>;
   using TypePacked = PackedScoreIdx<BaseType>;
   int constexpr MaxNumExperts = KernelParams::MaxNumExperts;
 
@@ -129,10 +159,10 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts)
 
     BaseType minScore = BaseType{-INFINITY};
     if (validToken) {
-      routingTopKExperts<BaseType, InputT, VecSize, KernelParams::DoSoftmaxBeforeTopK>(
+      routingTopKExperts<BaseType, InputT, VecSize, KernelParams::DoSoftmaxBeforeTopK, KernelParams::DoSigmoidBeforeTopK>(
           warp, score, idx, warpTopKScore, warpTopKExpertIdx, laneIdx, params.mNumExperts,
           params.mTopK, params.mPtrScores + scoreOffset, params.mNormTopkProb,
-          params.mApplySoftmaxAfterTopK);
+          params.mApplySoftmaxAfterTopK, params.mPtrRoutingBias);
 
       if (laneIdx < params.mTopK) {
         int offset = warpIdx * MaxNumExperts + warpTopKExpertIdx[laneIdx];
@@ -258,7 +288,9 @@ __global__ void __cluster_dims__(NumBlocksPerCluster, 1, 1) __launch_bounds__(Nu
   using OutputT = typename KernelParams::OutputT;
   using InputT = typename KernelParams::InputT;
 
-  using BaseType = std::conditional_t<KernelParams::DoSoftmaxBeforeTopK, float, InputT>;
+  using BaseType =
+      std::conditional_t<KernelParams::DoSoftmaxBeforeTopK || KernelParams::DoSigmoidBeforeTopK,
+                         float, InputT>;
   using TypePacked = PackedScoreIdx<BaseType>;
 
   static constexpr int VecSize = KernelParams::MaxNumExperts / WarpSize;
@@ -292,10 +324,11 @@ __global__ void __cluster_dims__(NumBlocksPerCluster, 1, 1) __launch_bounds__(Nu
 
     BaseType minScore = BaseType{-INFINITY};
     if (validToken) {
-      routingTopKExperts<BaseType, InputT, VecSize, KernelParams::DoSoftmaxBeforeTopK>(
+      routingTopKExperts<BaseType, InputT, VecSize, KernelParams::DoSoftmaxBeforeTopK,
+                         KernelParams::DoSigmoidBeforeTopK>(
           warp, score, idx, warpTopKScore, warpTopKExpertIdx, laneIdx, params.mNumExperts,
           params.mTopK, params.mPtrScores + scoreOffset, params.mNormTopkProb,
-          params.mApplySoftmaxAfterTopK);
+          params.mApplySoftmaxAfterTopK, params.mPtrRoutingBias);
 
       if (laneIdx < params.mTopK) {
         smemPackedScoreIdx[warpIdx * params.mTopK + laneIdx] =
@@ -332,7 +365,9 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts)
     routingIndicesHistogramScoresKernel(KernelParams params) {
   using OutputT = typename KernelParams::OutputT;
   using InputT = typename KernelParams::InputT;
-  using BaseType = std::conditional_t<KernelParams::DoSoftmaxBeforeTopK, float, InputT>;
+  using BaseType =
+      std::conditional_t<KernelParams::DoSoftmaxBeforeTopK || KernelParams::DoSigmoidBeforeTopK,
+                         float, InputT>;
 
   static constexpr int VecSize = KernelParams::MaxNumExperts / WarpSize;
 
@@ -373,10 +408,11 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts)
   for (int tokenIdx = globalWarpIdx; tokenIdx < params.mNumTokens; tokenIdx += globalWarpStride) {
     auto scoreOffset = tokenIdx * params.mNumExperts;
 
-    routingTopKExperts<BaseType, InputT, VecSize, KernelParams::DoSoftmaxBeforeTopK>(
+    routingTopKExperts<BaseType, InputT, VecSize, KernelParams::DoSoftmaxBeforeTopK,
+                       KernelParams::DoSigmoidBeforeTopK>(
         warp, allScores, allExpertIdx, warpTopKScore, warpTopKExpertIdx, laneIdx,
         params.mNumExperts, params.mTopK, params.mPtrScores + scoreOffset, params.mNormTopkProb,
-        params.mApplySoftmaxAfterTopK);
+        params.mApplySoftmaxAfterTopK, params.mPtrRoutingBias);
 
     if (laneIdx < params.mTopK) {
       PackedScoreIdx<OutputT> packedScore{static_cast<OutputT>(warpTopKScore[laneIdx]),
@@ -401,14 +437,14 @@ int32_t constexpr getMaxNumExperts(int32_t numExperts) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#define LAUNCH_ROUTING_RENORNALIZE(data, coopLaunch, kernel, numBlocks, numThreads, smemSize,  \
-                                   stream, extraFlag1)                                         \
+#define LAUNCH_ROUTING_RENORMALIZE(data, coopLaunch, kernel, numBlocks, numThreads, smemSize,  \
+                                   stream, extraFlag1, extraFlag2)                             \
   if (data.mNumExperts <= topk::MaxNumExpertsUnit) {                                           \
     LAUNCH_ROUTING_WITH_NUM_EXPERTS(data, coopLaunch, kernel, numBlocks, numThreads, smemSize, \
-                                    stream, extraFlag1, topk::MaxNumExpertsUnit);              \
+                                    stream, extraFlag1, extraFlag2, topk::MaxNumExpertsUnit);  \
   } else if (data.mNumExperts <= NumExpertsLimit) {                                            \
     LAUNCH_ROUTING_WITH_NUM_EXPERTS(data, coopLaunch, kernel, numBlocks, numThreads, smemSize, \
-                                    stream, extraFlag1, NumExpertsLimit);                      \
+                                    stream, extraFlag1, extraFlag2, NumExpertsLimit);          \
   } else {                                                                                     \
     TLLM_LOG_ERROR("Unsupported numExperts");                                                  \
   }
@@ -453,14 +489,14 @@ void run(Data const& data, void* stream) {
   if (useSingleBlock) {
     //@TODO: For now we use the single block kernel for cases with token number no larger than 4.
     // We will future tune this threshold based on the performance.
-    LAUNCH_ROUTING_RENORNALIZE(data, false, routingIndicesBlockKernel, 1, numThreadsHist,
+    LAUNCH_ROUTING_RENORMALIZE(data, false, routingIndicesBlockKernel, 1, numThreadsHist,
                                /*smemSize=*/0,  // No dynamic smem
-                               stream, data.mDoSoftmaxBeforeTopK);
+                               stream, data.mDoSoftmaxBeforeTopK, data.mSigmoidBeforeTopK);
   } else if (useSingleCluster) {
-    LAUNCH_ROUTING_RENORNALIZE(data, false, routingIndicesClusterKernel, NumBlocksPerCluster,
+    LAUNCH_ROUTING_RENORMALIZE(data, false, routingIndicesClusterKernel, NumBlocksPerCluster,
                                NumThreads,
                                /*smemSize=*/0,  // No dynamic smem
-                               stream, data.mDoSoftmaxBeforeTopK);
+                               stream, data.mDoSoftmaxBeforeTopK, data.mSigmoidBeforeTopK);
   } else {
     uint32_t const expandedIdxSize = data.mNumTokens * data.mTopK;
     uint32_t const histogramEltsPerBlock = 8 * numThreadsHist;
@@ -475,25 +511,25 @@ void run(Data const& data, void* stream) {
         std::min((expandedIdxSize + offsetEltsPerBlock - 1) / offsetEltsPerBlock, maxNumBlocks);
 
     if (data.mPtrScores != nullptr && data.mPtrTopKIds == nullptr) {
-      LAUNCH_ROUTING_RENORNALIZE(data, false, routingIndicesHistogramScoresKernel, maxNumBlocks,
+      LAUNCH_ROUTING_RENORMALIZE(data, false, routingIndicesHistogramScoresKernel, maxNumBlocks,
                                  numThreadsHist,
                                  /*smemSize=*/0,  // No dynamic smem
-                                 stream, data.mDoSoftmaxBeforeTopK);
+                                 stream, data.mDoSoftmaxBeforeTopK, data.mSigmoidBeforeTopK);
     } else {
       // Reset the global histograms.
-      LAUNCH_ROUTING_RENORNALIZE(data, false, routingInitExpertCounts,
+      LAUNCH_ROUTING_RENORMALIZE(data, false, routingInitExpertCounts,
                                  (2 * data.mNumExperts - 1) / numThreadsHist + 1, numThreadsHist,
                                  /*smemSize=*/0,  // No dynamic smem
-                                 stream, data.mDoSoftmaxBeforeTopK);
+                                 stream, data.mDoSoftmaxBeforeTopK, data.mSigmoidBeforeTopK);
     }
-    LAUNCH_ROUTING_RENORNALIZE(data, false, routingIndicesHistogramKernel, numBlocksHistogram,
+    LAUNCH_ROUTING_RENORMALIZE(data, false, routingIndicesHistogramKernel, numBlocksHistogram,
                                numThreadsHist,
                                /*smemSize=*/0,  // No dynamic smem
-                               stream, data.mDoSoftmaxBeforeTopK);
-    LAUNCH_ROUTING_RENORNALIZE(data, false, routingIndicesOffsetsKernel, numBlocksOffsets,
+                               stream, data.mDoSoftmaxBeforeTopK, data.mSigmoidBeforeTopK);
+    LAUNCH_ROUTING_RENORMALIZE(data, false, routingIndicesOffsetsKernel, numBlocksOffsets,
                                numThreadsHist,
                                /*smemSize=*/0,  // No dynamic smem
-                               stream, data.mDoSoftmaxBeforeTopK);
+                               stream, data.mDoSoftmaxBeforeTopK, data.mSigmoidBeforeTopK);
   }
 }
 

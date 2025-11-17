@@ -33,6 +33,7 @@ from flashinfer.utils import device_support_pdl
 from .test_trtllm_gen_fused_moe import (
     routing_reference_renormalize,
     routing_reference_renormalize_naive,
+    routing_reference_sigmoid_renormalize,
     routing_reference_topk,
 )
 
@@ -50,6 +51,7 @@ from flashinfer.utils import get_compute_capability
         RoutingMethodType.Renormalize,
         RoutingMethodType.RenormalizeNaive,
         RoutingMethodType.TopK,
+        RoutingMethodType.SigmoidRenormalize,
     ],
 )
 @pytest.mark.parametrize("quant_mode", ["NvFP4xNvFP4", "MxFP4xMxFP8", "MxFP4xBf16"])
@@ -180,7 +182,6 @@ def test_trtllm_gen_routed_fused_moe(
         0,  # local_expert_offset
         num_experts,
         None,  # routed_scaling_factor
-        None,  # tile_tokens_dim
         routing_method_type.value,
         True,  # do_finalize
         enable_pdl,
@@ -198,6 +199,10 @@ def test_trtllm_gen_routed_fused_moe(
         )
     elif routing_method_type == RoutingMethodType.TopK:
         permute_info, expert_weights = routing_reference_topk(
+            routing_logits, top_k, num_experts, 8
+        )
+    elif routing_method_type == RoutingMethodType.SigmoidRenormalize:
+        permute_info, expert_weights = routing_reference_sigmoid_renormalize(
             routing_logits, top_k, num_experts, 8
         )
     topk_ids = permute_info["topKIndices"].to(torch.int32)
@@ -234,7 +239,6 @@ def test_trtllm_gen_routed_fused_moe(
         0,  # local_expert_offset
         num_experts,
         None,  # routed_scaling_factor
-        None,  # tile_tokens_dim
         routing_method_type.value,
         True,  # do_finalize
         enable_pdl,

@@ -208,7 +208,6 @@ class CUDAGraphMoE:
             local_expert_offset=0,
             local_num_experts=self.config["num_experts"],
             routed_scaling_factor=self.config["routed_scaling"],
-            tile_tokens_dim=None,
             routing_method_type=self.config["routing_method_type"],
             gated_act_type=self.config["gated_act_type"],
             do_finalize=True,
@@ -776,9 +775,9 @@ class FP8BlockScaleMoe(Moe):
 
         # Generate block scales and quantize hidden states at runtime
         hidden_states_fp8 = hidden_states_quant.to(torch.float8_e4m3fn)
-        assert not torch.isnan(hidden_states_fp8.float()).any(), (
-            "NaN detected in hidden_states_fp8"
-        )
+        assert not torch.isnan(
+            hidden_states_fp8.float()
+        ).any(), "NaN detected in hidden_states_fp8"
 
         # Use autotuner for optimal kernel selection
         with autotune(enable_autotune):
@@ -799,7 +798,6 @@ class FP8BlockScaleMoe(Moe):
                 0,
                 num_experts,
                 routed_scaling,
-                None,
                 routing_method_type,
                 use_shuffled_weight=static_data["use_shuffled_weight"],
                 weight_layout=static_data["weight_layout"],
@@ -979,7 +977,6 @@ class FP8PerTensorMoe(Moe):
                 routed_scaling,
                 routing_method_type
                 == RoutingMethodType.Llama4,  # Use_routing_scales_on_input
-                None,
                 routing_method_type,
                 tune_max_num_tokens=TUNE_MAX_NUM_TOKENS,
             )
@@ -1397,6 +1394,19 @@ def routing_reference_renormalize_naive(expert_logits, top_k, num_experts, paddi
     new_mask = torch.zeros_like(expert_logits)
     new_mask.scatter_(-1, topk_idx, 1)
     scores = expert_logits * new_mask
+
+    for i in range(topk_idx.shape[0]):
+        for j in range(topk_idx.shape[1]):
+            scores[i, topk_idx[i, j]] = topk_values[i, j]
+    permute_info = routing_reference(scores, top_k, padding)
+    return permute_info, scores
+
+
+def routing_reference_sigmoid_renormalize(expert_logits, top_k, num_experts, padding):
+    """Sigmoid-> TopK -> Normalize routing reference. We should also support bias add"""
+    scores = F.sigmoid(expert_logits)
+    scores /= torch.sum(scores, dim=-1, keepdim=True)
+    topk_values, topk_idx = torch.topk(scores, k=top_k, dim=-1)
 
     for i in range(topk_idx.shape[0]):
         for j in range(topk_idx.shape[1]):
@@ -2186,6 +2196,10 @@ def run_moe_test(
         )
     elif routing_method_type == RoutingMethodType.RenormalizeNaive:
         permute_info, scores = routing_reference_renormalize_naive(
+            expert_logits, top_k, num_experts, padding
+        )
+    elif routing_method_type == RoutingMethodType.SigmoidRenormalize:
+        permute_info, scores = routing_reference_sigmoid_renormalize(
             expert_logits, top_k, num_experts, padding
         )
     elif routing_method_type == RoutingMethodType.TopK:
