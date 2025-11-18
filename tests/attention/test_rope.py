@@ -516,7 +516,6 @@ def test_generalized_rope_quantize(
 @pytest.mark.parametrize("enable_pdl", [True, False])
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"])
 @pytest.mark.parametrize("page_size", [16, 32])
-@pytest.mark.parametrize("rope_idtype", [torch.int32, torch.int64])
 def test_generalized_rope_quantize_append_kv_cache(
     attention_type,
     num_qo_heads,
@@ -529,7 +528,6 @@ def test_generalized_rope_quantize_append_kv_cache(
     enable_pdl,
     kv_layout,
     page_size,
-    rope_idtype,
 ):
     device = "cuda:0"
     # Fixed seed for reproducibility
@@ -591,7 +589,7 @@ def test_generalized_rope_quantize_append_kv_cache(
     rope_ref = FlashInferRotaryEmbedding(
         head_dim, rope_dim, max_seq_len, 10000, False, input_dtype, device
     )
-    pos_ids = torch.arange(num_tokens, device=device, dtype=rope_idtype)
+    pos_ids = torch.arange(num_tokens, device=device, dtype=torch.int32)
 
     # Build paged metadata
     kv_append_length = torch.tensor(
@@ -835,7 +833,6 @@ def test_generalized_rope_quantize_append_kv_cache(
 @pytest.mark.parametrize("enable_pdl", [True, False])
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"])
 @pytest.mark.parametrize("page_size", [16, 32])
-@pytest.mark.parametrize("rope_idtype", [torch.int32, torch.int64])
 def test_rope_quantize_fp8_append_paged_kv_cache_decode(
     attention_type,
     num_qo_heads,
@@ -849,7 +846,6 @@ def test_rope_quantize_fp8_append_paged_kv_cache_decode(
     enable_pdl,
     kv_layout,
     page_size,
-    rope_idtype,
 ):
     """Test append to non-empty cache (decode/continuation scenario)."""
     device = "cuda:0"
@@ -942,7 +938,7 @@ def test_rope_quantize_fp8_append_paged_kv_cache_decode(
         head_dim, rope_dim, max_seq_len, 10000, False, input_dtype, device
     )
     pos_ids_existing = torch.arange(
-        num_existing_tokens, device=device, dtype=rope_idtype
+        num_existing_tokens, device=device, dtype=torch.int32
     )
 
     # Build metadata for existing tokens (single request for simplicity)
@@ -1135,7 +1131,7 @@ def test_rope_quantize_fp8_append_paged_kv_cache_decode(
         num_existing_tokens,
         num_existing_tokens + num_new_tokens,
         device=device,
-        dtype=rope_idtype,
+        dtype=torch.int32,
     )
 
     # Build metadata for new tokens (continue appending to first request)

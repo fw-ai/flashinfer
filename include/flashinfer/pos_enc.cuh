@@ -803,13 +803,13 @@ __global__ void BatchQKApplyRotaryKernel(
  * Templated on CacheT to support both GQA/MHA (paged_kv_t) and MLA (paged_kv_mla_t).
  * Cache-only behaviors are selected with constexpr on the CacheT.
  */
-template <bool interleave, uint32_t vec_size, uint32_t bdx, typename DType, typename RoPEIdType,
-          typename PagedKVIdType, typename QuantType, typename CacheT>
+template <bool interleave, uint32_t vec_size, uint32_t bdx, typename DType, typename IdType,
+          typename QuantType, typename CacheT>
 __global__ void RopeQuantizeAppendPagedKVCacheKernel(
     DType* q_rope_in, DType* k_rope_in, DType* q_nope_in, DType* k_nope_in, DType* v_in,
     QuantType* q_rope_out, QuantType* q_nope_out, CacheT paged_kv_like,
-    PagedKVIdType* __restrict__ batch_indices, PagedKVIdType* __restrict__ positions,
-    float* __restrict__ cos_sin_cache, RoPEIdType* __restrict__ pos_ids,
+    IdType* __restrict__ batch_indices, IdType* __restrict__ positions,
+    float* __restrict__ cos_sin_cache, IdType* __restrict__ pos_ids,
     const RopeQuantizeAppendPagedKVCacheParams params) {
 #if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   asm volatile("griddepcontrol.wait;");
@@ -852,12 +852,12 @@ __global__ void RopeQuantizeAppendPagedKVCacheKernel(
   uint32_t k_nope_end = k_rope_end + num_kv_heads * no_rope_chunks;
 
   // Deduce MLA vs GQA/MHA from CacheT
-  constexpr bool IS_MLA = std::is_same<CacheT, paged_kv_mla_t<QuantType, PagedKVIdType>>::value;
+  constexpr bool IS_MLA = std::is_same<CacheT, paged_kv_mla_t<QuantType, IdType>>::value;
 
   vec_t<float, vec_size> cos, sin;
   if (bx * bdy + ty < nnz) {
     const uint32_t idx = bx * bdy + ty;
-    const RoPEIdType pos = pos_ids[idx];
+    const IdType pos = pos_ids[idx];
 
     // Compute page location for this token
     uint32_t page_iter, entry_idx;
@@ -1047,54 +1047,54 @@ cudaError_t RopeQuantize(
   FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
 
   // Use nested macros for runtime->compile-time dispatch for required constexpr values
-  DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-    constexpr uint32_t vec_size = 32 / sizeof(DType);
-    uint32_t bdx = (rope_dim + vec_size - 1) / vec_size;
-    bdx = std::max(1u, bdx);
-    uint32_t num_threads = std::max(128U, bdx);
-    uint32_t bdy = std::max(1u, num_threads / bdx);
-    uint32_t nblks_x = (nnz + bdy - 1) / bdy;
-    uint32_t rope_chunk_size = rope_dim;
-    uint32_t rope_chunks = (rope_dim + rope_chunk_size - 1) / rope_chunk_size;
-    uint32_t no_rope_chunks = (no_rope_dim + rope_chunk_size - 1) / rope_chunk_size;
-    uint32_t total_blocks_y = num_qo_heads * rope_chunks + num_kv_heads * rope_chunks +
-                              num_kv_heads * no_rope_chunks + num_qo_heads * no_rope_chunks;
-    void* args[] = {(void*)&q_rope_in,
-                    (void*)&k_rope_in,
-                    (void*)&q_nope_in,
-                    (void*)&k_nope_in,
-                    (void*)&q_rope_out,
-                    (void*)&k_rope_out,
-                    (void*)&q_nope_out,
-                    (void*)&k_nope_out,
-                    (void*)&cos_sin_cache,
-                    (void*)&pos_ids,
-                    (void*)&nnz,
-                    (void*)&num_qo_heads,
-                    (void*)&num_kv_heads,
-                    (void*)&rope_dim,
-                    (void*)&no_rope_dim,
-                    (void*)&q_rope_in_stride_n,
-                    (void*)&q_rope_in_stride_h,
-                    (void*)&q_nope_in_stride_n,
-                    (void*)&q_nope_in_stride_h,
-                    (void*)&q_rope_out_stride_n,
-                    (void*)&q_rope_out_stride_h,
-                    (void*)&q_nope_out_stride_n,
-                    (void*)&q_nope_out_stride_h,
-                    (void*)&k_rope_in_stride,
-                    (void*)&k_rope_in_stride_h,
-                    (void*)&k_nope_in_stride,
-                    (void*)&k_nope_in_stride_h,
-                    (void*)&k_rope_out_stride,
-                    (void*)&k_rope_out_stride_h,
-                    (void*)&k_nope_out_stride,
-                    (void*)&k_nope_out_stride_h,
-                    (void*)&quant_scale_q,
-                    (void*)&quant_scale_kv};
-    auto kernel = RopeQuantizeKernel<INTERLEAVE, vec_size, 1, DType, IdType, QuantType>;
-    dim3 nblks(nblks_x, total_blocks_y);
-    dim3 nthrs(bdx, bdy);
+  DISPATCH_ROPE_DIM(rope_dim, ROPE_DIM, {
+    DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
+      constexpr uint32_t vec_size = 32 / sizeof(DType);
+      constexpr uint32_t bdx = ROPE_DIM / vec_size;
+      uint32_t num_threads = 128U;
+      uint32_t bdy = num_threads / bdx;
+      uint32_t nblks_x = (nnz + bdy - 1) / bdy;
+      uint32_t rope_chunk_size = rope_dim;
+      uint32_t rope_chunks = (rope_dim + rope_chunk_size - 1) / rope_chunk_size;
+      uint32_t no_rope_chunks = (no_rope_dim + rope_chunk_size - 1) / rope_chunk_size;
+      uint32_t total_blocks_y = num_qo_heads * rope_chunks + num_kv_heads * rope_chunks +
+                                num_kv_heads * no_rope_chunks + num_qo_heads * no_rope_chunks;
+      void* args[] = {(void*)&q_rope_in,
+                      (void*)&k_rope_in,
+                      (void*)&q_nope_in,
+                      (void*)&k_nope_in,
+                      (void*)&q_rope_out,
+                      (void*)&k_rope_out,
+                      (void*)&q_nope_out,
+                      (void*)&k_nope_out,
+                      (void*)&cos_sin_cache,
+                      (void*)&pos_ids,
+                      (void*)&nnz,
+                      (void*)&num_qo_heads,
+                      (void*)&num_kv_heads,
+                      (void*)&rope_dim,
+                      (void*)&no_rope_dim,
+                      (void*)&q_rope_in_stride_n,
+                      (void*)&q_rope_in_stride_h,
+                      (void*)&q_nope_in_stride_n,
+                      (void*)&q_nope_in_stride_h,
+                      (void*)&q_rope_out_stride_n,
+                      (void*)&q_rope_out_stride_h,
+                      (void*)&q_nope_out_stride_n,
+                      (void*)&q_nope_out_stride_h,
+                      (void*)&k_rope_in_stride,
+                      (void*)&k_rope_in_stride_h,
+                      (void*)&k_nope_in_stride,
+                      (void*)&k_nope_in_stride_h,
+                      (void*)&k_rope_out_stride,
+                      (void*)&k_rope_out_stride_h,
+                      (void*)&k_nope_out_stride,
+                      (void*)&k_nope_out_stride_h,
+                      (void*)&quant_scale_q,
+                      (void*)&quant_scale_kv};
+      auto kernel = RopeQuantizeKernel<INTERLEAVE, vec_size, bdx, DType, IdType, QuantType>;
+      dim3 nblks(nblks_x, total_blocks_y);
+      dim3 nthrs(bdx, bdy);
 
     cudaLaunchAttribute attribute[1];
     attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
@@ -1280,6 +1280,185 @@ cudaError_t RopeQuantizeAppendPagedMLACache(
                                             cos_sin_cache, pos_ids,
                                             // params
                                             params));
+  });
+
+  return cudaSuccess;
+}
+
+/*!
+ * \brief Host function to apply RoPE, quantize to FP8, and append K/V to paged cache (GQA/MHA)
+ */
+template <typename DType, typename IdType, typename QuantType>
+cudaError_t RopeQuantizeAppendPagedKVCache(
+    DType* q_rope_in, DType* k_rope_in, DType* q_nope_in, DType* k_nope_in, DType* v_in,
+    QuantType* q_rope_out, QuantType* q_nope_out, paged_kv_t<QuantType, IdType> paged_kv,
+    IdType* batch_indices, IdType* positions, float* cos_sin_cache, IdType* pos_ids, uint32_t nnz,
+    uint32_t num_qo_heads, uint32_t num_kv_heads, uint32_t rope_dim, uint32_t no_rope_dim,
+    size_t q_rope_in_stride_n, size_t q_rope_in_stride_h, size_t q_nope_in_stride_n,
+    size_t q_nope_in_stride_h, size_t q_rope_out_stride_n, size_t q_rope_out_stride_h,
+    size_t q_nope_out_stride_n, size_t q_nope_out_stride_h, size_t k_rope_in_stride,
+    size_t k_rope_in_stride_h, size_t k_nope_in_stride, size_t k_nope_in_stride_h,
+    size_t v_in_stride, size_t v_in_stride_h, float quant_scale_q, float quant_scale_kv,
+    bool interleave, bool enable_pdl = false, cudaStream_t stream = nullptr) {
+  DISPATCH_ROPE_DIM(rope_dim, ROPE_DIM, {
+    DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
+      constexpr uint32_t vec_size = 32 / sizeof(DType);
+      constexpr uint32_t bdx = ROPE_DIM / vec_size;
+      uint32_t num_threads = 128U;
+      uint32_t bdy = num_threads / bdx;
+      uint32_t nblks_x = (nnz + bdy - 1) / bdy;
+      uint32_t rope_chunks = 1;
+      uint32_t no_rope_chunks = (no_rope_dim + rope_dim - 1) / rope_dim;
+
+      // GQA/MHA: Q rope + K rope + K nope + V + Q nope
+      uint32_t total_blocks_y = num_qo_heads * rope_chunks + num_kv_heads * rope_chunks +
+                                num_kv_heads * no_rope_chunks + num_kv_heads +
+                                num_qo_heads * no_rope_chunks;
+
+      dim3 nblks(nblks_x, total_blocks_y);
+      dim3 nthrs(bdx, bdy);
+
+      cudaLaunchAttribute attribute[1];
+      attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+      attribute[0].val.programmaticStreamSerializationAllowed = enable_pdl ? 1 : 0;
+      cudaLaunchConfig_t config;
+      config.gridDim = nblks;
+      config.blockDim = nthrs;
+      config.stream = stream;
+      config.dynamicSmemBytes = 0;
+      config.attrs = attribute;
+      config.numAttrs = 1;
+
+      auto kernel = RopeQuantizeAppendPagedKVCacheKernel<INTERLEAVE, vec_size, bdx, DType, IdType,
+                                                         QuantType, paged_kv_t<QuantType, IdType>>;
+      RopeQuantizeAppendPagedKVCacheParams params;
+      params.nnz = nnz;
+      params.num_qo_heads = num_qo_heads;
+      params.num_kv_heads = num_kv_heads;
+      params.rope_dim = rope_dim;
+      params.no_rope_dim = no_rope_dim;
+      params.q_rope_in_stride_n = q_rope_in_stride_n;
+      params.q_rope_in_stride_h = q_rope_in_stride_h;
+      params.q_nope_in_stride_n = q_nope_in_stride_n;
+      params.q_nope_in_stride_h = q_nope_in_stride_h;
+      params.q_rope_out_stride_n = q_rope_out_stride_n;
+      params.q_rope_out_stride_h = q_rope_out_stride_h;
+      params.q_nope_out_stride_n = q_nope_out_stride_n;
+      params.q_nope_out_stride_h = q_nope_out_stride_h;
+      params.k_rope_in_stride = k_rope_in_stride;
+      params.k_rope_in_stride_h = k_rope_in_stride_h;
+      params.k_nope_in_stride = k_nope_in_stride;
+      params.k_nope_in_stride_h = k_nope_in_stride_h;
+      params.v_in_stride = v_in_stride;
+      params.v_in_stride_h = v_in_stride_h;
+      params.quant_scale_q = quant_scale_q;
+      params.quant_scale_kv = quant_scale_kv;
+
+      FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel,
+                                              // inputs
+                                              q_rope_in, k_rope_in, q_nope_in, k_nope_in, v_in,
+                                              // q outputs
+                                              q_rope_out, q_nope_out,
+                                              // cache + indices
+                                              paged_kv, batch_indices, positions,
+                                              // rope tables
+                                              cos_sin_cache, pos_ids,
+                                              // params
+                                              params));
+    });
+  });
+
+  return cudaSuccess;
+}
+
+/*!
+ * \brief Host function to apply RoPE, quantize to FP8, and append to MLA paged cache
+ */
+template <typename DType, typename IdType, typename QuantType>
+cudaError_t RopeQuantizeAppendPagedMLACache(
+    DType* q_rope_in, DType* k_rope_in, DType* q_nope_in, DType* k_nope_in, QuantType* q_rope_out,
+    QuantType* q_nope_out, paged_kv_mla_t<QuantType, IdType> paged_kv_mla, IdType* batch_indices,
+    IdType* positions, float* cos_sin_cache, IdType* pos_ids, uint32_t nnz, uint32_t num_qo_heads,
+    uint32_t rope_dim, uint32_t no_rope_dim, size_t q_rope_in_stride_n, size_t q_rope_in_stride_h,
+    size_t q_nope_in_stride_n, size_t q_nope_in_stride_h, size_t q_rope_out_stride_n,
+    size_t q_rope_out_stride_h, size_t q_nope_out_stride_n, size_t q_nope_out_stride_h,
+    size_t k_rope_in_stride, size_t k_nope_in_stride, float quant_scale_q, float quant_scale_kv,
+    bool interleave, bool enable_pdl = false, cudaStream_t stream = nullptr) {
+  DISPATCH_ROPE_DIM(rope_dim, ROPE_DIM, {
+    DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
+      constexpr uint32_t vec_size = 32 / sizeof(DType);
+      constexpr uint32_t bdx = ROPE_DIM / vec_size;
+      uint32_t num_threads = 128U;
+      uint32_t bdy = num_threads / bdx;
+      uint32_t nblks_x = (nnz + bdy - 1) / bdy;
+      uint32_t rope_chunks = 1;
+      uint32_t no_rope_chunks = (no_rope_dim + rope_dim - 1) / rope_dim;
+
+      // MLA: Q rope + K rope + K nope + Q nope (no V)
+      constexpr uint32_t num_kv_heads = 1;
+      uint32_t total_blocks_y = num_qo_heads * rope_chunks + num_kv_heads * rope_chunks +
+                                num_kv_heads * no_rope_chunks + num_qo_heads * no_rope_chunks;
+
+      dim3 nblks(nblks_x, total_blocks_y);
+      dim3 nthrs(bdx, bdy);
+
+      cudaLaunchAttribute attribute[1];
+      attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+      attribute[0].val.programmaticStreamSerializationAllowed = enable_pdl ? 1 : 0;
+      cudaLaunchConfig_t config;
+      config.gridDim = nblks;
+      config.blockDim = nthrs;
+      config.stream = stream;
+      config.dynamicSmemBytes = 0;
+      config.attrs = attribute;
+      config.numAttrs = 1;
+
+      auto kernel =
+          RopeQuantizeAppendPagedKVCacheKernel<INTERLEAVE, vec_size, bdx, DType, IdType, QuantType,
+                                               paged_kv_mla_t<QuantType, IdType>>;
+      // For MLA: pass v_in as nullptr, num_kv_heads=1, duplicate 2D K strides for head strides, and
+      // 0 V strides
+      DType* v_in_nullptr = nullptr;
+      uint32_t num_kv_heads_1 = 1;
+      size_t k_rope_in_stride_h_dup = k_rope_in_stride;
+      size_t k_nope_in_stride_h_dup = k_nope_in_stride;
+      size_t v_in_stride_zero = 0, v_in_stride_h_zero = 0;
+      RopeQuantizeAppendPagedKVCacheParams params;
+      params.nnz = nnz;
+      params.num_qo_heads = num_qo_heads;
+      params.num_kv_heads = 1u;
+      params.rope_dim = rope_dim;
+      params.no_rope_dim = no_rope_dim;
+      params.q_rope_in_stride_n = q_rope_in_stride_n;
+      params.q_rope_in_stride_h = q_rope_in_stride_h;
+      params.q_nope_in_stride_n = q_nope_in_stride_n;
+      params.q_nope_in_stride_h = q_nope_in_stride_h;
+      params.q_rope_out_stride_n = q_rope_out_stride_n;
+      params.q_rope_out_stride_h = q_rope_out_stride_h;
+      params.q_nope_out_stride_n = q_nope_out_stride_n;
+      params.q_nope_out_stride_h = q_nope_out_stride_h;
+      params.k_rope_in_stride = k_rope_in_stride;
+      params.k_rope_in_stride_h = k_rope_in_stride_h_dup;
+      params.k_nope_in_stride = k_nope_in_stride;
+      params.k_nope_in_stride_h = k_nope_in_stride_h_dup;
+      params.v_in_stride = 0;
+      params.v_in_stride_h = 0;
+      params.quant_scale_q = quant_scale_q;
+      params.quant_scale_kv = quant_scale_kv;
+
+      FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel,
+                                              // inputs
+                                              q_rope_in, k_rope_in, q_nope_in, k_nope_in,
+                                              v_in_nullptr,
+                                              // q outputs
+                                              q_rope_out, q_nope_out,
+                                              // cache + indices
+                                              paged_kv_mla, batch_indices, positions,
+                                              // rope tables
+                                              cos_sin_cache, pos_ids,
+                                              // params
+                                              params));
+    });
   });
 
   return cudaSuccess;

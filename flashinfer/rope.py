@@ -1434,7 +1434,6 @@ def rope_quantize_fp8(
     return q_rope_out, k_rope_out, q_nope_out, k_nope_out
 
 
-@flashinfer_api
 def rope_quantize_fp8_append_paged_kv_cache(
     q_rope: torch.Tensor,
     k_rope: torch.Tensor,
@@ -1640,11 +1639,6 @@ def rope_quantize_fp8_append_paged_kv_cache(
     from .utils import TensorLayout
 
     kv_layout_code = TensorLayout[kv_layout].value
-
-    batch_indices = batch_indices.int()
-    positions = positions.int()
-    kv_indices = kv_indices.int()
-    kv_indptr = kv_indptr.int()
 
     # Call custom op
     _rope_quantize_fp8_append_paged_kv_cache(
