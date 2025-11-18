@@ -344,66 +344,6 @@ def unpack_compare_nvfp4(
     return output_unpacked, output_ref
 
 
-def generate_causal_mask(
-    batch_size: int,
-    q_seq_len: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Generate causal attention mask for speculative decoding.
-
-    Parameters
-    ----------
-    batch_size : int
-        Batch size
-    q_seq_len : int
-        Query sequence length (number of speculative decoding tokens)
-    device : torch.device
-        Target device for the mask tensor
-
-    Returns
-    -------
-    torch.Tensor
-        Causal mask with shape [batch_size, q_seq_len, mask_size_per_row]
-        where mask_size_per_row = divUp(q_seq_len, 32) * 2 (in uint16_t units).
-        Data type: torch.uint16
-
-    """
-    num_packed_masks_per_token = (q_seq_len + 31) // 32
-
-    q_indices = torch.arange(q_seq_len, device=device, dtype=torch.int32).unsqueeze(1)
-    kv_indices = torch.arange(q_seq_len, device=device, dtype=torch.int32).unsqueeze(0)
-
-    causal_bool_mask = kv_indices <= q_indices
-
-    padded_seq_len = num_packed_masks_per_token * 32
-    if padded_seq_len > q_seq_len:
-        padding = torch.zeros(
-            q_seq_len, padded_seq_len - q_seq_len, device=device, dtype=torch.bool
-        )
-        causal_bool_mask = torch.cat([causal_bool_mask, padding], dim=1)
-
-    causal_bool_mask = causal_bool_mask.view(q_seq_len, num_packed_masks_per_token, 32)
-
-    bit_positions = torch.tensor(
-        [1 << i for i in range(32)], device=device, dtype=torch.int64
-    )
-
-    mask_uint32 = (
-        (causal_bool_mask.to(torch.int64) * bit_positions).sum(dim=-1).to(torch.uint32)
-    )
-
-    mask_uint32 = (
-        mask_uint32.unsqueeze(0)
-        .expand(batch_size, q_seq_len, num_packed_masks_per_token)
-        .contiguous()
-    )
-
-    mask_uint16 = mask_uint32.view(torch.uint16)
-
-    return mask_uint16
-
-
 def _test_trtllm_batch_prefill(
     kv_layout,
     batch_size,
@@ -419,9 +359,6 @@ def _test_trtllm_batch_prefill(
     max_q_len,
     max_kv_len,
     device_scale,
-    head_dim,
-    non_contiguous_query=False,
-    skips_softmax=False,
 ):
     compute_capability = get_compute_capability(torch.device(device="cuda"))
     if compute_capability[0] != 10:
@@ -538,18 +475,8 @@ def _test_trtllm_batch_prefill(
         bmm2_scale = bmm2_scale.item()
     elif not isinstance(bmm2_scale, torch.Tensor) and device_scale:
         bmm2_scale = torch.tensor(bmm2_scale, device=GPU_DEVICE, dtype=torch.float32)
-
-    # Optionally make query non-contiguous for testing stride support
-    if non_contiguous_query:
-        q_input = make_query_non_contiguous(q, num_qo_heads, head_dim)
-    else:
-        q_input = q.contiguous()
-
-    # Using a tiny threshold should give the same result as normal attention.
-    skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
-
-    output, lse = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
-        q_input,
+    output = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
+        q.contiguous(),
         kv_cache,
         workspace_buffer,
         page_table,
@@ -673,9 +600,6 @@ def _test_trtllm_batch_prefill(
 @pytest.mark.parametrize("enable_sink", [True, False])
 @pytest.mark.parametrize("max_q_len", [511])
 @pytest.mark.parametrize("max_kv_len", [2047])
-@pytest.mark.parametrize("head_dim", [128, 256])
-@pytest.mark.parametrize("non_contiguous_query", [False, True])
-@pytest.mark.parametrize("skips_softmax", [False, True])
 def test_trtllm_batch_prefill(
     kv_layout,
     batch_size,
@@ -690,9 +614,6 @@ def test_trtllm_batch_prefill(
     enable_sink,
     max_q_len,
     max_kv_len,
-    head_dim,
-    non_contiguous_query,
-    skips_softmax,
 ):
     _test_trtllm_batch_prefill(
         kv_layout,
@@ -709,9 +630,6 @@ def test_trtllm_batch_prefill(
         max_q_len,
         max_kv_len,
         kv_dtype == "fp8",
-        head_dim,
-        non_contiguous_query=non_contiguous_query,
-        skips_softmax=skips_softmax,
     )
 
 
@@ -767,8 +685,6 @@ def test_trtllm_batch_prefill_bs1(
         max_q_len,
         max_kv_len,
         False,
-        head_dim,
-        skips_softmax=skips_softmax,
     )
 
 
@@ -789,9 +705,6 @@ def _test_trtllm_batch_decode(
     max_in_kv_len,
     head_dim,
     device_scale=False,
-    max_q_len=None,
-    non_contiguous_query=False,
-    skips_softmax=False,
 ):
     """
     Common function for testing trtllm-gen decode.
@@ -963,18 +876,8 @@ def _test_trtllm_batch_decode(
         bmm2_scale = bmm2_scale.item()
     elif not isinstance(bmm2_scale, torch.Tensor) and device_scale:
         bmm2_scale = torch.tensor(bmm2_scale, device=GPU_DEVICE, dtype=torch.float32)
-
-    # Optionally make query non-contiguous for testing stride support
-    if non_contiguous_query:
-        q_input = make_query_non_contiguous(q, num_qo_heads, head_dim)
-    else:
-        q_input = q.contiguous()
-
-    # Using a tiny threshold should give the same result as normal attention.
-    skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
-
-    output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
-        q_input,
+    output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+        q.contiguous(),
         kv_cache,
         workspace_buffer,
         page_table,
@@ -1193,8 +1096,6 @@ def test_trtllm_batch_decode(
         max_in_kv_len,
         head_dim,
         kv_dtype == "fp8",
-        non_contiguous_query=non_contiguous_query,
-        skips_softmax=skips_softmax,
     )
 
 
@@ -1218,7 +1119,6 @@ def test_trtllm_batch_decode(
 @pytest.mark.parametrize("max_in_kv_len", [4096, 8192])
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("device_scale", [True, False])
-@pytest.mark.parametrize("skips_softmax", [False, True])
 def test_trtllm_batch_decode_bs1(
     kv_layout,
     batch_size,
@@ -1235,7 +1135,6 @@ def test_trtllm_batch_decode_bs1(
     max_in_kv_len,
     head_dim,
     device_scale,
-    skips_softmax,
 ):
     # Small number of test cases for batch size 1
     _test_trtllm_batch_decode(
@@ -1255,7 +1154,6 @@ def test_trtllm_batch_decode_bs1(
         max_in_kv_len,
         head_dim,
         device_scale,
-        skips_softmax=skips_softmax,
     )
 
 
@@ -1289,7 +1187,6 @@ def test_trtllm_batch_decode_bs1(
 @pytest.mark.parametrize("max_in_kv_len", [110])
 @pytest.mark.parametrize("head_dim", [256])
 @pytest.mark.parametrize("device_scale", [True, False])
-@pytest.mark.parametrize("skips_softmax", [False, True])
 def test_trtllm_batch_decode_head_dim_256(
     kv_layout,
     batch_size,
@@ -1306,7 +1203,6 @@ def test_trtllm_batch_decode_head_dim_256(
     max_in_kv_len,
     head_dim,
     device_scale,
-    skips_softmax,
 ):
     # Small number of test cases for head_dim = 256
     _test_trtllm_batch_decode(
@@ -1326,7 +1222,6 @@ def test_trtllm_batch_decode_head_dim_256(
         max_in_kv_len,
         head_dim,
         device_scale,
-        skips_softmax=skips_softmax,
     )
 
 
@@ -1356,7 +1251,6 @@ def test_trtllm_batch_decode_head_dim_256(
 @pytest.mark.parametrize("max_in_kv_len", [4096, 8192, 16384, 32768, 65536, 131072])
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("device_scale", [True, False])
-@pytest.mark.parametrize("skips_softmax", [False])
 def test_trtllm_batch_decode_long_sequence_length(
     kv_layout,
     batch_size,
@@ -1373,7 +1267,6 @@ def test_trtllm_batch_decode_long_sequence_length(
     max_in_kv_len,
     head_dim,
     device_scale,
-    skips_softmax,
 ):
     # Small number of test cases for long sequence length
     _test_trtllm_batch_decode(
@@ -1393,7 +1286,6 @@ def test_trtllm_batch_decode_long_sequence_length(
         max_in_kv_len,
         head_dim,
         device_scale,
-        skips_softmax=skips_softmax,
     )
 
 

@@ -312,18 +312,6 @@ def trtllm_batch_decode_mla(
     workspace_buffer = global_trtllm_gen_fmha_workspace_buffer
     workspace_buffer_ref = global_workspace_buffer
 
-    # Using a tiny threshold should give the same output as standard attention
-    skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
-    lse_input = None
-    if use_preallocated_lse:
-        lse_input = torch.empty(
-            batch_size,
-            q_len_per_request,
-            num_q_heads,
-            device=device,
-            dtype=torch.float32,
-        )
-
     # Run decode-MLA
     output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
         query=query,
@@ -337,9 +325,6 @@ def trtllm_batch_decode_mla(
         max_seq_len=max_seq_len,
         bmm1_scale=scale / ((128 + 64) ** 0.5),
         bmm2_scale=1.0,
-        skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
-        return_lse=True,
-        lse=lse_input,
         enable_pdl=enable_pdl,
         backend=backend,
     )

@@ -799,7 +799,6 @@ struct KernelParams {
     params.mNumHeadsQPerKv = options.mNumHeadsQPerKv;
     params.mNumHeadsQPerKvDivisor = FastModDivInt32(options.mNumHeadsQPerKv);
     params.mNumHiddenEltsO = options.mNumHeadsQ * options.mHeadDimQk;
-    params.mNumTokensPerCtaQ = numTokensPerCtaQ;
     params.mOutputScale = options.outputScale;
     params.mScaleSoftmaxLog2 = options.scaleSoftmaxLog2;
     params.mSkipSoftmaxThresholdScaleFactor = options.mSkipSoftmaxThresholdScaleFactor;
