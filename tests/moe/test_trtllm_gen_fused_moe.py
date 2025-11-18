@@ -48,7 +48,7 @@ from flashinfer.fused_moe.core import (
     _maybe_get_cached_w3_w1_permute_indices,
     Fp8QuantizationType,
 )
-from .utils import is_gated_activation, skip_checks, QuantMode
+from .test_utils import skip_checks, QuantMode
 
 
 # Max num tokens to tune for trtllm-gen fused moe
