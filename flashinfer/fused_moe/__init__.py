@@ -37,19 +37,8 @@ from .core import (
 )
 
 from .fused_routing_dsv3 import (  # noqa: F401
-    fused_topk_deepseek as fused_topk_deepseek,
+    NoAuxTc as NoAuxTc,
 )
-
-# CuteDSL MoE APIs (conditionally imported if cute_dsl available)
-try:
-    from .cute_dsl import (
-        cute_dsl_fused_moe_nvfp4,
-        CuteDslMoEWrapper,
-    )
-
-    _cute_dsl_available = True
-except ImportError:
-    _cute_dsl_available = False
 
 __all__ = [
     "ActivationType",
@@ -70,8 +59,7 @@ __all__ = [
     "trtllm_fp8_block_scale_moe",
     "trtllm_fp8_block_scale_routed_moe",
     "trtllm_fp8_per_tensor_scale_moe",
-    "trtllm_mxint4_block_scale_moe",
-    "fused_topk_deepseek",
+    "NoAuxTc",
 ]
 
 # Add CuteDSL exports if available
