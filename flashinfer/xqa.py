@@ -104,8 +104,6 @@ def get_xqa_module(
             batch_size,
             1.0 if isinstance(kv_scale, torch.Tensor) else kv_scale,
             None if isinstance(kv_scale, float) else kv_scale,
-            q_seq_len,
-            mask,
             semaphores,
             workspace_buffer,
             enable_pdl,
@@ -134,8 +132,6 @@ def get_xqa_module(
         semaphores: torch.Tensor,
         workspace_buffer: torch.Tensor,
         enable_pdl: bool,
-        q_seq_len: int,
-        mask: Optional[torch.Tensor],
     ) -> None:
         pass
 

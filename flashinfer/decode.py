@@ -2277,11 +2277,6 @@ def trtllm_batch_decode_with_kv_cache(
         )
 
     if backend == "xqa":
-        # TODO(Siyuan): support device scale factors, which was removed in #2033
-        if not isinstance(bmm1_scale, float):
-            bmm1_scale = bmm1_scale.item()
-        if not isinstance(bmm2_scale, float):
-            bmm2_scale = bmm2_scale.item()
         # xqa backend doesn't support nvfp4 output
         if out_dtype == "nvfp4" or (out_dtype is None and isinstance(out, FP4Tensor)):
             raise ValueError("xqa backend does not support nvfp4 output")
@@ -2701,12 +2696,12 @@ def trtllm_batch_decode_with_kv_cache_mla(
         backend = (
             "trtllm-gen" if get_compute_capability(query.device)[0] == 10 else "xqa"
         )
+    if isinstance(bmm1_scale, torch.Tensor):
+        assert bmm1_scale.dtype == torch.float32
+        bmm1_scale = bmm1_scale * log2e
+    if isinstance(bmm2_scale, torch.Tensor):
+        assert bmm2_scale.dtype == torch.float32
     if backend == "xqa":
-        # TODO(Siyuan): support device scale factors, which was removed in #2033
-        if not isinstance(bmm1_scale, float):
-            bmm1_scale = bmm1_scale.item()
-        if not isinstance(bmm2_scale, float):
-            bmm2_scale = bmm2_scale.item()
         if (
             get_compute_capability(query.device)[0] != 12
             or query.dtype != torch.float8_e4m3fn
@@ -2773,12 +2768,6 @@ def trtllm_batch_decode_with_kv_cache_mla(
                 "out",
             )
 
-        if isinstance(bmm1_scale, torch.Tensor):
-            assert bmm1_scale.dtype == torch.float32
-            bmm1_scale = bmm1_scale * log2e
-        if isinstance(bmm2_scale, torch.Tensor):
-            assert bmm2_scale.dtype == torch.float32
-
         run_func(
             out,
             None,  # fp4 output not supported in wrapper api yet.
@@ -2817,9 +2806,8 @@ def xqa_batch_decode_with_kv_cache_mla(
     seq_lens: torch.Tensor,
     max_seq_len: int,
     out: Optional[torch.Tensor] = None,
-    # TODO(Siyuan): support device scale factors, which was removed in #2033
-    bmm1_scale: Optional[float] = 1.0,
-    bmm2_scale: Optional[float] = 1.0,
+    bmm1_scale: Union[float, torch.Tensor] = 1.0,
+    bmm2_scale: Union[float, torch.Tensor] = 1.0,
     sinks: Optional[List[torch.Tensor]] = None,
     enable_pdl: bool = None,
 ) -> torch.Tensor:
@@ -2835,8 +2823,8 @@ def xqa_batch_decode_with_kv_cache_mla(
     seq_lens: query_len
     max_seq_len: max sequence length for kv_cache
     out: output tensor, if not provided, will be allocated internally
-    bmm1_scale: fused scale for mla bmm1 input.
-    bmm2_scale: fused scale for mla bmm2 input.
+    bmm1_scale: fused scale for mla bmm1 input. Can be a float or a torch.Tensor.
+    bmm2_scale: fused scale for mla bmm2 input. Can be a float or a torch.Tensor.
     sinks: additional value per head in the denominator of the softmax.
 
     Note:
