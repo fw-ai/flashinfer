@@ -140,7 +140,7 @@ def parse_gemm_args(line, parser):
         required=False,
         nargs="+",
         default=["cudnn"],
-        choices=["cudnn", "cublas", "trtllm", "cutlass", "tgv", "cute-dsl", "auto"],
+        choices=["cudnn", "cublas", "trtllm", "cutlass", "auto"],
         help="Kernel backends to test. Default: cudnn",
     )
     parser.add_argument(
@@ -1023,7 +1023,7 @@ def testMmFp4(args):
     run_refcheck = args.refcheck
     use_128x4_sf_layout = args.use_128x4_sf_layout
     use_nvfp4 = args.use_nvfp4
-    autotune_supported_backends = ["cudnn", "cutlass", "trtllm", "cute-dsl", "auto"]
+    autotune_supported_backends = ["cudnn", "cutlass", "trtllm", "auto"]
     res = []
 
     res_dtype = dtype_str_to_torch_dtype(args.out_dtype)
@@ -1114,16 +1114,8 @@ def testMmFp4(args):
         print("[ERROR] No backends passed validation. Exiting.")
         return
 
-    def run_backend(
-        backend,
-        input_fp4,
-        mat2_fp4,
-        mat2_fp4_trtllm,
-        input_inv_s,
-        mat2_inv_s,
-        mat2_inv_s_trtllm,
-    ):
-        if backend in ["cudnn", "trtllm", "cutlass", "cute-dsl", "auto"]:
+    def run_backend(backend):
+        if backend in ["cudnn", "trtllm", "cutlass", "auto"]:
             return flashinfer.gemm.mm_fp4(
                 a=input_fp4,
                 b=mat2_fp4.T if backend != "trtllm" else mat2_fp4_trtllm.T,
@@ -1153,15 +1145,7 @@ def testMmFp4(args):
                 print(f"[INFO] Autotune warmup for mm_fp4: {warmup_iters} iters")
             with autotune(True):
                 for _ in range(warmup_iters):
-                    run_backend(
-                        cur_backend,
-                        input_fp4,
-                        mat2_fp4,
-                        mat2_fp4_trtllm,
-                        input_inv_s,
-                        mat2_inv_s,
-                        mat2_inv_s_trtllm,
-                    )
+                    run_backend(cur_backend)
 
     # Storage for timing results and outputs
     backend_times = {backend: [] for backend in backends}
