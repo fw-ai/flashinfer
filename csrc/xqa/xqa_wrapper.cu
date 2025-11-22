@@ -56,10 +56,8 @@ void xqa_wrapper(bool run_sm90_fp8_mha, int64_t multiProcessorCount, int64_t nbK
                  Optional<TensorView> attentionSinks, TensorView kCacheVLLM, TensorView vCacheVLLM,
                  TensorView kvCachePageList, int64_t maxSeqLen, TensorView seqLen,
                  int64_t batchSize, double kvCacheScale, Optional<TensorView> kvScaleTensor,
-#if SPEC_DEC
-                 int64_t qSeqLen, TensorView qCuSeqLens, TensorView mask,
-#endif
-                 TensorView semaphores, TensorView scratch, bool enable_pdl) {
+                 int64_t qSeqLen, Optional<TensorView> mask, TensorView semaphores,
+                 TensorView scratch, bool enable_pdl) {
   auto stream = get_stream(output.device());
   float const* attentionSinksPtr =
       attentionSinks.has_value() ? reinterpret_cast<float const*>(attentionSinks.value().data_ptr())
@@ -70,6 +68,7 @@ void xqa_wrapper(bool run_sm90_fp8_mha, int64_t multiProcessorCount, int64_t nbK
   float const* kvScalePtr = kvScaleTensor.has_value()
                                 ? reinterpret_cast<float const*>(kvScaleTensor.value().data_ptr())
                                 : nullptr;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 900
   auto const mha_func = run_sm90_fp8_mha ? &launchHopperF8MHAFlashInfer : &launchMHAFlashInfer;
 #else
   auto const mha_func = &launchMHAFlashInfer;
@@ -79,6 +78,11 @@ void xqa_wrapper(bool run_sm90_fp8_mha, int64_t multiProcessorCount, int64_t nbK
   uint64_t kv_stride_page = kCacheVLLM.stride(0);
   uint64_t kv_stride_token = kCacheVLLM.stride(-3);
   uint64_t kv_stride_head = kCacheVLLM.stride(-2);
+
+#if SPEC_DEC
+  MaskType const* maskPtr =
+      mask.has_value() ? reinterpret_cast<MaskType const*>(mask.value().data_ptr()) : nullptr;
+#endif
 
   mha_func(multiProcessorCount, nbKHeads, slidingWinSize, qScale, qScalePtr,
            reinterpret_cast<OutputHead*>(output.data_ptr()),

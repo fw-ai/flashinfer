@@ -2135,15 +2135,7 @@ def trtllm_batch_decode_with_kv_cache(
     q_len_per_req: Optional[int] = 1,
     o_scale: Optional[float] = 1.0,
     mask: Optional[torch.Tensor] = None,
-    max_q_len: Optional[int] = None,
-    cum_seq_lens_q: Optional[torch.Tensor] = None,
-    skip_softmax_threshold_scale_factor: Optional[float] = None,
-    kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    return_lse: bool = False,
-    lse: Optional[torch.Tensor] = None,
-) -> Union[
-    torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]
-]:
+) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
     ----------
@@ -2215,33 +2207,6 @@ def trtllm_batch_decode_with_kv_cache(
 
     mask : Optional[torch.Tensor] = None
         causal attention mask for xqa speculative decoding.
-
-    max_q_len: Optional[int] = None
-        The maximum query sequence length across all requests when using variable-length queries.
-        Only supported by trtllm-gen backend. Must be provided together with ``cum_seq_lens_q``.
-        When None, all requests use uniform query length specified by ``q_len_per_req``.
-
-    cum_seq_lens_q : Optional[torch.Tensor] = None
-        Cumulative query sequence lengths for variable-length query support, shape: ``[batch_size + 1]``, dtype: ``torch.int32``.
-        Only supported by trtllm-gen backend. Must be provided together with ``max_q_len``.
-        When None, all requests use uniform query length specified by ``q_len_per_req``.
-
-    skip_softmax_threshold_scale_factor: Optional[float] = None
-        threshold scale factor for skipping softmax operations.
-        Providing a value for this parameter enables skip-softmax sparsity as described in: https://arxiv.org/abs/2512.12087
-        If no value is provided, then standard attention is used.
-        Setting the threshold to a higher value generally increases kernel performance at the cost of accuracy degradation.
-        The actual threshold value equals the provided threshold_scale_factor divided by the context length.
-
-    kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-        scales for kv cache, if not provided, will be set to ``1.0``.
-
-    return_lse: whether to return the log-sum-exp value.
-
-    lse: log-sum-exp value, if not provided, will be allocated internally.
-        When ``return_lse`` is ``True``, a tuple of two tensors:
-            * attention output, shape: ``[batch_size, num_qo_heads, head_dim]``
-            * logsumexp of attention scores, shape: ``[batch_size, num_qo_heads]``.
 
     Returns
     -------
@@ -2581,6 +2546,8 @@ def xqa_batch_decode_with_kv_cache(
         sm_count=sm_count,
         enable_pdl=enable_pdl,
         rcp_out_scale=1.0 / o_scale,
+        q_seq_len=q_len_per_req,
+        mask=mask,
     )
 
     return out
