@@ -835,7 +835,18 @@ def test_tensor_validation_min_p(batch_size, vocab_size, p):
             normalized_prob, torch.tensor(p, dtype=torch.float32, device="cuda:0")
         )
 
-    # 4: 1D tensor with a broken batch size raises error (only when batch_size > 1).
+    # 4: non-int32 indices raises error.
+    with pytest.raises(
+        ValueError,
+        match=r"indices must have dtype torch\.int32, got torch\.int64",
+    ):
+        flashinfer.sampling.min_p_sampling_from_probs(
+            normalized_prob,
+            torch.tensor([p] * batch_size, dtype=torch.float32, device="cuda:0"),
+            torch.tensor([p] * batch_size, dtype=torch.int64, device="cuda:0"),
+        )
+
+    # 5: 1D tensor with a broken batch size raises error (only when batch_size > 1).
     if batch_size > 1:
         with pytest.raises(
             ValueError, match="Sampling parameter tensor batch size mismatch"
@@ -844,7 +855,7 @@ def test_tensor_validation_min_p(batch_size, vocab_size, p):
                 normalized_prob, torch.tensor([p], dtype=torch.float32, device="cuda:0")
             )
 
-    # 5: 1D tensor with the correct batch size works.
+    # 6: 1D tensor with the correct batch size works.
     samples = flashinfer.sampling.min_p_sampling_from_probs(
         normalized_prob,
         torch.tensor([p] * batch_size, dtype=torch.float32, device="cuda:0"),

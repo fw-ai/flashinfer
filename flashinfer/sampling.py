@@ -588,65 +588,31 @@ def _to_tensor_scalar_tuple(x):
         return (None, x)
 
 
-def _validate_and_convert_seed_offset(
-    seed: Union[int, torch.Tensor],
-    offset: Union[int, torch.Tensor],
-    device: torch.device,
-    batch_size: int,
-) -> Tuple[Optional[torch.Tensor], int, Optional[torch.Tensor], int]:
-    """Validate and convert seed/offset to tensor/scalar tuples for sampling kernels.
+def _check_indices_dtype(indices: Optional[torch.Tensor]) -> None:
+    """Validate indices dtype."""
+    if indices is not None and indices.dtype != torch.int32:
+        raise ValueError(f"indices must have dtype torch.int32, got {indices.dtype}")
 
-    Parameters
-    ----------
-    seed : Union[int, torch.Tensor]
-        Seed value or tensor.
-    offset : Union[int, torch.Tensor]
-        Offset value or tensor.
-    device : torch.device
-        Expected device for tensor inputs.
-    batch_size : int
-        Expected batch size for tensor length validation.
 
-    Returns
-    -------
-    Tuple[Optional[torch.Tensor], int, Optional[torch.Tensor], int]
-        (maybe_seed_arr, seed_val, maybe_offset_arr, offset_val)
-
-    Raises
-    ------
-    ValueError
-        If seed and offset are not both tensors or both scalars, or if tensor
-        properties (device, dtype, ndim, size) are invalid.
-    """
-    # Validate tensor/scalar consistency
-    if isinstance(seed, torch.Tensor) != isinstance(offset, torch.Tensor):
-        raise ValueError("seed and offset must both be tensors or both be scalars")
-
-    # Convert to tensor/scalar tuple
-    maybe_seed_arr, seed_val = _to_tensor_scalar_tuple(seed)
-    maybe_offset_arr, offset_val = _to_tensor_scalar_tuple(offset)
-
-    # Validate tensor properties
-    if maybe_seed_arr is not None:
-        if maybe_seed_arr.device != device:
-            raise ValueError(f"seed tensor must be on {device}")
-        if maybe_seed_arr.dtype not in [torch.int64, torch.uint64]:
-            raise ValueError("seed tensor must be int64/uint64")
-        if maybe_seed_arr.ndim != 1:
-            raise ValueError("seed tensor must be 1D")
-        if maybe_seed_arr.size(0) not in [1, batch_size]:
-            raise ValueError(f"seed tensor length must be 1 or {batch_size}")
-    if maybe_offset_arr is not None:
-        if maybe_offset_arr.device != device:
-            raise ValueError(f"offset tensor must be on {device}")
-        if maybe_offset_arr.dtype not in [torch.int64, torch.uint64]:
-            raise ValueError("offset tensor must be int64/uint64")
-        if maybe_offset_arr.ndim != 1:
-            raise ValueError("offset tensor must be 1D")
-        if maybe_offset_arr.size(0) not in [1, batch_size]:
-            raise ValueError(f"offset tensor length must be 1 or {batch_size}")
-
-    return maybe_seed_arr, seed_val, maybe_offset_arr, offset_val
+def _check_tensor_param(param: Any, tensor: torch.Tensor) -> None:
+    """Validate sampling parameters."""
+    if isinstance(param, torch.Tensor):
+        if param.dim() == 0:
+            raise ValueError(
+                f"Expected a 1D tensor of shape (batch_size,) or scalar for the sampling parameter, "
+                f"but got a 0-dimensional tensor with shape {param.shape}. "
+            )
+        elif param.dim() > 1:
+            raise ValueError(
+                f"Expected a 1D tensor or scalar for the sampling parameter, "
+                f"but got a {param.dim()}D tensor with shape {param.shape}. "
+            )
+        elif param.shape[0] != tensor.shape[0]:
+            raise ValueError(
+                f"Sampling parameter tensor batch size mismatch: "
+                f"expected length {tensor.shape[0]} to match the reference tensor batch size, "
+                f"but got length {param.shape[0]} with shape {param.shape}."
+            )
 
 
 @flashinfer_api
@@ -727,8 +693,7 @@ def sampling_from_logits(
         shape should be ``(unique_batch_size, num_classes)`` where unique_batch_size is the number of unique
         probability distributions.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
-        that maps each output to a row in logits. The output tensor will have the same dtype as indices.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in logits.
         For example, if indices[i] = j, then the i-th output will be sampled from logits[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of logits
@@ -782,6 +747,7 @@ def sampling_from_logits(
     if check_nan:
         if torch.any(torch.isnan(logits)):
             raise ValueError("Input logits contains NaN.")
+    _check_indices_dtype(indices)
     return get_sampling_module().sampling_from_logits(
         logits, indices, deterministic, generator, seed, offset
     )
@@ -807,8 +773,7 @@ def sampling_from_probs(
         shape should be ``(unique_batch_size, num_classes)`` where unique_batch_size is the number of unique
         probability distributions.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
-        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
@@ -868,6 +833,7 @@ def sampling_from_probs(
     if check_nan:
         if torch.any(torch.isnan(probs)):
             raise ValueError("Input probs contains NaN.")
+    _check_indices_dtype(indices)
     return get_sampling_module().sampling_from_probs(
         probs, indices, deterministic, generator, seed, offset
     )
@@ -903,8 +869,7 @@ def top_p_sampling_from_probs(
         If a float, the same threshold is used for all requests.
         If a tensor, each request has its own threshold.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
-        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
@@ -972,6 +937,8 @@ def top_p_sampling_from_probs(
     if check_nan:
         if torch.any(torch.isnan(probs)):
             raise ValueError("Input probs contains NaN.")
+    _check_indices_dtype(indices)
+    _check_tensor_param(top_p, probs)
     return get_sampling_module().top_p_sampling_from_probs(
         probs,
         indices,
@@ -1013,8 +980,7 @@ def top_k_sampling_from_probs(
         If a scalar, the same threshold is used for all requests.
         If a tensor, each request has its own threshold.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
-        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
@@ -1082,6 +1048,8 @@ def top_k_sampling_from_probs(
     if check_nan:
         if torch.any(torch.isnan(probs)):
             raise ValueError("Input probs contains NaN.")
+    _check_indices_dtype(indices)
+    _check_tensor_param(top_k, probs)
     return get_sampling_module().top_k_sampling_from_probs(
         probs,
         indices,
@@ -1124,8 +1092,7 @@ def min_p_sampling_from_probs(
         If a scalar, the same threshold is used for all requests.
         If a tensor, each request has its own threshold.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
-        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
@@ -1188,6 +1155,8 @@ def min_p_sampling_from_probs(
     if check_nan:
         if torch.any(torch.isnan(probs)):
             raise ValueError("Input probs contains NaN.")
+    _check_indices_dtype(indices)
+    _check_tensor_param(min_p, probs)
     return get_sampling_module().min_p_sampling_from_probs(
         probs,
         indices,
@@ -1236,8 +1205,7 @@ def top_k_top_p_sampling_from_logits(
         If a scalar, the same threshold is used for all requests.
         If a tensor, each request has its own threshold.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
-        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
@@ -1313,6 +1281,9 @@ def top_k_top_p_sampling_from_logits(
     top_k_mask_logits
     top_p_sampling_from_probs
     """
+    _check_indices_dtype(indices)
+    _check_tensor_param(top_k, logits)
+    _check_tensor_param(top_p, logits)
     if filter_apply_order == "top_k_first":
         masked_logits = top_k_mask_logits(logits, top_k)
         probs = torch.softmax(masked_logits, dim=-1)
@@ -1382,8 +1353,7 @@ def top_k_top_p_sampling_from_probs(
         If a scalar, the same threshold is used for all requests.
         If a tensor, each request has its own threshold.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
-        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
@@ -1454,6 +1424,9 @@ def top_k_top_p_sampling_from_probs(
     top_p_renorm_probs
     top_k_mask_logits
     """
+    _check_indices_dtype(indices)
+    _check_tensor_param(top_k, probs)
+    _check_tensor_param(top_p, probs)
     if filter_apply_order == "top_k_first":
         renorm_probs = top_k_renorm_probs(probs, top_k)
         return top_p_sampling_from_probs(
