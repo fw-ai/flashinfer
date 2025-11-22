@@ -22,13 +22,7 @@ from typing import Any, List, Literal, Optional, Tuple, Union, overload
 import torch
 
 from .api_logging import flashinfer_api
-
-## NOTE: MLA functions have been moved to mla.py, but we keep the aliases here for backward compatibility.
-from .mla import (
-    trtllm_batch_decode_with_kv_cache_mla as trtllm_batch_decode_with_kv_cache_mla,
-    xqa_batch_decode_with_kv_cache_mla as xqa_batch_decode_with_kv_cache_mla,
-)
-from .xqa import xqa, xqa_mla as xqa_mla
+from .xqa import xqa, xqa_mla
 from .cudnn import cudnn_batch_decode_with_kv_cache as cudnn_batch_decode_with_kv_cache
 from .jit import (
     gen_batch_decode_mla_module,
@@ -2634,6 +2628,7 @@ def _check_trtllm_gen_mla_shape(
         )
 
 
+@flashinfer_api
 def trtllm_batch_decode_with_kv_cache_mla(
     query: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -2795,6 +2790,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
         raise ValueError(f"Backend {backend} not supported")
 
 
+@flashinfer_api
 def xqa_batch_decode_with_kv_cache_mla(
     query: torch.Tensor,
     kv_cache: torch.Tensor,

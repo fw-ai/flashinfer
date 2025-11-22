@@ -225,6 +225,20 @@ export FLASHINFER_LOGDEST=stdout
 
 For detailed information about logging levels, configuration, and advanced features, see [Logging](https://docs.flashinfer.ai/logging.html) in our documentation.
 
+## API Logging
+
+FlashInfer provides comprehensive API logging for debugging. Enable it using environment variables:
+
+```bash
+# Enable logging (levels: 0=off (default), 1=basic, 3=detailed, 5=statistics)
+export FLASHINFER_LOGLEVEL=3
+
+# Set log destination (stdout (default), stderr, or file path)
+export FLASHINFER_LOGDEST=stdout
+```
+
+For detailed information about logging levels, configuration, and advanced features, see [LOGGING.md](LOGGING.md).
+
 ## Custom Attention Variants
 
 Users can customize their own attention variants with additional parameters. For more details, refer to our [JIT examples](https://github.com/flashinfer-ai/flashinfer/blob/main/tests/utils/test_jit_example.py).

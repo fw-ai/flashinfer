@@ -20,7 +20,7 @@ from typing import List, Literal, Optional, Tuple, Union, overload
 import torch
 
 from .api_logging import flashinfer_api
-from .jit import gen_batch_mla_module, gen_trtllm_gen_fmha_module, setup_cubin_loader
+from .jit import gen_batch_mla_module
 from .jit.mla import gen_mla_module
 from .utils import (
     MaskMode,
