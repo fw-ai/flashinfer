@@ -1,5 +1,4 @@
 # Check torch version:
-import traceback
 from typing import Tuple, Optional
 
 import pytest
@@ -8,7 +7,7 @@ import torch.distributed as dist
 
 import flashinfer.comm.trtllm_mnnvl_ar as trtllm_mnnvl_ar
 from flashinfer.comm.mapping import Mapping
-from flashinfer.comm.mnnvl import TorchDistBackend
+from flashinfer.comm.mnnvl import CommBackend, MpiComm
 
 # Use flashinfer.norm.rmsnorm as reference implementation.
 from flashinfer.norm import rmsnorm
@@ -126,10 +125,15 @@ def row_linear_residual_norm_fusion_forward_legacy(
     unicast_ptr: int,
     max_num_elements_mnnvl: int,
     buffer_flags_mnnvl: torch.Tensor,
+    comm_backend_for_handle_transfer: Optional[CommBackend] = None,
 ):
     tensor_parallel_size = mapping.tp_size
     tensor_parallel_rank = mapping.tp_rank
-    dist.barrier()
+    if comm_backend_for_handle_transfer is None:
+        comm = MpiComm()
+    else:
+        comm = comm_backend_for_handle_transfer
+    comm.barrier()
 
     def func(
         input,

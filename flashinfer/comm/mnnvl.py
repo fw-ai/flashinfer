@@ -162,9 +162,6 @@ class CommBackend(ABC):
     def allgather(self, data: int) -> List[int]: ...
 
     @abstractmethod
-    def bcast(self, data: Any, root: int) -> Any: ...
-
-    @abstractmethod
     def barrier(self) -> None: ...
 
     @abstractmethod
@@ -220,9 +217,6 @@ class MPIBackend(CommBackend):
 
     def allgather(self, data: int) -> List[int]:
         return self._mpicomm.allgather(data)
-
-    def bcast(self, data: Any, root: int) -> Any:
-        return self._mpicomm.bcast(data, root)
 
     def barrier(self):
         self._mpicomm.Barrier()
@@ -879,9 +873,8 @@ class SymmDeviceMemory:
         group_size: int,
         group_rank: int,
         device_idx: int,
+        is_multi_node: bool = True,
         comm_backend_for_handle_transfer: Optional[CommBackend] = None,
-        enable_multicast: bool = True,
-        allocate_signal_pads: bool = True,
     ):
         cu_device = checkCudaErrors(cuda.cuDeviceGet(device_idx))
 
@@ -950,6 +943,12 @@ class SymmDeviceMemory:
             self._exchanger: HandleExchanger = FabricHandleExchanger(
                 self.comm_backend, self.group_rank, self.group_size
             )
+            if fabric_handle_supported == 0:
+                raise RuntimeError(
+                    "[McastDeviceMemory] Device does not support fabric handle."
+                )
+
+            self._alloc_mn_mcast_mem(buf_size, comm_backend_for_handle_transfer)
         else:
             self._exchanger = PosixFDHandleExchanger(
                 self.comm_backend, self.group_rank, self.group_size
@@ -1069,9 +1068,10 @@ class SymmDeviceMemory:
         """Get the total number of devices in the group"""
         return self.group_size
 
-    def get_allocation_size(self) -> int:
-        """Get the total allocation size (including signal pad)"""
-        return self.allocation_size
+    def _alloc_mn_mcast_mem(
+        self, buf_size: int, comm_backend_for_handle_transfer: Any = None
+    ):
+        """Allocate multi-node multicast memory using MNNVL"""
 
     def get_usable_buffer_size(self) -> int:
         """Get the usable buffer size (excluding signal pad)"""
@@ -1101,9 +1101,13 @@ class SymmDeviceMemory:
                 )
         except Exception as e:
             print(f"Error checking CUDA context: {e}")
+        if comm_backend_for_handle_transfer is None:
+            comm = MpiComm()
+        else:
+            comm = comm_backend_for_handle_transfer
+        # Set up allocation properties
+        handle_type = cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
 
-    def _get_allocation_prop(self, buf_size: int):
-        """Compute allocation size and return allocation/multicast properties."""
         allocation_prop = cuda.CUmemAllocationProp()
         allocation_prop.requestedHandleTypes = self._exchanger.handle_type
         allocation_prop.type = cuda.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
@@ -1301,6 +1305,7 @@ class McastGPUBuffer:
         group_size: int,
         group_rank: int,
         device: torch.device,
+        mn_nvlink: bool = True,
         comm_backend_for_handle_transfer: Optional[CommBackend] = None,
     ):
         """
@@ -1314,11 +1319,12 @@ class McastGPUBuffer:
             mn_nvlink: Flag indicating if multi-node NVLink is used
             comm_backend_for_handle_transfer: Communication backend for handle transfer
         """
-        self.mcast_device_memory = SymmDeviceMemory(
+        self.mcast_device_memory = McastDeviceMemory(
             buf_size,
             group_size,
             group_rank,
             device.index,
+            mn_nvlink,
             comm_backend_for_handle_transfer,
         )
         # Update buf_size to reflect the actual usable buffer size after allocation

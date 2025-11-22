@@ -17,8 +17,7 @@ from flashinfer.comm.mapping import Mapping
 
 from ..jit import gen_trtllm_mnnvl_comm_module
 from ..utils import register_custom_op
-from .mnnvl import McastGPUBuffer, CommBackend, MPIBackend
-from .workspace_base import AllReduceFusionWorkspace
+from .mnnvl import McastGPUBuffer, CommBackend
 
 
 def mpi_barrier():
@@ -499,7 +498,10 @@ def trtllm_mnnvl_fused_allreduce_add_rmsnorm(
     "get_allreduce_mnnvl_workspace is deprecated, use MNNVLAllReduceFusionWorkspace class to manage the workspace instead"
 )
 def get_allreduce_mnnvl_workspace(
-    mapping: Mapping, dtype: torch.dtype, buffer_size_in_bytes: Optional[int] = None
+    mapping: Mapping,
+    dtype: torch.dtype,
+    comm_backend_for_handle_transfer: Optional[CommBackend] = None,
+    buffer_size_in_bytes: Optional[int] = None,
 ) -> Tuple[McastGPUBuffer, torch.Tensor, int]:
     """Get workspace buffers needed for multi-node NVLink all-reduce operation.
 
@@ -515,6 +517,7 @@ def get_allreduce_mnnvl_workspace(
     Args:
         mapping: Tensor parallel mapping configuration containing rank info
         dtype: Data type of the tensors being reduced
+        comm: Optional communication backend for multi-node synchronization
         buffer_size_in_bytes: Optional buffer size. Practically, assign this to 3 * 2 * dtype.itemsize * hidden_dim * max_tokens
 
     Returns:
@@ -535,17 +538,32 @@ def get_allreduce_mnnvl_workspace(
         TARGET_WORKSPACE_SIZE_BYTES / (lcm_hidden_dim * stride)
     ) * (lcm_hidden_dim * stride)
 
-    # Redirect to the new workspace allocation logic. The new kernel needs the new flag buffer layout.
-    workspace = MNNVLAllReduceFusionWorkspace(
-        mapping,
-        buffer_size_in_bytes=buffer_size_in_bytes,
-        comm_backend=comm_backend_for_handle_transfer,
+    mcast_buffer = McastGPUBuffer(
+        buffer_size_in_bytes,
+        mapping.tp_size,
+        mapping.tp_rank,
+        torch.device("cuda", mapping.local_rank),
+        mapping.is_multi_node() or force_mn,
+        comm_backend_for_handle_transfer=comm_backend_for_handle_transfer,
     )
 
-    mcast_buffer = workspace.mcast_buffer_handle
-    buffer_flags = workspace.buffer_flags
-    # this is calculated using the legacy behavior. We do not use the actual allocated size.
-    max_num_elements = workspace.buffer_size_bytes // stride
+    # Initialize the unicast buffer with -0.0
+    mcast_buffer.lamport_initialize(mapping.tp_rank, dtype)
+
+    # CPU barrier since we assume this should not be called in cuda graph
+    torch.cuda.synchronize()
+    if comm_backend_for_handle_transfer is None:
+        mpi_barrier()
+    else:
+        comm_backend_for_handle_transfer.barrier()
+
+    # This is a buffer to maintain the state of this allreduce Op
+    # [Buffer_ptr, Clear_ptr, Buffer_size, num_tokens_prev, atomic access counter]
+    buffer_flags = torch.tensor(
+        [0, 2, max_num_elements, 0, 0],
+        dtype=torch.uint32,
+        device=torch.device("cuda", mapping.local_rank),
+    )
 
     return (
         mcast_buffer,
