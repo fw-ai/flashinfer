@@ -527,23 +527,38 @@ class TllmGenFmhaKernel {
 
     // The kernel type.
     FmhaKernelType& kernelType = selectKernelParams.mKernelType;
-    // The tile size for Q.
-    int& tileSizeQ = selectKernelParams.mTileSizeQ;
+    // Generation kernelType will use either SwapsMmaAbForGeneration or KeepsMmaAbForGeneration.
+    if (isGenerationKernel(params.mKernelType) && isMlaGenKernel(params)) {
+      // We use the low-latency kernel (SwapsMmaAbForGeneration with tileSizeQ = 16) when any of the
+      // following conditions are met:
+      // 1. The number of headsQPerKv is <= 32.
+      // 2. The number of headsQPerKv is < 128 for sparseMla.
+      // 3. The seqLenPerCtaKv <= 1024 based on the benchmark results (this might be fine-tuned
+      // later) and
+      //    the numCtas (after splitting the heads across multiple CTAs) <=
+      //    params.mMultiProcessorCount.
 
-    // Check the conditions.
-    if (params.mNumHeadsQPerKv <= 32 || (params.mSparseMla && params.mNumHeadsQPerKv < 128) ||
-        useSwapsMmaAbMlaGenKernel(params)) {
-      kernelType = FmhaKernelType::SwapsMmaAbForGeneration;
-      // Currently, only tileSizeQ = 8 or 16 are supported.
-      tileSizeQ = params.mNumHeadsQPerKv <= 8 ? 8 : 16;
-    } else {
-      // Otherwise, we use the high-throughput kernel.
-      kernelType = FmhaKernelType::KeepsMmaAbForGeneration;
-      // Use the tileSizeQ = 64 for MLA high-throughput generation kernels.
-      tileSizeQ = 64;
-      // Always use the separate reduction kernel.
-      if (isMultiCtasKvEnabled(selectKernelParams.mMultiCtasKvMode)) {
-        selectKernelParams.mMultiCtasKvMode = MultiCtasKvMode::GmemReductionWithSeparateKernel;
+      // Check the conditions.
+      if (params.mNumHeadsQPerKv <= 32 || (params.mSparseMla && params.mNumHeadsQPerKv < 128) ||
+          useSwapsMmaAbMlaGenKernel(params)) {
+        kernelType = FmhaKernelType::SwapsMmaAbForGeneration;
+      } else {
+        // Otherwise, we use the high-throughput kernel.
+        kernelType = FmhaKernelType::KeepsMmaAbForGeneration;
+        // Always use the separate reduction kernel.
+        if (isMultiCtasKvEnabled(selectKernelParams.mMultiCtasKvMode)) {
+          selectKernelParams.mMultiCtasKvMode = MultiCtasKvMode::GmemReductionWithSeparateKernel;
+        }
+        // The keepsMmaAbForGeneration sparseMla kernels only support numHeadsQPerKv = 128.
+        FLASHINFER_CHECK(
+            !params.mSparseMla || params.mNumHeadsQPerKv == 128,
+            "The keepsMmaAbForGeneration sparseMla kernels only support numHeadsQPerKv = 128");
+        // The 2CTA keepsMmaAbForGeneration kernel is used when the numHeadsQPerKv is 128.
+        if (params.mNumHeadsQPerKv == 128) {
+          selectKernelParams.mUses2CtaMma = true;
+          // Each Cta only handles 256 headDimV.
+          selectKernelParams.mHeadDimPerCtaV = 256;
+        }
       }
       // The keepsMmaAbForGeneration sparseMla kernels only support numHeadsQPerKv = 128.
       FLASHINFER_CHECK(
@@ -734,6 +749,16 @@ class TllmGenFmhaKernel {
       selectKernelParams.mMaskType = TrtllmGenAttentionMaskType::SlidingOrChunkedCausal;
     }
 
+    // The number of tokens per page.
+    int numTokensPerPage = params.mNumTokensPerPage;
+    // SparseMla kernels use a fixed numTokensPerPage = 1.
+    if (params.mSparseMla) {
+      numTokensPerPage = 1;
+    } else if (!isPagedKv(params.mQkvLayout)) {
+      // NumTokensPerPage is set to 0 when not selecting pagedKv-layout kernels.
+      numTokensPerPage = 0;
+    }
+
     // SparseMla kernels use a fixed numTokensPerPage = 1.
     if (params.mSparseMla) {
       selectKernelParams.mNumTokensPerPage = 1;
@@ -761,8 +786,7 @@ class TllmGenFmhaKernel {
         ", numTokensPerPage=" + std::to_string(selectKernelParams.mNumTokensPerPage) +
         ", reuseSmemKForV=" + std::to_string(selectKernelParams.mReuseSmemKForV) +
         ", uses2CtaMma=" + std::to_string(selectKernelParams.mUses2CtaMma) +
-        ", sparseMla=" + std::to_string(params.mSparseMla) +
-        ", skipsSoftmax=" + std::to_string(selectKernelParams.mSkipsSoftmaxWhenPossible);
+        ", sparseMla=" + std::to_string(params.mSparseMla);
     IKL_LOG_DEBUG(
         "Searching for kernel traits (%d available) in TllmGenFmhaKernel(%s, %s, %s, %d) %s",
         getNumLoadedKernels(), toStr(mDtypeQ), toStr(mDtypeKv), toStr(mDtypeOut), mSM,
@@ -774,10 +798,9 @@ class TllmGenFmhaKernel {
                static_cast<int>(selectKernelParams.mTileScheduler),
                static_cast<int>(selectKernelParams.mMultiCtasKvMode),
                selectKernelParams.mHeadDimPerCtaV, params.mHeadDimQk, params.mHeadDimV,
-               selectKernelParams.mTileSizeQ, selectKernelParams.mTileSizeKv,
-               selectKernelParams.mNumTokensPerPage, selectKernelParams.mReuseSmemKForV,
-               selectKernelParams.mUses2CtaMma, params.mSparseMla,
-               selectKernelParams.mSkipsSoftmaxWhenPossible),
+               selectKernelParams.mTileSizeKv, numTokensPerPage, maxNumHeadsQPerKvInCta,
+               selectKernelParams.mReuseSmemKForV, selectKernelParams.mUses2CtaMma,
+               params.mSparseMla),
         info);
   }
 

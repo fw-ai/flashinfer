@@ -296,10 +296,6 @@ struct TllmGenFmhaRunnerParams {
   float mScaleSfKv;
   // The SF scale for output.
   float mScaleSfO;
-  // Do we skip softmax when possible?
-  bool mSkipsSoftmaxWhenPossible;
-  // Skip softmax threshold scale factor.
-  float mSkipSoftmaxThresholdScaleFactor;
   // Whether to use sparse MLA.
   bool mSparseMla;
   // The top k value for sparse MLA.

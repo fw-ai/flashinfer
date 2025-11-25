@@ -2559,6 +2559,7 @@ def _check_trtllm_gen_mla_shape(
     qk_nope_head_dim,
     kv_lora_rank,
     qk_rope_head_dim,
+    sparse_mla_top_k,
     page_table,
     page_size,
 ):
@@ -2583,16 +2584,23 @@ def _check_trtllm_gen_mla_shape(
             f"Expected head dim 576 for query and kv_cache, got {D_q} and {D_ckv}"
         )
 
-    B_block_table, block_num = page_table.shape
-    block_size = page_size
-    if B_q != B_block_table:
-        raise ValueError(
-            f"Expected batch size {B_q} for query and block_table, got {B_q} and {B_block_table}"
-        )
-    if block_num % (128 / block_size) != 0:
-        raise ValueError(
-            f"Expected block_num % (128 / block_size) == 0, got {block_num=} and {block_size=}"
-        )
+    if sparse_mla_top_k > 0:
+        page_table_shape = page_table.shape
+        if page_table_shape != (B_q, Q_len, sparse_mla_top_k):
+            raise ValueError(
+                f"Expected page_table.shape == (B_q, Q_len, sparse_mla_top_k), got {page_table_shape}"
+            )
+    else:
+        B_block_table, block_num = page_table.shape
+        block_size = page_size
+        if B_q != B_block_table:
+            raise ValueError(
+                f"Expected batch size {B_q} for query and block_table, got {B_q} and {B_block_table}"
+            )
+        if block_num % (128 / block_size) != 0:
+            raise ValueError(
+                f"Expected block_num % (128 / block_size) == 0, got {block_num=} and {block_size=}"
+            )
 
 
 @flashinfer_api
@@ -2606,6 +2614,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
     block_tables: torch.Tensor,
     seq_lens: torch.Tensor,
     max_seq_len: int,
+    sparse_mla_top_k: int = 0,
     out: Optional[torch.Tensor] = None,
     bmm1_scale: Union[float, torch.Tensor] = 1.0,
     bmm2_scale: Union[float, torch.Tensor] = 1.0,
@@ -2621,6 +2630,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
     qk_nope_head_dim: qk_nope_head_dim, must be 128
     kv_lora_rank: kv_lora_rank, must be 512
     qk_rope_head_dim: qk_rope_head_dim, must be 64
+    sparse_mla_top_k: sparse MLA top k, must be 0 for non-sparse MLA.
     block_tables: page_table of kv cache, [batch_size, num_pages]
     seq_lens: query_len
     max_seq_len: max sequence length for kv_cache
@@ -2713,6 +2723,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
             qk_nope_head_dim,
             kv_lora_rank,
             qk_rope_head_dim,
+            sparse_mla_top_k,
             block_tables,
             block_size,
         )
@@ -2746,6 +2757,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
             -1,  # o_sf_vec_size
             0,  # o_sf_start_index
             -1,  # window_left
+            sparse_mla_top_k,
             sm_count,
             enable_pdl,
             workspace_buffer.numel() * workspace_buffer.element_size(),
@@ -2827,6 +2839,7 @@ def xqa_batch_decode_with_kv_cache_mla(
         qk_nope_head_dim,
         kv_lora_rank,
         qk_rope_head_dim,
+        0,  # sparse_mla_top_k
         block_tables,
         block_size,
     )
