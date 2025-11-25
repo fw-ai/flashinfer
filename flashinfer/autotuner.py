@@ -466,35 +466,42 @@ class AutoTuner:
             }
 
         for p in profiles:
-            try:
-                tensors = self._prepare_input_tensors(p, inputs)
-                is_cache_hit, runner_id, tactic, _ = self.search_cache(
-                    custom_op, runners, p.get_opt_shapes(), tuning_config
-                )
-                if not is_cache_hit:
-                    min_time = float("inf")
-                    # Initialize runner and tactic as None in case of no valid tactic or runners are found
-                    runner_id, tactic = None, None
-                    for r_id, r in enumerate(runners):
-                        # TODO: use FakeTensor here.
-                        valid_tactics = r.get_valid_tactics(tensors, p)
-                        runner_arg_names = runner_arg_names_map[r]
-                        if (
-                            "do_preparation" in runner_arg_names
-                            and len(valid_tactics) > 0
-                        ):
-                            r(tensors, tactic=-1, do_preparation=True, **kwargs)
-                        for tac in valid_tactics:
-                            try:
-                                time_measured = self._profile_single_kernel(
-                                    r, tensors, tac, **kwargs
-                                )
-                            except torch.cuda.OutOfMemoryError:
-                                raise
-                            except Exception as e:
-                                shapes = self._get_input_sizes(tensors)
-                                logger.warning(
-                                    f"[Autotuner]: Skipping tactic {r} {tac}, due to failure while profiling: {e}"
+            tensors = self._prepare_input_tensors(p, inputs)
+            is_cache_hit, runner_id, tactic, _ = self.search_cache(
+                custom_op, runners, p.get_opt_shapes(), tuning_config
+            )
+            if not is_cache_hit:
+                min_time = float("inf")
+                # Initialize runner and tactic as None in case of no valid tactic or runners are found
+                runner_id, tactic = None, None
+                for r_id, r in enumerate(runners):
+                    # TODO: use FakeTensor here.
+                    valid_tactics = r.get_valid_tactics(tensors, p)
+                    runner_arg_names = runner_arg_names_map[r]
+                    if "do_preparation" in runner_arg_names and len(valid_tactics) > 0:
+                        r(tensors, tactic=-1, do_preparation=True, **kwargs)
+                    for tac in valid_tactics:
+                        try:
+                            time_measured = self._profile_single_kernel(
+                                r, tensors, tac, **kwargs
+                            )
+                        except Exception as e:
+                            shapes = self._get_input_sizes(tensors)
+                            logger.warning(
+                                f"[Autotuner]: Skipping tactic {r} {tac}, due to failure while profiling: {e}"
+                            )
+
+                            # Log stacktrace as debug to not spam log
+                            logger.debug(
+                                f"[Autotuner]: Failed when profiling {r} {tac}, shapes={shapes}. Error occurred: {e}"
+                            )
+
+                            # Record the failed profiling combinations
+                            if custom_op not in self.stats.failed_profiling_count:
+                                self.stats.failed_profiling_count[custom_op] = set()
+                            self.stats.failed_profiling_count[custom_op].add(
+                                AutoTuner._get_cache_key(
+                                    custom_op, r, p.get_opt_shapes(), tuning_config
                                 )
 
                                 # Log stacktrace as debug to not spam log

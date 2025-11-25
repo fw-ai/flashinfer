@@ -832,95 +832,6 @@ _FP8_GEMM_SM100_TUNING_CONFIG = TuningConfig(
 )
 
 
-@functools.cache
-def get_gemm_sm100_module_cutlass_bf16():
-    module = gen_gemm_sm100_module_cutlass_bf16().build_and_load()
-
-    def cutlass_bf16_gemm_runner():
-        class CutlassBf16GemmRunner(TunableRunner):
-            def get_valid_tactics(
-                self,
-                inputs: List[torch.Tensor],
-                profile: OptimizationProfile,
-            ) -> List[int]:
-                return list(range(module.bf16_gemm_tactic_num()))
-
-            def forward(
-                self,
-                inputs: List[torch.Tensor],
-                tactic: int = -1,
-                do_preparation: bool = False,
-                **kwargs,
-            ) -> torch.Tensor:
-                a, b, _, _, out, workspace_buffer = inputs
-                module.bf16_gemm(
-                    a,
-                    b.transpose(-2, -1),
-                    out,
-                    workspace_buffer,
-                    tactic,
-                )
-                return out
-
-        return CutlassBf16GemmRunner()
-
-    return SimpleNamespace(
-        cutlass_bf16_gemm_runner=cutlass_bf16_gemm_runner,
-    )
-
-
-_BF16_GEMM_SM100_TUNING_CONFIG = TuningConfig(
-    dynamic_tensor_specs=(
-        DynamicTensorSpec(
-            (0,),  # a_tensor_index
-            (-2,),
-            get_last_power_of_2_num_tokens_buckets,
-            last_positive_power_of_2,
-        ),
-    ),
-    constraint_specs=(
-        ConstraintSpec(
-            4,  # out_tensor_index
-            -2,
-            lambda shapes: shapes[0][-2],
-        ),
-    ),
-)
-
-
-def bf16_gemm_sm100(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    bias: torch.Tensor,
-    pdl: bool,
-    out: torch.Tensor,
-    workspace_buffer: torch.Tensor,
-    runner_names: List[str],
-) -> None:
-    runners = []
-    use_sm_100f = is_sm100f_supported(a.device)
-    if "cudnn" in runner_names:
-        runners.append(_cudnn_gemm_bf16_runner())
-    if "cutlass" in runner_names:
-        runners.append(get_gemm_sm100_module_cutlass_bf16().cutlass_bf16_gemm_runner())
-    if "tgv" in runner_names:
-        runners.append(
-            get_tgv_gemm_sm10x_module(a.dtype, use_sm_100f).tgv_gemm_runner()
-        )
-    assert runners, "No suitable runners found"
-    tuner = AutoTuner.get()
-
-    inputs = [a, b, bias, pdl, out, workspace_buffer]
-    runner, tactic = tuner.choose_one(
-        "bf16_gemm",
-        runners,
-        _BF16_GEMM_SM100_TUNING_CONFIG,
-        inputs,
-    )
-
-    runner(inputs=inputs, tactic=tactic)
-
-
 def fp8_gemm_sm100(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -2903,6 +2814,58 @@ def _heuristic_func_mm_fp4(
     return [c for c in candidate_backends if c in suitable_backends]
 
 
+def _pad_up(x, y):
+    return ((x + y - 1) // y) * y
+
+
+_MM_FP4_TUNING_CONFIG_8x4 = TuningConfig(
+    dynamic_tensor_specs=(
+        DynamicTensorSpec(
+            (0,),  # a_tensor_index
+            (0,),
+            get_last_power_of_2_num_tokens_buckets,
+            last_positive_power_of_2,
+        ),
+    ),
+    constraint_specs=(
+        ConstraintSpec(
+            2,  # a_scale_tensor_index
+            0,
+            lambda shapes: _pad_up(shapes[0][0], 8),
+        ),
+        ConstraintSpec(
+            6,  # out_tensor_index
+            0,
+            lambda shapes: shapes[0][0],
+        ),
+    ),
+)
+
+
+_MM_FP4_TUNING_CONFIG_128x4 = TuningConfig(
+    dynamic_tensor_specs=(
+        DynamicTensorSpec(
+            (0,),  # a_tensor_index
+            (0,),
+            get_last_power_of_2_num_tokens_buckets,
+            last_positive_power_of_2,
+        ),
+    ),
+    constraint_specs=(
+        ConstraintSpec(
+            2,  # a_scale_tensor_index
+            0,
+            lambda shapes: _pad_up(shapes[0][0], 128),
+        ),
+        ConstraintSpec(
+            6,  # out_tensor_index
+            0,
+            lambda shapes: shapes[0][0],
+        ),
+    ),
+)
+
+
 @backend_requirement(
     {
         "cudnn": _cudnn_gemm_fp4_requirement,
@@ -3032,34 +2995,8 @@ def mm_fp4(
     # Now we have a list of runners for desired & supported backends.
     tuner = AutoTuner.get()
 
-    a_tensor_index = 0
-    a_scale_tensor_index = 2
-    out_tensor_index = 6
-
-    def pad_up(x, y):
-        return ((x + y - 1) // y) * y
-
-    tuning_config = TuningConfig(
-        dynamic_tensor_specs=(
-            DynamicTensorSpec(
-                (a_tensor_index,),
-                (0,),
-                get_last_power_of_2_num_tokens_buckets,
-                last_positive_power_of_2,
-            ),
-        ),
-        constraint_specs=(
-            ConstraintSpec(
-                a_scale_tensor_index,
-                0,
-                lambda shapes: pad_up(
-                    shapes[a_tensor_index][0], 8 if use_8x4_sf_layout else 128
-                ),
-            ),
-            ConstraintSpec(
-                out_tensor_index, 0, lambda shapes: shapes[a_tensor_index][0]
-            ),
-        ),
+    tuning_config = (
+        _MM_FP4_TUNING_CONFIG_8x4 if use_8x4_sf_layout else _MM_FP4_TUNING_CONFIG_128x4
     )
 
     inputs = [
