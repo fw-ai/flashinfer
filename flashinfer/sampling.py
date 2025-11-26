@@ -93,25 +93,17 @@ def get_sampling_module():
         indices: Optional[torch.Tensor],
         deterministic: bool,
         generator: Optional[torch.Generator],
-        seed: Optional[Union[int, torch.Tensor]] = None,
-        offset: Optional[Union[int, torch.Tensor]] = None,
+        seed: Optional[int] = None,
+        offset: Optional[int] = None,
     ) -> torch.Tensor:
         device = logits.device
         # TODO: support more data types in logits to avoid conversion
         # to float32
         logits = logits.float()
         batch_size = indices.size(0) if indices is not None else logits.size(0)
-        out_dtype = indices.dtype if indices is not None else torch.int32
-        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
+        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
         if seed is None or offset is None:
-            seed, offset = get_seed_and_offset(
-                batch_size * logits.size(1), generator, device
-            )
-
-        maybe_seed_arr, seed_val, maybe_offset_arr, offset_val = (
-            _validate_and_convert_seed_offset(seed, offset, device, batch_size)
-        )
-
+            seed, offset = get_seed_and_offset(batch_size * logits.size(1), generator)
         module.sampling_from_logits(
             logits,
             samples,
@@ -143,21 +135,15 @@ def get_sampling_module():
         indices: Optional[torch.Tensor],
         deterministic: bool,
         generator: Optional[torch.Generator],
-        seed: Optional[Union[int, torch.Tensor]] = None,
-        offset: Optional[Union[int, torch.Tensor]] = None,
+        seed: Optional[int] = None,
+        offset: Optional[int] = None,
     ) -> torch.Tensor:
         device = probs.device
         probs = probs.float()
         batch_size = indices.size(0) if indices is not None else probs.size(0)
-        out_dtype = indices.dtype if indices is not None else torch.int32
-        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
+        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
         if seed is None or offset is None:
-            seed, offset = get_seed_and_offset(batch_size, generator, device)
-
-        maybe_seed_arr, seed_val, maybe_offset_arr, offset_val = (
-            _validate_and_convert_seed_offset(seed, offset, device, batch_size)
-        )
-
+            seed, offset = get_seed_and_offset(batch_size, generator)
         module.sampling_from_probs(
             probs,
             samples,
@@ -193,8 +179,8 @@ def get_sampling_module():
         top_p_val: float,
         deterministic: bool,
         generator: Optional[torch.Generator],
-        seed: Optional[Union[int, torch.Tensor]] = None,
-        offset: Optional[Union[int, torch.Tensor]] = None,
+        seed: Optional[int] = None,
+        offset: Optional[int] = None,
     ) -> torch.Tensor:
         device = probs.device
         probs = probs.float()
@@ -202,15 +188,9 @@ def get_sampling_module():
             maybe_top_p_arr.float() if maybe_top_p_arr is not None else None
         )
         batch_size = indices.size(0) if indices is not None else probs.size(0)
-        out_dtype = indices.dtype if indices is not None else torch.int32
-        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
+        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
         if seed is None or offset is None:
-            seed, offset = get_seed_and_offset(batch_size * 32, generator, device)
-
-        maybe_seed_arr, seed_val, maybe_offset_arr, offset_val = (
-            _validate_and_convert_seed_offset(seed, offset, device, batch_size)
-        )
-
+            seed, offset = get_seed_and_offset(batch_size * 32, generator)
         module.top_p_sampling_from_probs(
             probs,
             samples,
@@ -249,22 +229,16 @@ def get_sampling_module():
         top_k_val: int,
         deterministic: bool,
         generator: Optional[torch.Generator],
-        seed: Optional[Union[int, torch.Tensor]] = None,
-        offset: Optional[Union[int, torch.Tensor]] = None,
+        seed: Optional[int] = None,
+        offset: Optional[int] = None,
     ) -> torch.Tensor:
         device = probs.device
         probs = probs.float()
         batch_size = indices.size(0) if indices is not None else probs.size(0)
         maybe_top_k_arr = maybe_top_k_arr.int() if maybe_top_k_arr is not None else None
-        out_dtype = indices.dtype if indices is not None else torch.int32
-        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
+        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
         if seed is None or offset is None:
-            seed, offset = get_seed_and_offset(batch_size * 32, generator, device)
-
-        maybe_seed_arr, seed_val, maybe_offset_arr, offset_val = (
-            _validate_and_convert_seed_offset(seed, offset, device, batch_size)
-        )
-
+            seed, offset = get_seed_and_offset(batch_size * 32, generator)
         module.top_k_sampling_from_probs(
             probs,
             samples,
@@ -303,8 +277,8 @@ def get_sampling_module():
         min_p_val: float,
         deterministic: bool,
         generator: Optional[torch.Generator],
-        seed: Optional[Union[int, torch.Tensor]] = None,
-        offset: Optional[Union[int, torch.Tensor]] = None,
+        seed: Optional[int] = None,
+        offset: Optional[int] = None,
     ) -> torch.Tensor:
         device = probs.device
         probs = probs.float()
@@ -312,15 +286,9 @@ def get_sampling_module():
             maybe_min_p_arr.float() if maybe_min_p_arr is not None else None
         )
         batch_size = indices.size(0) if indices is not None else probs.size(0)
-        out_dtype = indices.dtype if indices is not None else torch.int32
-        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
+        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
         if seed is None or offset is None:
-            seed, offset = get_seed_and_offset(batch_size, generator, device)
-
-        maybe_seed_arr, seed_val, maybe_offset_arr, offset_val = (
-            _validate_and_convert_seed_offset(seed, offset, device, batch_size)
-        )
-
+            seed, offset = get_seed_and_offset(batch_size, generator)
         module.min_p_sampling_from_probs(
             probs,
             samples,
@@ -347,8 +315,8 @@ def get_sampling_module():
         top_p_val: float,
         deterministic: bool,
         generator: Optional[torch.Generator],
-        seed: Optional[Union[int, torch.Tensor]] = None,
-        offset: Optional[Union[int, torch.Tensor]] = None,
+        seed: Optional[int] = None,
+        offset: Optional[int] = None,
     ) -> torch.Tensor:
         device = probs.device
         probs = probs.float()
@@ -357,15 +325,9 @@ def get_sampling_module():
             maybe_top_p_arr.float() if maybe_top_p_arr is not None else None
         )
         batch_size = indices.size(0) if indices is not None else probs.size(0)
-        out_dtype = indices.dtype if indices is not None else torch.int32
-        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
+        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
         if seed is None or offset is None:
-            seed, offset = get_seed_and_offset(batch_size * 32, generator, device)
-
-        maybe_seed_arr, seed_val, maybe_offset_arr, offset_val = (
-            _validate_and_convert_seed_offset(seed, offset, device, batch_size)
-        )
-
+            seed, offset = get_seed_and_offset(batch_size * 32, generator)
         module.top_k_top_p_sampling_from_probs(
             probs,
             samples,
@@ -515,8 +477,8 @@ def get_sampling_module():
         output_emitted_draft_token_num: torch.Tensor,
         deterministic: bool,
         generator: Optional[torch.Generator],
-        seed: Optional[Union[int, torch.Tensor]] = None,
-        offset: Optional[Union[int, torch.Tensor]] = None,
+        seed: Optional[int] = None,
+        offset: Optional[int] = None,
     ) -> torch.Tensor:
         device = draft_probs.device
         draft_probs = draft_probs.float()
@@ -526,16 +488,10 @@ def get_sampling_module():
         output_emitted_draft_token_num = output_emitted_draft_token_num.int()
         b, n = draft_token_ids.shape
         output_token_ids = torch.empty((b, n + 1), dtype=torch.int32, device=device)
-        batch_size = b
         if seed is None or offset is None:
             seed, offset = get_seed_and_offset(
-                draft_probs.size(0) * (draft_probs.size(1) + 1), generator, device
+                draft_probs.size(0) * (draft_probs.size(1) + 1), generator
             )
-
-        maybe_seed_arr, seed_val, maybe_offset_arr, offset_val = (
-            _validate_and_convert_seed_offset(seed, offset, device, batch_size)
-        )
-
         module.chain_speculative_sampling(
             draft_probs,
             draft_token_ids,
@@ -680,8 +636,8 @@ def sampling_from_logits(
     deterministic: bool = True,
     generator: Optional[torch.Generator] = None,
     check_nan: bool = False,
-    seed: Optional[Union[int, torch.Tensor]] = None,
-    offset: Optional[Union[int, torch.Tensor]] = None,
+    seed: Optional[int] = None,
+    offset: Optional[int] = None,
 ) -> torch.Tensor:
     r"""Fused GPU kernel for category sampling from logits. It's equivalent to sampling
     from :attr:`logits` after applying softmax.
@@ -705,23 +661,10 @@ def sampling_from_logits(
         A random number generator for the operation.
     check_nan: bool
         Whether to check nan in :attr:`logits`, default is ``False``.
-    seed: Optional[Union[int, torch.Tensor]]
-        Random seed value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. Common approaches include:
-        - Incrementing offset by the number of random values consumed
-        - Updating seed based on the number of calls to the operation
-    offset: Optional[Union[int, torch.Tensor]]
-        Random offset value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. The offset should be
-        incremented based on the number of random values consumed by the operation.
+    seed: Optional[int]
+        seed value to use for the rng during the sampling operation.
+    offset: Optional[int]
+        offset value to use for the rng during the sampling operation.
     Returns
     -------
     samples: torch.Tensor
@@ -760,8 +703,8 @@ def sampling_from_probs(
     deterministic: bool = True,
     generator: Optional[torch.Generator] = None,
     check_nan: bool = False,
-    seed: Optional[Union[int, torch.Tensor]] = None,
-    offset: Optional[Union[int, torch.Tensor]] = None,
+    seed: Optional[int] = None,
+    offset: Optional[int] = None,
 ) -> torch.Tensor:
     r"""Fused GPU kernel for category sampling from probabilities.
 
@@ -784,23 +727,10 @@ def sampling_from_probs(
         A random number generator for the operation.
     check_nan: bool
         Whether to check nan in :attr:`probs`, default is ``False``.
-    seed: Optional[Union[int, torch.Tensor]]
-        Random seed value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. Common approaches include:
-        - Incrementing offset by the number of random values consumed
-        - Updating seed based on the number of calls to the operation
-    offset: Optional[Union[int, torch.Tensor]]
-        Random offset value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. The offset should be
-        incremented based on the number of random values consumed by the operation.
+    seed: Optional[int]
+        seed value to use for the rng during the sampling operation.
+    offset: Optional[int]
+        offset value to use for the rng during the sampling operation.
 
     Returns
     -------
@@ -847,8 +777,8 @@ def top_p_sampling_from_probs(
     deterministic: bool = True,
     generator: Optional[torch.Generator] = None,
     check_nan: bool = False,
-    seed: Optional[Union[int, torch.Tensor]] = None,
-    offset: Optional[Union[int, torch.Tensor]] = None,
+    seed: Optional[int] = None,
+    offset: Optional[int] = None,
 ) -> torch.Tensor:
     r"""Fused GPU kernel for top-p sampling (nucleus sampling) from probabilities,
     this operator implements GPU-based rejection sampling without explicit sorting.
@@ -880,23 +810,10 @@ def top_p_sampling_from_probs(
         A random number generator for the operation.
     check_nan: bool
         Whether to check nan in :attr:`probs`, default is ``False``.
-    seed: Optional[Union[int, torch.Tensor]]
-        Random seed value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. Common approaches include:
-        - Incrementing offset by the number of random values consumed
-        - Updating seed based on the number of calls to the operation
-    offset: Optional[Union[int, torch.Tensor]]
-        Random offset value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. The offset should be
-        incremented based on the number of random values consumed by the operation.
+    seed: Optional[int]
+        seed value to use for the rng during the sampling operation.
+    offset: Optional[int]
+        offset value to use for the rng during the sampling operation.
 
     Returns
     -------
@@ -958,8 +875,8 @@ def top_k_sampling_from_probs(
     deterministic: bool = True,
     generator: Optional[torch.Generator] = None,
     check_nan: bool = False,
-    seed: Optional[Union[int, torch.Tensor]] = None,
-    offset: Optional[Union[int, torch.Tensor]] = None,
+    seed: Optional[int] = None,
+    offset: Optional[int] = None,
 ) -> torch.Tensor:
     r"""Fused GPU kernel for top-k sampling from probabilities,
     this operator implements GPU-based rejection sampling without explicit sorting.
@@ -991,23 +908,10 @@ def top_k_sampling_from_probs(
         A random number generator for the operation.
     check_nan: bool
         Whether to check nan in :attr:`probs`, default is ``False``.
-    seed: Optional[Union[int, torch.Tensor]]
-        Random seed value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. Common approaches include:
-        - Incrementing offset by the number of random values consumed
-        - Updating seed based on the number of calls to the operation
-    offset: Optional[Union[int, torch.Tensor]]
-        Random offset value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. The offset should be
-        incremented based on the number of random values consumed by the operation.
+    seed: Optional[int]
+        seed value to use for the rng during the sampling operation.
+    offset: Optional[int]
+        offset value to use for the rng during the sampling operation.
 
     Returns
     -------
@@ -1069,8 +973,8 @@ def min_p_sampling_from_probs(
     deterministic: bool = True,
     generator: Optional[torch.Generator] = None,
     check_nan: bool = False,
-    seed: Optional[Union[int, torch.Tensor]] = None,
-    offset: Optional[Union[int, torch.Tensor]] = None,
+    seed: Optional[int] = None,
+    offset: Optional[int] = None,
 ) -> torch.Tensor:
     r"""Fused GPU kernel for `min_p sampling <https://arxiv.org/abs/2407.01082>`_ from probabilities,
 
@@ -1103,23 +1007,10 @@ def min_p_sampling_from_probs(
         A random number generator for the operation.
     check_nan: bool
         Whether to check nan in :attr:`probs`, default is ``False``.
-    seed: Optional[Union[int, torch.Tensor]]
-        Random seed value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. Common approaches include:
-        - Incrementing offset by the number of random values consumed
-        - Updating seed based on the number of calls to the operation
-    offset: Optional[Union[int, torch.Tensor]]
-        Random offset value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. The offset should be
-        incremented based on the number of random values consumed by the operation.
+    seed: Optional[int]
+        seed value to use for the rng during the sampling operation.
+    offset: Optional[int]
+        offset value to use for the rng during the sampling operation.
 
     Returns
     -------
@@ -1178,8 +1069,8 @@ def top_k_top_p_sampling_from_logits(
     deterministic: bool = True,
     generator: Optional[torch.Generator] = None,
     check_nan: bool = False,
-    seed: Optional[Union[int, torch.Tensor]] = None,
-    offset: Optional[Union[int, torch.Tensor]] = None,
+    seed: Optional[int] = None,
+    offset: Optional[int] = None,
 ) -> torch.Tensor:
     r"""Fused GPU kernel for top-k and top-p sampling from pre-softmax logits,
 
@@ -1220,23 +1111,10 @@ def top_k_top_p_sampling_from_logits(
         A random number generator for the operation.
     check_nan: bool
         Whether to check nan in :attr:`probs`, default is ``False``.
-    seed: Optional[Union[int, torch.Tensor]]
-        Random seed value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. Common approaches include:
-        - Incrementing offset by the number of random values consumed
-        - Updating seed based on the number of calls to the operation
-    offset: Optional[Union[int, torch.Tensor]]
-        Random offset value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. The offset should be
-        incremented based on the number of random values consumed by the operation.
+    seed: Optional[int]
+        seed value to use for the rng during the sampling operation.
+    offset: Optional[int]
+        offset value to use for the rng during the sampling operation.
 
     Returns
     -------
@@ -1326,8 +1204,8 @@ def top_k_top_p_sampling_from_probs(
     deterministic: bool = True,
     generator: Optional[torch.Generator] = None,
     check_nan: bool = False,
-    seed: Optional[Union[int, torch.Tensor]] = None,
-    offset: Optional[Union[int, torch.Tensor]] = None,
+    seed: Optional[int] = None,
+    offset: Optional[int] = None,
 ) -> torch.Tensor:
     r"""Fused GPU kernel for top-k and top-p sampling from probabilities,
 
@@ -1368,23 +1246,10 @@ def top_k_top_p_sampling_from_probs(
         A random number generator for the operation.
     check_nan: bool
         Whether to check nan in :attr:`probs`, default is ``False``.
-    seed: Optional[Union[int, torch.Tensor]]
-        Random seed value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. Common approaches include:
-        - Incrementing offset by the number of random values consumed
-        - Updating seed based on the number of calls to the operation
-    offset: Optional[Union[int, torch.Tensor]]
-        Random offset value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. The offset should be
-        incremented based on the number of random values consumed by the operation.
+    seed: Optional[int]
+        seed value to use for the rng during the sampling operation.
+    offset: Optional[int]
+        offset value to use for the rng during the sampling operation.
 
     Returns
     -------
@@ -1681,8 +1546,8 @@ def chain_speculative_sampling(
     maybe_output_emitted_draft_token_num: Optional[torch.Tensor] = None,
     deterministic: bool = True,
     generator: Optional[torch.Generator] = None,
-    seed: Optional[Union[int, torch.Tensor]] = None,
-    offset: Optional[Union[int, torch.Tensor]] = None,
+    seed: Optional[int] = None,
+    offset: Optional[int] = None,
 ) -> torch.Tensor:
     r"""Fused-GPU kernel for speculative sampling for sequence generation (proposed in
     paper `Accelerating Large Language Model Decoding with Speculative Sampling <https://arxiv.org/pdf/2302.01318>`_),
@@ -1718,23 +1583,10 @@ def chain_speculative_sampling(
         Whether to use deterministic kernel implementation, default is ``True``.
     generator: Optional[torch.Generator]
         A random number generator for the operation.
-    seed: Optional[Union[int, torch.Tensor]]
-        Random seed value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. Common approaches include:
-        - Incrementing offset by the number of random values consumed
-        - Updating seed based on the number of calls to the operation
-    offset: Optional[Union[int, torch.Tensor]]
-        Random offset value for the sampling operation. Can be either an integer or a torch.Tensor.
-        When provided as a torch.Tensor, it must be int64 or uint64 dtype, 1D, and length 1 or batch_size.
-        Using torch.Tensor is required for CUDA graph compatibility.
-
-        Warning: If you provide seed and offset explicitly, you are responsible for updating
-        their values between calls to ensure different random samples. The offset should be
-        incremented based on the number of random values consumed by the operation.
+    seed: Optional[int]
+        seed value to use for the rng during the sampling operation.
+    offset: Optional[int]
+        offset value to use for the rng during the sampling operation.
 
     Returns
     -------
