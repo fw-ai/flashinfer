@@ -86,7 +86,7 @@ void trtllm_moe_finalize_allreduce_fusion(
     TensorView expanded_idx_to_permuted_idx, TensorView norm_out, TensorView residual_out,
     bool launch_with_pdl, TensorView workspace, int64_t const world_rank, int64_t const world_size,
     double const eps, Optional<TensorView> shared_expert_output,
-    Optional<TensorView> expert_scale_factor) {
+    Optional<TensorView> expert_scale_factor, Optional<float> routing_scaling_factor) {
   DISPATCH_FLOATING_TYPES_FOR_ALLREDUCE(residual_in.dtype(), c_type, [&] {
     MoeFinalizeAllReduceFusionParams<c_type> params;
 
@@ -101,6 +101,12 @@ void trtllm_moe_finalize_allreduce_fusion(
     // size: num_token * hidden_dim
     params.size = residual_in.numel();
     params.hidden_dim = hidden_dim;
+    int num_tokens = residual_in.size(0);
+
+    FLASHINFER_CHECK(expanded_idx_to_permuted_idx.size(0) == num_tokens,
+                     "expanded_idx_to_permuted_idx.size(0) must equal num_tokens, got expanded_idx_to_permuted_idx.size(0)=%d and num_tokens=%d", expanded_idx_to_permuted_idx.size(0), num_tokens);
+
+    params.routing_scaling_factor = routing_scaling_factor.has_value() ? routing_scaling_factor.value() : 1.0f;
 
     // workspace: AR scratch space
     params.workspace = reinterpret_cast<void**>(workspace.data_ptr());
@@ -120,6 +126,9 @@ void trtllm_moe_finalize_allreduce_fusion(
         static_cast<int32_t*>(expanded_idx_to_permuted_idx.data_ptr());
     params.shared_expert_output =
         shared_expert_output.has_value() ? shared_expert_output.value().data_ptr() : nullptr;
+
+    // printf("hidden_dim: %d\n", params.hidden_dim);
+    // printf("size: %d\n", params.size);
 
     // output tensors
     params.norm_out = norm_out.data_ptr();
