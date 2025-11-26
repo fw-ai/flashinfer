@@ -127,9 +127,6 @@ void trtllm_moe_finalize_allreduce_fusion(
     params.shared_expert_output =
         shared_expert_output.has_value() ? shared_expert_output.value().data_ptr() : nullptr;
 
-    // printf("hidden_dim: %d\n", params.hidden_dim);
-    // printf("size: %d\n", params.size);
-
     // output tensors
     params.norm_out = norm_out.data_ptr();
     params.residual_out = residual_out.data_ptr();
