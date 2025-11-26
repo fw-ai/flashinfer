@@ -706,6 +706,7 @@ struct MoeFinalizeAllReduceFusionParams : public AllReduceFusionParams<T> {
   // [num_tokens, top_k]
   int32_t* expanded_idx_to_permuted_idx = nullptr;
   // allreduce_in [maxPermutedPaddedCount, hidden_dim]
+  float routing_scaling_factor = 1.0f;
 };
 
 template <int NRanks>
@@ -818,7 +819,16 @@ __device__ __forceinline__ void fused_op(vec_t<T, VEC_SIZE> const& val, int acce
   vec_t<T, VEC_SIZE> norm_val;
   norm_val = rms_norm<T, VEC_SIZE>(residual_val, gamma_val, params.rms_eps, params.hidden_dim);
   if constexpr (NormOut) {
-    norm_val.store(reinterpret_cast<T*>(params.norm_out) + access_id * VEC_SIZE);
+    // NOTE: Temporarily hardcode norm_out to be stored as FP8 E4M3; will refactor later.
+    // norm_val.store(reinterpret_cast<T*>(params.norm_out) + access_id * VEC_SIZE);
+    auto norm_out_ptr =
+        reinterpret_cast<__nv_fp8_e4m3*>(params.norm_out) + access_id * VEC_SIZE;
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      norm_out_ptr[i] = static_cast<__nv_fp8_e4m3>(norm_val[i]);
+    }
+    // norm_val.cast_store(reinterpret_cast<__nv_fp8_e4m3*>(params.norm_out) + access_id * VEC_SIZE);
+
   }
 #if CUDA_VERSION >= 12080
   if constexpr (QuantOut) {
@@ -1297,10 +1307,9 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
 
       int thread_offset_across_token =
           permuted_idx * params.hidden_dim + thread_offset_within_token;
-      float block_scale = 1.0;
+      float block_scale = params.routing_scaling_factor;
       if (use_scale_factor) {
-        block_scale =
-            static_cast<float>(static_cast<ScaleType*>(params.expert_scale_factor)[expanded_idx]);
+        block_scale = static_cast<float*>(params.expert_scale_factor)[expanded_idx] * params.routing_scaling_factor;
       }
 
       vec_t<T, VEC_SIZE> permuted_data;
