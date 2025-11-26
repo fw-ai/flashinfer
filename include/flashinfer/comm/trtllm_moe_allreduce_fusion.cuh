@@ -665,6 +665,8 @@ struct AllReduceFusionParams {
   void* residual_in;
   void* residual_out;
   void* norm_out;
+  // Encoded DLPack dtype for norm_out (or -1 if unspecified).
+  int64_t norm_out_dtype = -1;
   void* quant_out;
   void* scale_out;
   void* rms_gamma;
@@ -801,7 +803,7 @@ __device__ __forceinline__ vec_t<T, VEC_SIZE> rms_norm(vec_t<T, VEC_SIZE> const&
 }
 
 template <bool AllReduceOut, bool ResidualOut, bool NormOut, bool QuantOut, typename T,
-          uint32_t VEC_SIZE>
+          typename NormOutT, uint32_t VEC_SIZE>
 __device__ __forceinline__ void fused_op(vec_t<T, VEC_SIZE> const& val, int access_id, int token_id,
                                          int access_id_in_token, AllReduceFusionParams<T>& params) {
   if constexpr (AllReduceOut) {
@@ -819,16 +821,13 @@ __device__ __forceinline__ void fused_op(vec_t<T, VEC_SIZE> const& val, int acce
   vec_t<T, VEC_SIZE> norm_val;
   norm_val = rms_norm<T, VEC_SIZE>(residual_val, gamma_val, params.rms_eps, params.hidden_dim);
   if constexpr (NormOut) {
-    // NOTE: Temporarily hardcode norm_out to be stored as FP8 E4M3; will refactor later.
-    // norm_val.store(reinterpret_cast<T*>(params.norm_out) + access_id * VEC_SIZE);
+    // Allow norm_out to be stored in a different dtype (e.g. FP8) via NormOutT.
     auto norm_out_ptr =
-        reinterpret_cast<__nv_fp8_e4m3*>(params.norm_out) + access_id * VEC_SIZE;
+        reinterpret_cast<NormOutT*>(params.norm_out) + access_id * VEC_SIZE;
 #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
-      norm_out_ptr[i] = static_cast<__nv_fp8_e4m3>(norm_val[i]);
+      norm_out_ptr[i] = static_cast<NormOutT>(norm_val[i]);
     }
-    // norm_val.cast_store(reinterpret_cast<__nv_fp8_e4m3*>(params.norm_out) + access_id * VEC_SIZE);
-
   }
 #if CUDA_VERSION >= 12080
   if constexpr (QuantOut) {
@@ -1077,8 +1076,8 @@ __global__ void moereduce_allreduce_fusion_kernel_oneshot_lamport(
     }
 
     // * Fuse
-    fused_op<AllReduceOut, ResidualOut, NormOut, QuantOut, T, VEC_SIZE>(sum_val, idx, tidx,
-                                                                        access_id_in_token, params);
+    fused_op<AllReduceOut, ResidualOut, NormOut, QuantOut, T, T, VEC_SIZE>(
+        sum_val, idx, tidx, access_id_in_token, params);
   }
   comm.update(params.size * NRanks);
   cudaTriggerProgrammaticLaunchCompletion();
@@ -1241,7 +1240,7 @@ cudaError_t moereduction_allreduce_fusion_op(MoeReductionAllReduceFusionParams<T
 /////////////////////////////////////////////////////////////////
 
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
-          typename ScaleType = T>
+          typename NormOutT, typename ScaleType = T>
 __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
     MoeFinalizeAllReduceFusionParams<T> params) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
@@ -1374,8 +1373,8 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
     }
 
     // * Fuse: AllReduceOut is always false in finalize_moe_allreduce
-    fused_op<false, ResidualOut, NormOut, QuantOut, T, VEC_SIZE>(sum_val, idx, tidx,
-                                                                 access_id_in_token, params);
+    fused_op<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
+        sum_val, idx, tidx, access_id_in_token, params);
   }
   comm.update(params.size * NRanks);
   cudaTriggerProgrammaticLaunchCompletion();
@@ -1383,19 +1382,19 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
 }
 
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
-          typename ScaleType = T>
+          typename NormOutT, typename ScaleType = T>
 cudaError_t launch_oneshot_moefinalize_lamport(MoeFinalizeAllReduceFusionParams<T> const& params,
                                                cudaLaunchConfig_t& cfg) {
   FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(
       &cfg,
       moefinalize_allreduce_fusion_kernel_oneshot_lamport<T, NRanks, ResidualOut, NormOut, QuantOut,
-                                                          ScaleType>,
+                                                          NormOutT, ScaleType>,
       params));
   return cudaSuccess;
 }
 
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
-          typename ScaleType = T>
+          typename NormOutT, typename ScaleType = T>
 cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
     MoeFinalizeAllReduceFusionParams<T> const& params, bool launch_with_pdl) {
   int token_num = params.size / params.hidden_dim;
@@ -1441,7 +1440,7 @@ cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
   cfg.numAttrs = 2;
   if (oneshot) {
     FLASHINFER_CUDA_CALL(
-        (launch_oneshot_moefinalize_lamport<T, NRanks, ResidualOut, NormOut, QuantOut, ScaleType>(
+        (launch_oneshot_moefinalize_lamport<T, NRanks, ResidualOut, NormOut, QuantOut, NormOutT, ScaleType>(
             params, cfg)));
   }
   return cudaSuccess;
@@ -1475,7 +1474,7 @@ cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
     }                                                                                          \
   }()
 
-template <typename T>
+template <typename T, typename ScaleType, typename NormOutT>
 cudaError_t moefinalize_allreduce_fusion_op(MoeFinalizeAllReduceFusionParams<T> const& params,
                                             bool launch_with_pdl) {
   static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
@@ -1493,9 +1492,9 @@ cudaError_t moefinalize_allreduce_fusion_op(MoeFinalizeAllReduceFusionParams<T> 
                            "trtllm_moe_allreduce_fusion quant");
           return cudaErrorNotSupported;
         }
-        FLASHINFER_CUDA_CALL(
-            (moefinalize_allreduce_fusion_kernel_launcher<T, N_RANKS, RES, RMS, QUANT, float>( // TODO: hardcoding as float for now - but should support other types later
-                (params), (launch_with_pdl))));
+        FLASHINFER_CUDA_CALL((
+            moefinalize_allreduce_fusion_kernel_launcher<T, N_RANKS, RES, RMS, QUANT, NormOutT,
+                                                         ScaleType>(params, launch_with_pdl)));
       });
   return status;
 }
