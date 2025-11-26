@@ -1494,7 +1494,7 @@ cudaError_t moefinalize_allreduce_fusion_op(MoeFinalizeAllReduceFusionParams<T> 
           return cudaErrorNotSupported;
         }
         FLASHINFER_CUDA_CALL(
-            (moefinalize_allreduce_fusion_kernel_launcher<T, N_RANKS, RES, RMS, QUANT, float>( // TODO: hardcoding as float for now - but should add other types later
+            (moefinalize_allreduce_fusion_kernel_launcher<T, N_RANKS, RES, RMS, QUANT, float>( // TODO: hardcoding as float for now - but should support other types later
                 (params), (launch_with_pdl))));
       });
   return status;
