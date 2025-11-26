@@ -1309,7 +1309,7 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
           permuted_idx * params.hidden_dim + thread_offset_within_token;
       float block_scale = params.routing_scaling_factor;
       if (use_scale_factor) {
-        block_scale = static_cast<float*>(params.expert_scale_factor)[expanded_idx] * params.routing_scaling_factor;
+        block_scale = static_cast<float>(static_cast<ScaleType*>(params.expert_scale_factor)[expanded_idx]) * params.routing_scaling_factor;
       }
 
       vec_t<T, VEC_SIZE> permuted_data;
@@ -1494,7 +1494,7 @@ cudaError_t moefinalize_allreduce_fusion_op(MoeFinalizeAllReduceFusionParams<T> 
           return cudaErrorNotSupported;
         }
         FLASHINFER_CUDA_CALL(
-            (moefinalize_allreduce_fusion_kernel_launcher<T, N_RANKS, RES, RMS, QUANT>(
+            (moefinalize_allreduce_fusion_kernel_launcher<T, N_RANKS, RES, RMS, QUANT, float>( // TODO: hardcoding as float for now - but should add other types later
                 (params), (launch_with_pdl))));
       });
   return status;
