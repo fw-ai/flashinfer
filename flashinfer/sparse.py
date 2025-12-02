@@ -186,6 +186,12 @@ class BlockSparseAttentionWrapper:
             pin_memory=True,
         )
 
+        # Enable user-defined size
+        if vector_sparse_indices_buffer is not None:
+            self._vector_sparse_indices_buffer = vector_sparse_indices_buffer
+        if vector_sparse_indptr_buffer is not None:
+            self._vector_sparse_indptr_buffer = vector_sparse_indptr_buffer
+
     @flashinfer_api
     def plan(
         self,
@@ -751,6 +757,12 @@ class VariableBlockSparseAttentionWrapper:
             dtype=self._int_workspace_buffer.dtype,
             pin_memory=True,
         )
+
+        # Enable user-defined size
+        if vector_sparse_indices_buffer is not None:
+            self._vector_sparse_indices_buffer = vector_sparse_indices_buffer
+        if vector_sparse_indptr_buffer is not None:
+            self._vector_sparse_indptr_buffer = vector_sparse_indptr_buffer
 
     @flashinfer_api
     def plan(
