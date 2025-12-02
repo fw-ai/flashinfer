@@ -542,7 +542,7 @@ void rope_quantize_append_paged_kv_cache(
     v_in_stride_h = v_in.stride(1);
   }
 
-  cudaSetDevice(q_rope_in.device().device_id);
+  ffi::CUDADeviceGuard device_guard(q_rope_in.device().device_id);
   const cudaStream_t stream = get_stream(q_rope_in.device());
 
   DISPATCH_DLPACK_DTYPE_TO_CTYPE_FP16(q_rope_in.dtype(), c_type, [&] {

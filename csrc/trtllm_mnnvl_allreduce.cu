@@ -26,15 +26,12 @@ using tvm::ffi::Optional;
     }                                                                               \
   }()
 
-void trtllm_mnnvl_allreduce_fusion(TensorView input, int64_t multicast_buffer_ptr,
-                                   int64_t buffer_ptrs_dev, int64_t buffer_ptr_local,
-                                   TensorView buffer_flags_mnnvl, int64_t nranks, int64_t rank,
-                                   bool rmsnorm_fusion, bool launch_with_pdl, bool use_oneshot,
-                                   TensorView output, Optional<TensorView> residual_out,
-                                   Optional<TensorView> residual_in, Optional<TensorView> gamma,
-                                   Optional<double> epsilon) {
-  ffi::CUDADeviceGuard device_guard(input.device().device_id);
-  auto stream = get_stream(input.device());
+void trtllm_mnnvl_all_reduce(TensorView in, int64_t multicast_buffer_ptr, int64_t buffer_ptrs_dev,
+                             int64_t buffer_M, TensorView buffer_flags_mnnvl, int64_t nranks,
+                             int64_t rank, bool wait_for_results, bool launch_with_pdl,
+                             Optional<TensorView> out) {
+  ffi::CUDADeviceGuard device_guard(in.device().device_id);
+  auto stream = get_stream(in.device());
 
   DISPATCH_FLOATING_TYPES_FOR_MNNVL_ALLREDUCE(input.dtype(), c_type, [&] {
     // Extract parameters from tensors
@@ -112,4 +109,32 @@ void trtllm_mnnvl_allreduce_fusion(TensorView input, int64_t multicast_buffer_pt
   });
 }
 
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(trtllm_mnnvl_allreduce_fusion, trtllm_mnnvl_allreduce_fusion);
+void trtllm_mnnvl_rmsnorm(int64_t multicast_buffer_ptr, TensorView prenorm_output,
+                          TensorView normed_output, TensorView gamma, double epsilon,
+                          TensorView residual, TensorView buffer_flags, bool launch_with_pdl) {
+  ffi::CUDADeviceGuard device_guard(prenorm_output.device().device_id);
+  auto stream = get_stream(prenorm_output.device());
+
+  DISPATCH_FLOATING_TYPES_FOR_MNNVL_ALLREDUCE(prenorm_output.dtype(), c_type, [&] {
+    // Create the parameters struct
+    RMSNormParams<c_type> params;
+    params.residual_output = prenorm_output.data_ptr();
+    params.output = normed_output.data_ptr();
+    params.input = reinterpret_cast<void const*>(multicast_buffer_ptr);
+    params.gamma = gamma.data_ptr();
+    params.epsilon = epsilon;
+    params.residual = residual.data_ptr();
+    params.buffer_flags = reinterpret_cast<uint32_t*>(buffer_flags.data_ptr());
+    params.batch = normed_output.size(0);
+    params.hidden_dim = normed_output.size(1);
+    params.stream = stream;
+    params.launch_with_pdl = launch_with_pdl;
+    auto status = twoshot_rmsnorm_dispatch_hidden_dim<c_type>(params);
+    TVM_FFI_ICHECK(status == cudaSuccess)
+        << "twoshot_rmsnorm_dispatch_hidden_dim failed with error code "
+        << cudaGetErrorString(status);
+  });
+}
+
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(trtllm_mnnvl_all_reduce, trtllm_mnnvl_all_reduce);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(trtllm_mnnvl_rmsnorm, trtllm_mnnvl_rmsnorm);
