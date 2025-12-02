@@ -1104,7 +1104,7 @@ def bench_gpu_time_with_cupti(
 
     def func_buffer_completed(
         launches: list[tuple[float, float, int, int, int]],
-        kernels: list[tuple[str, float, float, int, int, int, int, int]],
+        kernels: list[tuple[str, float, float, int]],
         activities: list,
     ):
         for activity in activities:
@@ -1115,6 +1115,20 @@ def bench_gpu_time_with_cupti(
             ):
                 # Kernel activity
                 kernels.append(collect_kernel_info(activity))
+            elif activity.kind in (
+                cupti.ActivityKind.RUNTIME,
+                cupti.ActivityKind.DRIVER,
+            ):
+                # Runtime or Driver activity
+                launches.append(
+                    (
+                        activity.start,
+                        activity.end,
+                        activity.correlation_id,
+                        activity.cbid,
+                        activity.kind,
+                    )
+                )
             elif activity.kind in (
                 cupti.ActivityKind.RUNTIME,
                 cupti.ActivityKind.DRIVER,
@@ -1197,13 +1211,11 @@ def bench_gpu_time_with_cupti(
 
     # CUPTI measurement
     launches: list[tuple[float, float, int, int, int]] = []
-    kernels: list[tuple[str, float, float, int, int, int, int, int]] = []
+    kernels: list[tuple[str, float, float, int]] = []
     iter_timestamps = []
     cupti.activity_enable(cupti.ActivityKind.RUNTIME)
     cupti.activity_enable(cupti.ActivityKind.CONCURRENT_KERNEL)
     cupti.activity_enable(cupti.ActivityKind.DRIVER)
-    cupti.activity_enable(cupti.ActivityKind.MEMCPY)
-    cupti.activity_enable(cupti.ActivityKind.MEMSET)
     cupti.activity_register_callbacks(
         func_buffer_requested, partial(func_buffer_completed, launches, kernels)
     )
@@ -1221,8 +1233,6 @@ def bench_gpu_time_with_cupti(
     cupti.activity_disable(cupti.ActivityKind.RUNTIME)
     cupti.activity_disable(cupti.ActivityKind.CONCURRENT_KERNEL)
     cupti.activity_disable(cupti.ActivityKind.DRIVER)
-    cupti.activity_disable(cupti.ActivityKind.MEMCPY)
-    cupti.activity_disable(cupti.ActivityKind.MEMSET)
     cupti.finalize()
 
     def generate_kernel_string(kernel):
