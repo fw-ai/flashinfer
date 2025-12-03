@@ -73,10 +73,7 @@ void sampling_from_logits(TensorView logits, TensorView output, Optional<TensorV
                           uint64_t offset_val) {
   CHECK_INPUT(logits);
   CHECK_DIM(2, logits);  // logits: (batch_size, vocab_size)
-  CHECK_MAYBE_INPUT_TYPES(maybe_indices, dl_int32, dl_int64);
-  CHECK_MAYBE_SAME_DTYPE(maybe_indices, output);
-  validate_seed_offset_tensors(maybe_seed_arr, maybe_offset_arr, logits);
-
+  CHECK_MAYBE_INPUT_TYPE(maybe_indices, dl_int32);
   unsigned int batch_size = output.size(0);
   unsigned int vocab_size = logits.size(1);
 
@@ -106,10 +103,7 @@ void sampling_from_probs(TensorView probs, TensorView output, Optional<TensorVie
                          Optional<TensorView> maybe_offset_arr, uint64_t offset_val) {
   CHECK_INPUT(probs);
   CHECK_DIM(2, probs);  // probs: (batch_size, vocab_size)
-  CHECK_MAYBE_INPUT_TYPES(maybe_indices, dl_int32, dl_int64);
-  CHECK_MAYBE_SAME_DTYPE(maybe_indices, output);
-  validate_seed_offset_tensors(maybe_seed_arr, maybe_offset_arr, probs);
-
+  CHECK_MAYBE_INPUT_TYPE(maybe_indices, dl_int32);
   unsigned int batch_size = output.size(0);
   unsigned int vocab_size = probs.size(1);
 
@@ -142,10 +136,7 @@ void top_p_sampling_from_probs(TensorView probs, TensorView output,
                                uint64_t offset_val) {
   CHECK_INPUT(probs);
   CHECK_DIM(2, probs);  // probs: (batch_size, vocab_size)
-  CHECK_MAYBE_INPUT_TYPES(maybe_indices, dl_int32, dl_int64);
-  CHECK_MAYBE_SAME_DTYPE(maybe_indices, output);
-  validate_seed_offset_tensors(maybe_seed_arr, maybe_offset_arr, probs);
-
+  CHECK_MAYBE_INPUT_TYPE(maybe_indices, dl_int32);
   unsigned int batch_size = output.size(0);
   unsigned int vocab_size = probs.size(1);
   check_tensor_param(maybe_top_p_arr, probs);
@@ -184,10 +175,7 @@ void top_k_sampling_from_probs(TensorView probs, TensorView output,
   CHECK_DEVICE(output, probs);
   CHECK_DIM(2, probs);   // probs: (batch_size, vocab_size)
   CHECK_DIM(1, output);  // output: (batch_size)
-  CHECK_MAYBE_INPUT_TYPES(maybe_indices, dl_int32, dl_int64);
-  CHECK_MAYBE_SAME_DTYPE(maybe_indices, output);
-  validate_seed_offset_tensors(maybe_seed_arr, maybe_offset_arr, probs);
-
+  CHECK_MAYBE_INPUT_TYPE(maybe_indices, dl_int32);
   unsigned int batch_size = output.size(0);
   unsigned int vocab_size = probs.size(1);
   check_tensor_param(maybe_top_k_arr, probs);
@@ -226,10 +214,7 @@ void min_p_sampling_from_probs(TensorView probs, TensorView output,
   CHECK_DEVICE(output, probs);
   CHECK_DIM(2, probs);   // probs: (batch_size, vocab_size)
   CHECK_DIM(1, output);  // output: (batch_size)
-  CHECK_MAYBE_INPUT_TYPES(maybe_indices, dl_int32, dl_int64);
-  CHECK_MAYBE_SAME_DTYPE(maybe_indices, output);
-  validate_seed_offset_tensors(maybe_seed_arr, maybe_offset_arr, probs);
-
+  CHECK_MAYBE_INPUT_TYPE(maybe_indices, dl_int32);
   unsigned int batch_size = output.size(0);
   unsigned int vocab_size = probs.size(1);
   check_tensor_param(maybe_min_p_arr, probs);
@@ -270,10 +255,7 @@ void top_k_top_p_sampling_from_probs(TensorView probs, TensorView output,
   CHECK_DEVICE(output, probs);
   CHECK_DIM(2, probs);   // probs: (batch_size, vocab_size)
   CHECK_DIM(1, output);  // output: (batch_size)
-  CHECK_MAYBE_INPUT_TYPES(maybe_indices, dl_int32, dl_int64);
-  CHECK_MAYBE_SAME_DTYPE(maybe_indices, output);
-  validate_seed_offset_tensors(maybe_seed_arr, maybe_offset_arr, probs);
-
+  CHECK_MAYBE_INPUT_TYPE(maybe_indices, dl_int32);
   unsigned int batch_size = output.size(0);
   unsigned int vocab_size = probs.size(1);
   check_tensor_param(maybe_top_k_arr, probs);

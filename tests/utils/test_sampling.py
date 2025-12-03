@@ -837,8 +837,8 @@ def test_tensor_validation_min_p(batch_size, vocab_size, p):
 
     # 4: non-int32 indices raises error.
     with pytest.raises(
-        ValueError,
-        match=r"indices must have dtype torch\.int32, got torch\.int64",
+        RuntimeError,
+        match=r"(Inconsistency of Tensor type.*maybe_indices)",
     ):
         flashinfer.sampling.min_p_sampling_from_probs(
             normalized_prob,
