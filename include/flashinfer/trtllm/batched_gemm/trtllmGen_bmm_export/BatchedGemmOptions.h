@@ -94,7 +94,7 @@ struct BatchedGemmOptions : public gemmGatedAct::GemmGatedActOptions {
       bool hoistMmaTaskTryWaits, int k, gemm::KernelTraits kernelTraits, gemm::MatrixLayout layoutA,
       gemm::MatrixLayout layoutB, int m, int mmaK, tg::MmaKind mmaKind, int mmaM, int mmaN,
       bool mockAllReduce, int n, int numEpilogueWarps, int numRegsCastAWarps,
-      int numRegsCopySfLdsSttm, int numRegsCopySparsityInfo, int numRegsPerThreadEpilogueWarp,
+      int numRegsCopySfLdsSttm, int numRegsPerThreadEpilogueWarp,
       int numRegsPerThreadNonEpilogueWarp, int numSlicesForSplitK, int numSlicesForSliceK,
       int numStages, int numStagesMma, int numStagesMmaWithinWorkTile,
       int numStagesMmaAcrossWorkTile, int numStagesWorkId, bool outputDebugTensors, bool patchF2fp,
@@ -126,16 +126,15 @@ struct BatchedGemmOptions : public gemmGatedAct::GemmGatedActOptions {
                 gridWaitForPrimaryEarlyExit, gridWaitForPrimaryA, gridWaitForPrimaryB,
                 hoistLoadTaskInit, hoistMmaTaskTryWaits, k, kernelTraits, layoutA, layoutB, m, mmaK,
                 mmaKind, mmaM, mmaN, mockAllReduce, n, numEpilogueWarps, numRegsCastAWarps,
-                numRegsCopySfLdsSttm, numRegsCopySparsityInfo, numRegsPerThreadEpilogueWarp,
-                numRegsPerThreadNonEpilogueWarp, numSlicesForSplitK, numSlicesForSliceK, numStages,
-                numStagesMma, numStagesMmaWithinWorkTile, numStagesMmaAcrossWorkTile,
-                numStagesWorkId, outputDebugTensors, patchF2fp, sfBlockSizeA, sfBlockSizeB,
-                sfBlockSizeC, sfLayoutA, sfLayoutB, sfLayoutC, sfReshapeFactor, sliceK, sparsityA,
-                splitK, tileK, tileM, tileN, tileScheduler, transposeMmaOutput,
-                useCustomMmaSchedule, useDeepSeekFp8, useHoistTryWaitForCustomMmaSchedule,
-                useMaxTmemOverlap, usePerTokenSfA, usePerTokenSfB, useShuffledMatrix, useTmaStore,
-                useTwoTmaLoadWarps, useTwoMmaWarps, useUnrollLoop2xForMma, validM, validN, validK,
-                worldSize),
+                numRegsCopySfLdsSttm, numRegsPerThreadEpilogueWarp, numRegsPerThreadNonEpilogueWarp,
+                numSlicesForSplitK, numSlicesForSliceK, numStages, numStagesMma,
+                numStagesMmaWithinWorkTile, numStagesMmaAcrossWorkTile, numStagesWorkId,
+                outputDebugTensors, patchF2fp, sfBlockSizeA, sfLayoutA, sfLayoutB, sfLayoutC,
+                sfReshapeFactor, sliceK, splitK, tileK, tileM, tileN, tileScheduler,
+                transposeMmaOutput, useCustomMmaSchedule, useDeepSeekFp8,
+                useHoistTryWaitForCustomMmaSchedule, useMaxTmemOverlap, usePerTokenSfA,
+                usePerTokenSfB, useShuffledMatrixA, useTmaStore, useTwoTmaLoadWarps, useTwoMmaWarps,
+                useUnrollLoop2xForMma, validM, validN, validK, worldSize),
             actType, clampBeforeAct),
         mBatchedM(batchedM),
         mBatchedN(batchedN),
@@ -372,6 +371,13 @@ inline bool checkAndUpdateBatchedGemmOptions(BatchedGemmOptions& options, tg::Cu
       doesRouteImplUseLdgPlusSts(options.mRouteSfsImpl.value())) {
     TLLM_CHECK_ERROR(options.mK % options.mTileK == 0,
                      "K must be a multiple of TileK when using Ldg based routing");
+  }
+
+  if (options.mRouteSfsImpl.has_value() &&
+      (doesRouteImplUseLdgsts(options.mRouteSfsImpl.value()) ||
+       doesRouteImplUseLdgPlusSts(options.mRouteSfsImpl.value()))) {
+    TLLM_CHECK_ERROR(options.mK % options.mTileK == 0,
+                     "K must be a multiple of tileK when using Ldg based SF routing");
   }
 
   if (options.mRouteSfsImpl.has_value() &&

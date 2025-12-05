@@ -638,10 +638,6 @@ def mxint4_quantize(
 class MxInt4BlockScaleMoe(Moe):
     """MxInt4 MoE implementation with block scaling (DeepSeek style)."""
 
-    @property
-    def quant_mode(self) -> QuantMode:
-        return QuantMode.MXINT4_BF16_BF16
-
     def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
         """Quantize weights to MxInt4 with block scaling."""
         num_experts = gemm1_weights.shape[0]
@@ -784,7 +780,6 @@ class MxInt4BlockScaleMoe(Moe):
     ):
         """Call MoE with runtime input quantization + kernel execution (done at runtime)."""
         expert_logits = kwargs["expert_logits"]
-        routing_bias = kwargs["routing_bias"]
         num_experts = kwargs["num_experts"]
         top_k = kwargs["top_k"]
         n_groups = kwargs["n_groups"]
@@ -792,13 +787,11 @@ class MxInt4BlockScaleMoe(Moe):
         intermediate_size = kwargs["intermediate_size"]
         routing_method_type = kwargs["routing_method_type"]
         enable_autotune = kwargs.get("enable_autotune", True)
-        routed_scaling = kwargs.get("routed_scaling", 1.0)
 
         # Use autotuner for optimal kernel selection
         with autotune(enable_autotune):
             output = trtllm_mxint4_block_scale_moe(
                 expert_logits,  # float
-                routing_bias,
                 hidden_states_orig,
                 static_data["gemm1_weights"],
                 static_data["gemm1_scales"],
@@ -814,7 +807,7 @@ class MxInt4BlockScaleMoe(Moe):
                 intermediate_size,
                 0,
                 num_experts,
-                routed_scaling,
+                1.0,
                 routing_method_type=routing_method_type,
                 tune_max_num_tokens=TUNE_MAX_NUM_TOKENS,
             )
@@ -2509,9 +2502,7 @@ def run_moe_reference_mxint4(args):
         gemm2_weights_dequant,
         args.permute_info,
         args.use_routing_scales_on_input,
-        args.activation_type,
-        gemm1_bias=args.gemm1_bias,
-        gemm2_bias=args.gemm2_bias,
+        args.gated_act_type,
     )
 
     return run_moe_dequant(args_dequant, QuantMode.MXINT4_BF16_BF16), args_dequant

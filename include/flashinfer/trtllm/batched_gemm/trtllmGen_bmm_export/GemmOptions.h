@@ -489,8 +489,9 @@ inline std::string dumpOptions(GemmOptions const& options, bool dumpRuntimeParam
      << "," << std::endl;
   ss << "mDtypeMmaB=" << "trtllm::gen::Dtype(" << static_cast<int32_t>(options.mDtypeMmaB) << ")"
      << "," << std::endl;
-  ss << "mEltwiseActType=" << "gemm::EltwiseActType("
-     << static_cast<int32_t>(options.mEltwiseActType) << ")" << "," << std::endl;
+  ss << "mEltwiseActType="
+     << "gemm::EltwiseActType(" << static_cast<int32_t>(options.mEltwiseActType) << ")"
+     << "," << std::endl;
   ss << "mEnablesEarlyExit=" << options.mEnablesEarlyExit << "," << std::endl;
   ss << "mEnablesDelayedEarlyExit=" << options.mEnablesDelayedEarlyExit << "," << std::endl;
   ss << "mEnablesGlobalPtxKnobs=" << options.mEnablesGlobalPtxKnobs << "," << std::endl;
@@ -652,7 +653,6 @@ inline bool checkAndUpdateGemmOptions(GemmOptions& options, tg::CudaArch cudaArc
 
   bool isBlackwell = tg::isArchBlackwell(cudaArch);
 
-  // If dtypeB is unspecified (Dtype::Void), assign to dtypeA.
   if (options.mDtypeB == tg::Dtype::Void) {
     if (updateOptions) {
       options.mDtypeB = options.mDtypeA;

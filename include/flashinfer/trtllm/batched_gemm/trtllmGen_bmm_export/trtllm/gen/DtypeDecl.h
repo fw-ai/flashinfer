@@ -207,7 +207,7 @@ inline int dtypeNumEltsPerSf(Dtype dtype, bool useSparsity = false) {
     case Dtype::MxE2m1:
     case Dtype::MxE4m3:
     case Dtype::MxInt4:
-      return useSparsity ? 64 : 32;
+      return 32;
     default:
       assert(false);
       return -1;
