@@ -2923,17 +2923,14 @@ def mm_fp4(
         Whether to use 8x4 scale factor layout or 128x4 scale factor layout, defaults to False.
 
     backend: Literal["cudnn", "trtllm", "cutlass", "auto"]
-        Backend to use, defaults to "auto", which automatically selects the best backend between cudnn and cutlass.
+        Backend to use, defaults to ``"auto"``, which automatically selects the best
+        backend between ``"cudnn"`` and ``"cutlass"`` based on the current CUDA and
+        cuDNN versions. The ``"trtllm"`` backend is never selected when
+        ``backend="auto"`` because it requires different weight preparation.
 
     use_nvfp4: bool
         Whether to use nvfp4 quantization or mxfp4 quantization, defaults to ``True``.
         See the ``block_size`` parameter for related constraints.
-
-    enable_pdl: bool
-        Whether to enable Programmatic Dependent Launch (PDL) for the ``cute_dsl``
-        backend, defaults to ``True``. PDL allows overlapping the tail of one kernel
-        with the start of the next for reduced launch latency. This parameter is
-        only used by the ``cute_dsl`` backend and is ignored by other backends.
 
     Notes
     -----
