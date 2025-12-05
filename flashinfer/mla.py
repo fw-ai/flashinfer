@@ -20,7 +20,7 @@ from typing import List, Literal, Optional, Tuple, Union, overload
 import torch
 
 from .api_logging import flashinfer_api
-from .jit import gen_batch_mla_module
+from .jit import gen_batch_mla_module, gen_trtllm_gen_fmha_module, setup_cubin_loader
 from .jit.mla import gen_mla_module
 from .utils import (
     MaskMode,
@@ -75,18 +75,10 @@ def _check_trtllm_gen_mla_shape(
 ):
     if query.ndim != 4:
         raise ValueError(f"Expected query.ndim == 4, got {query.ndim}")
-
-    # Support both 3D and 4D kv_cache for backward compatibility
-    if kv_cache.ndim == 3:
-        # [num_pages, page_size, head_dim_ckv + head_dim_kpe] -> [num_pages, 1, page_size, head_dim_ckv + head_dim_kpe]
-        kv_cache = kv_cache.unsqueeze(1)
-    elif kv_cache.ndim != 4:
-        raise ValueError(f"Expected kv_cache.ndim == 3 or 4, got {kv_cache.ndim}")
-
-    if not (qk_nope_head_dim == 128 or qk_nope_head_dim == 192):
-        raise ValueError(
-            f"Expected qk_nope_head_dim == 128 or 192, got {qk_nope_head_dim}"
-        )
+    if kv_cache.ndim != 4:
+        raise ValueError(f"Expected kv_cache.ndim == 4, got {kv_cache.ndim}")
+    if qk_nope_head_dim != 128:
+        raise ValueError(f"Expected qk_nope_head_dim == 128, got {qk_nope_head_dim}")
     if kv_lora_rank != 512:
         raise ValueError(f"Expected kv_lora_rank == 512, got {kv_lora_rank}")
     if qk_rope_head_dim != 64:
@@ -119,8 +111,6 @@ def _check_trtllm_gen_mla_shape(
             raise ValueError(
                 f"Expected block_num % (128 / block_size) == 0, got {block_num=} and {block_size=}"
             )
-
-    return kv_cache
 
 
 @functools.cache
@@ -536,17 +526,14 @@ def trtllm_batch_decode_with_kv_cache_mla(
     bmm1_scale: Union[float, torch.Tensor] = 1.0,
     bmm2_scale: Union[float, torch.Tensor] = 1.0,
     sinks: Optional[List[torch.Tensor]] = None,
-    skip_softmax_threshold_scale_factor: Optional[float] = None,
-    return_lse: bool = False,
-    lse: Optional[torch.Tensor] = None,
     enable_pdl: bool = None,
     backend: str = "auto",
-) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+) -> torch.Tensor:
     """
     Parameters
     ----------
     query: [batch_size, q_len_per_request, num_heads, head_dim_qk], head_dim_qk = qk_nope_head_dim (kv_lora_rank) + qk_rope_head_dim, should be concated q_nope + q_rope; q_len_per_request is the MTP query length.
-    kv_cache: [num_pages, page_size, head_dim_ckv + head_dim_kpe] or [num_pages, 1, page_size, head_dim_ckv + head_dim_kpe], should be concated ckv_cache + kpe_cache. Both 3D and 4D formats are supported for backward compatibility.
+    kv_cache: [num_pages, page_size, head_dim_ckv + head_dim_kpe], should be concated ckv_cache + kpe_cache
     workspace_buffer: [num_semaphores, 4], used for multi_block mode. Must be initialized to 0 for its first use.
     qk_nope_head_dim: qk_nope_head_dim, must be 128
     kv_lora_rank: kv_lora_rank, must be 512
@@ -561,14 +548,6 @@ def trtllm_batch_decode_with_kv_cache_mla(
     bmm2_scale: fused scale for mla bmm2 input.
         when using trtllm-gen backend, it can be a torch.Tensor with dtype torch.float32.
     sinks: additional value per head in the denominator of the softmax.
-    skip_softmax_threshold_scale_factor: threshold scale factor for skipping softmax operations.
-        Providing a value for this parameter enables skip-softmax sparsity as described in: https://arxiv.org/abs/2512.12087
-        If no value is provided, then standard attention is used.
-        Setting the threshold to a higher value generally increases kernel performance at the cost of accuracy degradation.
-        The actual threshold value equals the provided threshold_scale_factor divided by the context length.
-    return_lse: whether to return the log-sum-exp value.
-    lse: log-sum-exp value, if not provided, will be allocated internally.
-    enable_pdl: whether to enable pdl.
     backend : str = "auto"
         The implementation backend, could be ``auto``/``xqa`` or ``trtllm-gen``. Defaults to ``auto``.
         When set to ``auto``, the backend will be chosen based on the device architecture and kernel availability.
@@ -610,7 +589,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
             or kv_cache.dtype != torch.float8_e4m3fn
         ):
             raise ValueError(
-                f"XQA MLA only supports fp8 operation on SM120/SM121 GPUs, got {query.dtype} and {kv_cache.dtype}"
+                f"XQA MLA only supports fp8 operation on SM120 GPUs, got {query.dtype} and {kv_cache.dtype}"
             )
         if sinks is not None:
             raise ValueError("XQA MLA does not support sinks")
@@ -618,8 +597,6 @@ def trtllm_batch_decode_with_kv_cache_mla(
             raise ValueError(
                 f"XQA MLA only supports q_len_per_request == 1, got {query.size(1)}"
             )
-        if skip_softmax_threshold_scale_factor is not None:
-            raise ValueError("skip_softmax is not supported for XQA backend")
         return xqa_batch_decode_with_kv_cache_mla(
             query,
             kv_cache,
@@ -643,18 +620,13 @@ def trtllm_batch_decode_with_kv_cache_mla(
         run_func = get_trtllm_gen_fmha_module().trtllm_paged_attention_decode
         sm_count = get_device_sm_count(query.device)
 
-        # Extract block_size (works for both 3D and 4D)
         block_size = kv_cache.size(-2)
         if (
             block_size != 32 and block_size != 64
         ):  # todo(Yingyi): add support for more block sizes?
             raise ValueError(f"Supported block_size are 32 and 64, got {block_size}")
 
-        if skip_softmax_threshold_scale_factor is not None and sparse_mla_top_k != 0:
-            raise ValueError("skip_softmax is not supported for sparse MLA")
-
-        # Validate and normalize to 4D
-        kv_cache = _check_trtllm_gen_mla_shape(
+        _check_trtllm_gen_mla_shape(
             query,
             kv_cache,
             qk_nope_head_dim,
@@ -678,25 +650,6 @@ def trtllm_batch_decode_with_kv_cache_mla(
                 "out",
             )
 
-        batch_size = query.size(0)
-        max_q_len = query.size(1)
-        expected_lse_shape = [batch_size, max_q_len, query.shape[2]]
-
-        if return_lse and lse is None:
-            lse = torch.empty(
-                *expected_lse_shape,
-                device=query.device,
-                dtype=torch.float32,
-            )
-        if lse is not None:
-            check_shape_dtype_device(
-                lse, expected_lse_shape, torch.float32, query.device, "lse"
-            )
-            if not lse.is_contiguous():
-                raise ValueError("lse must be contiguous for trtllm-gen backend.")
-
-        query = query.flatten(0, 1)  # [B*S, H, D]
-
         run_func(
             out,
             None,  # fp4 output not supported in wrapper api yet.
@@ -706,31 +659,21 @@ def trtllm_batch_decode_with_kv_cache_mla(
             workspace_buffer,
             block_tables,
             seq_lens,
-            max_q_len,
             max_seq_len,
             bmm1_scale,
             bmm2_scale,
             -1,  # o_sf_scale
             -1,  # o_sf_vec_size
             0,  # o_sf_start_index
-            batch_size,
             -1,  # window_left
             sparse_mla_top_k,
             sm_count,
             enable_pdl,
             workspace_buffer.numel() * workspace_buffer.element_size(),
             sinks,
-            None,  # cum_seq_lens_q
-            skip_softmax_threshold_scale_factor,
-            lse,
-            None,  # k_cache_scale
-            None,  # v_cache_scale
         )
 
-        if return_lse:
-            return out, lse
-        else:
-            return out
+        return out
     else:
         raise ValueError(f"Backend {backend} not supported")
 
@@ -755,7 +698,7 @@ def xqa_batch_decode_with_kv_cache_mla(
     """
     Parameters:
     query: [batch_size, q_len_per_request, num_heads, head_dim_qk], head_dim_qk = qk_nope_head_dim (kv_lora_rank) + qk_rope_head_dim, should be concated q_nope + q_rope; q_len_per_request is the MTP query length.
-    kv_cache: [num_pages, page_size, head_dim_ckv + head_dim_kpe] or [num_pages, 1, page_size, head_dim_ckv + head_dim_kpe], should be concated ckv_cache + kpe_cache. Both 3D and 4D formats are supported for backward compatibility.
+    kv_cache: [num_pages, page_size, head_dim_ckv + head_dim_kpe], should be concated ckv_cache + kpe_cache
     workspace_buffer: torch.Tensor. Must be initialized to 0 for its first use.
     qk_nope_head_dim: qk_nope_head_dim, must be 128
     kv_lora_rank: kv_lora_rank, must be 512
@@ -786,7 +729,6 @@ def xqa_batch_decode_with_kv_cache_mla(
     enable_pdl = device_support_pdl(query.device) if enable_pdl is None else enable_pdl
     sm_count = get_device_sm_count(query.device)
 
-    # Extract block_size (works for both 3D and 4D)
     block_size = kv_cache.size(-2)
     q_len_per_request = query.size(1)
     if q_len_per_request != 1:
@@ -800,8 +742,7 @@ def xqa_batch_decode_with_kv_cache_mla(
     if sinks is not None:
         raise ValueError("XQA MLA does not support sinks")
 
-    # Validate and normalize to 4D
-    kv_cache = _check_trtllm_gen_mla_shape(
+    _check_trtllm_gen_mla_shape(
         query,
         kv_cache,
         qk_nope_head_dim,
