@@ -1719,7 +1719,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
             The data type of the key/value tensor. If None, will be set to :attr:`q_data_type`.
         o_data_type : Optional[Union[str, torch.dtype]]
             The data type of the output tensor. If None, will be set to :attr:`q_data_type`.
-            For FP8 inputs, this should typically be set to torch.float16 or torch.bfloat16.
+            For FP8 inputs, this should typically be set to torch.float16.
         non_blocking : bool
             Whether to copy the input tensors to the device asynchronously, defaults to ``True``.
         prefix_len_ptr :Optional[torch.Tensor]
@@ -2180,7 +2180,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
         if out is None:
             # Use cached output data type if available (for FP8 attention with FP16 output)
             out_dtype = getattr(self, "_cached_o_data_type", None) or q.dtype
-            out = torch.zeros(
+            out = torch.empty(
                 q.shape[:-1] + v_cache.shape[-1:], dtype=out_dtype, device=q.device
             )
         else:
@@ -2696,7 +2696,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             The data type of the key/value tensor. If None, will be set to :attr:`q_data_type`.
         o_data_type : Optional[Union[str, torch.dtype]]
             The data type of the output tensor. If None, will be set to :attr:`q_data_type`.
-            For FP8 inputs, this should typically be set to torch.float16 or torch.bfloat16.
+            For FP8 inputs, this should typically be set to torch.float16.
         non_blocking : bool
             Whether to copy the input tensors to the device asynchronously, defaults to ``True``.
         prefix_len_ptr :Optional[torch.Tensor]
@@ -3068,7 +3068,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             out_dtype = torch.bfloat16 if q.dtype.itemsize == 1 else q.dtype
             out = torch.empty(
                 q.shape[:-1] + v.shape[-1:],
-                dtype=out_dtype,
+                dtype=self._cached_o_data_type,
                 device=q.device,
             )
         else:
@@ -3103,35 +3103,6 @@ class BatchPrefillWithRaggedKVCacheWrapper:
                 batch_size = self._seq_lens_q.shape[0]
             if self._seq_lens_q is not None and self._seq_lens_q.dim() == 1:
                 self._seq_lens_q = self._seq_lens_q.reshape(batch_size, 1, 1, 1)
-
-            if self._seq_lens_kv is not None and self._seq_lens_kv.dim() == 1:
-                self._seq_lens_kv = self._seq_lens_kv.reshape(batch_size, 1, 1, 1)
-
-            cudnn_batch_prefill_with_kv_cache(
-                q,
-                k,
-                v,
-                sm_scale,
-                self._float_workspace_buffer,
-                max_token_per_sequence=self._max_token_per_sequence,
-                max_sequence_kv=self._max_sequence_kv,
-                actual_seq_lens_q=self._seq_lens_q,
-                actual_seq_lens_kv=self._seq_lens_kv,
-                return_lse=return_lse,
-                causal=self._causal,
-                q_scale=q_scale,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                batch_offsets_q=self._qo_indptr_buf,
-                batch_offsets_k=self._kv_indptr_buf,
-                batch_offsets_v=self._v_indptr_buf,
-                batch_offsets_o=self._o_indptr_buf,
-                is_cuda_graph_compatible=self._use_cuda_graph,
-                out=out,
-                lse=lse,
-            )
-
-            return (out, lse) if return_lse else out
 
         # Skip FP8->FP16 conversion for FA3 backend with FP8 support
         # The JIT module will handle FP8 natively
