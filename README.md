@@ -243,7 +243,11 @@ For detailed information about logging levels, configuration, and advanced featu
 
 Users can customize their own attention variants with additional parameters. For more details, refer to our [JIT examples](https://github.com/flashinfer-ai/flashinfer/blob/main/tests/utils/test_jit_example.py).
 
-## CUDA Support
+## GPU and CUDA Support
+
+**Supported CUDA Versions:** 12.6, 12.8, 13.0, 13.1
+
+> **Note:** FlashInfer strives to follow PyTorch's supported CUDA versions plus the latest CUDA release.
 
 **Supported CUDA Versions:** 12.6, 12.8, 13.0, 13.1
 
