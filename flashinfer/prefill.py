@@ -2501,7 +2501,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             will be used in attention computation.
 
         backend : str
-            The implementation backend, could be ``auto``/``fa2``/``fa3``/``cudnn`` or ``cutlass``.
+            The implementation backend, could be ``auto``/``fa2``/``fa3`` or ``cutlass``.
             Defaults to ``auto``.
             If set to ``auto``, the wrapper will automatically choose the backend based on the
             device architecture and kernel availability.
