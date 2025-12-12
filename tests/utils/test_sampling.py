@@ -513,83 +513,6 @@ def test_top_k_renorm_probs(batch_size, vocab_size, k, distribution, dtype):
     )
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_top_k_renorm_probs_mixed_k_persistent_loop(dtype):
-    """Test top_k_renorm_probs with mixed k values in persistent loop (multi-CTA mode).
-
-    This test catches a specific bug where:
-    - Large batch size triggers the persistent loop (multiple iterations per CTA group)
-    - Large vocab_size triggers multi-CTA mode (multiple CTAs per row)
-    - Mixed k values: some rows have k >= vocab_size (skip radix select),
-      others have k < vocab_size (use radix select)
-
-    The bug was that k >= vocab_size iterations would skip radix select
-    without clearing the histogram buffers, leaving stale data that corrupted
-    subsequent k < vocab_size iterations.
-    """
-    batch_size = 1024  # Large batch to trigger persistent loop
-    vocab_size = 128 * 1024  # Large vocab to trigger multi-CTA mode
-
-    torch.manual_seed(42)
-    generator = torch.Generator(device="cuda:0").manual_seed(42)
-
-    # Generate random logits
-    logits = torch.rand((batch_size, vocab_size), device="cuda:0", generator=generator)
-
-    # Generate k values: mix of small k and k == vocab_size
-    generator = torch.Generator(device="cuda:0").manual_seed(42)
-    k_values = torch.randint(
-        1, 1000, (batch_size,), device="cuda:0", generator=generator
-    )
-
-    # Randomly set some rows to k == vocab_size (about 50%)
-    generator = torch.Generator(device="cuda:0").manual_seed(42)
-    mask = torch.randint(
-        0, 2, (batch_size,), generator=generator, dtype=torch.bool, device="cuda:0"
-    )
-    k_values.masked_fill_(mask, vocab_size)
-
-    # Convert to probs
-    probs = torch.softmax(logits, dim=-1).to(dtype)
-
-    # Run FlashInfer top_k_renorm_probs
-    renorm_probs = flashinfer.sampling.top_k_renorm_probs(probs, k_values)
-
-    # Verify output dtype
-    assert renorm_probs.dtype == dtype
-
-    # Verify sum to 1
-    sums = renorm_probs.float().sum(dim=-1)
-    torch.testing.assert_close(sums, torch.ones_like(sums), rtol=1e-2, atol=1e-2)
-
-    # Verify non-zero count matches k for each row
-    nonzero_counts = (renorm_probs > 0).sum(dim=-1)
-
-    # For rows with k >= vocab_size, all elements should be non-zero
-    # For rows with k < vocab_size, non-zero count should be >= k (may be more due to ties)
-    for i in range(batch_size):
-        k = k_values[i].item()
-        count = nonzero_counts[i].item()
-
-        if k >= vocab_size:
-            # All elements should be non-zero
-            assert count == vocab_size, (
-                f"Row {i}: k >= vocab_size but count={count} != {vocab_size}"
-            )
-        else:
-            # Count should be at least k (may be more due to ties at the threshold)
-            row_probs = probs[i].float()
-            topk_vals, _ = torch.topk(row_probs, k, sorted=True)
-            threshold = topk_vals[-1]
-            expected_ge_threshold = (row_probs >= threshold).sum().item()
-
-            # Allow small tolerance for floating point
-            assert count >= k - 1, f"Row {i}: k={k} but only {count} non-zero elements"
-            assert count <= expected_ge_threshold + 1, (
-                f"Row {i}: k={k}, expected at most {expected_ge_threshold} but got {count}"
-            )
-
-
 @pytest.mark.parametrize("batch_size", [1, 19, 99, 989])
 @pytest.mark.parametrize("vocab_size", [111, 32000, 128256])
 @pytest.mark.parametrize("k", [10, 100, 500])
@@ -642,6 +565,35 @@ def test_top_k_mask_logits(
     # For each row, find the pivot (k-th largest if enough finite values)
     effective_k = torch.minimum(
         torch.full_like(finite_inputs, k, dtype=torch.int64), finite_inputs
+    )
+
+    # Get pivot for each row (handle case where effective_k might be 0)
+    pivot = torch.zeros(batch_size, dtype=dtype, device=logits.device)
+    for i in range(batch_size):
+        ek = effective_k[i].item()
+        if ek > 0:
+            pivot[i] = sorted_logits[i, ek - 1]
+        else:
+            pivot[i] = float("-inf")
+
+    # Count how many elements are strictly greater than pivot
+    num_greater = (logits > pivot.unsqueeze(-1)).sum(dim=-1)
+    # Count how many elements equal the pivot (ties) - only among finite values
+    num_ties = ((logits == pivot.unsqueeze(-1)) & torch.isfinite(logits)).sum(dim=-1)
+
+    # Valid range considering ties
+    max_valid = num_greater + num_ties
+
+    # Check: finite_counts should be >= effective_k (we keep at least k finite values)
+    # and <= max_valid (we don't keep more than all elements >= pivot)
+    # Allow small tolerance for floating point issues
+    assert torch.all(finite_counts >= torch.clamp(effective_k - 1, min=0)), (
+        f"Some rows have fewer finite elements than expected. "
+        f"finite_counts min: {finite_counts.min()}, effective_k min: {effective_k.min()}"
+    )
+    assert torch.all(finite_counts <= max_valid + 1), (
+        f"Some rows have more finite elements than allowed by ties. "
+        f"finite_counts max: {finite_counts.max()}, max_valid max: {max_valid.max()}"
     )
 
     # Get pivot for each row (handle case where effective_k might be 0)

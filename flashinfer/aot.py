@@ -70,6 +70,7 @@ from .jit.page import gen_page_module
 from .jit.quantization import gen_quantization_module
 from .jit.rope import gen_rope_module
 from .jit.sampling import gen_sampling_module
+from .jit.topk import gen_topk_module
 from .jit.tllm_utils import gen_trtllm_utils_module
 from .jit.xqa import gen_xqa_module, gen_xqa_module_mla
 from .jit.attention import (
