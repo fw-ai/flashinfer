@@ -17,7 +17,7 @@ from flashinfer.comm.mapping import Mapping
 
 from ..jit import gen_trtllm_mnnvl_comm_module
 from ..utils import register_custom_op
-from .mnnvl import McastGPUBuffer, CommBackend
+from .mnnvl import McastGPUBuffer, CommBackend, MPIBackend
 
 
 def mpi_barrier():
@@ -47,7 +47,7 @@ class MNNVLAllreduceFusionStrategy(Enum):
 MNNVL_ONE_SHOT_THRESHOLD = 64 * 1024 * 8 * 2
 
 
-class MNNVLAllReduceFusionWorkspace(AllReduceFusionWorkspace):
+class MNNVLAllreduceFusionWorkspace:
     NUM_LAMPORT_BUFFERS = 3
 
     def __init__(
@@ -75,7 +75,6 @@ class MNNVLAllReduceFusionWorkspace(AllReduceFusionWorkspace):
             dtype: The data type of the tensors to be reduced.
             buffer_size_in_bytes: The requested size in bytes for each lamport buffer. The actual allocation size may be larger due to alignment requirements. The actual usable size will be NUM_LAMPORT_BUFFERS * actual_buffer_size_per_lamport_buffer.
         """
-        super().__init__(mapping.world_size, mapping.rank)
 
         if buffer_size_in_bytes is None:
             assert (
@@ -136,6 +135,7 @@ class MNNVLAllReduceFusionWorkspace(AllReduceFusionWorkspace):
             mapping.tp_size,
             mapping.tp_rank,
             torch.device("cuda", mapping.local_rank),
+            mapping.is_multi_node(),
             comm_backend,
         )
 
@@ -222,22 +222,6 @@ class MNNVLAllReduceFusionWorkspace(AllReduceFusionWorkspace):
             )
         return buffer_size
 
-    @property
-    def backend(self) -> str:
-        return "mnnvl"
-
-    def destroy(self) -> None:
-        """Destroy workspace and free resources."""
-        if getattr(self, "_destroyed", False):
-            return  # Already destroyed, nothing to do
-
-        del self.mcast_buffer_handle
-        del self.buffer_flags
-        del self.uc_ptrs_dev
-        del self.uc_ptr_local
-        del self.mc_ptr
-        self._destroyed = True
-
 
 @functools.cache
 def get_trtllm_mnnvl_comm_module():
@@ -323,7 +307,7 @@ def get_trtllm_mnnvl_comm_module():
 
 def trtllm_mnnvl_allreduce(
     input: torch.Tensor,
-    workspace: MNNVLAllReduceFusionWorkspace,
+    workspace: MNNVLAllreduceFusionWorkspace,
     launch_with_pdl: bool,
     output: Optional[torch.Tensor] = None,
     strategy: MNNVLAllreduceFusionStrategy = MNNVLAllreduceFusionStrategy.AUTO,
@@ -343,7 +327,7 @@ def trtllm_mnnvl_allreduce(
 
     Args:
         input: Local Input Shard [num_tokens, hidden_dim]
-        workspace: MNNVLAllReduceFusionWorkspace
+        workspace: MNNVLAllreduceFusionWorkspace
         launch_with_pdl: Whether to launch with PDL
         output: Output tensor to store the result, empty tensor will be created if not provided.
         strategy: MNNVLAllreduceFusionStrategy. Internal heuristics will be used if not provided.
@@ -403,7 +387,7 @@ def trtllm_mnnvl_fused_allreduce_add_rmsnorm(
     input: torch.Tensor,
     residual_in: torch.Tensor,
     gamma: torch.Tensor,
-    workspace: MNNVLAllReduceFusionWorkspace,
+    workspace: MNNVLAllreduceFusionWorkspace,
     epsilon: Optional[float] = None,
     output: Optional[torch.Tensor] = None,
     residual_out: Optional[torch.Tensor] = None,
@@ -420,7 +404,7 @@ def trtllm_mnnvl_fused_allreduce_add_rmsnorm(
         input: Input tensor [num_tokens, hidden_dim]
         residual_in: Residual input tensor [num_tokens, hidden_dim]
         gamma: Gamma tensor [hidden_dim]
-        workspace: MNNVLAllReduceFusionWorkspace
+        workspace: MNNVLAllreduceFusionWorkspace
         epsilon: The epsilon parameter for RMSNorm, torch.finfo.eps will be used if not provided.
         output: Output tensor for normalized results [num_tokens, hidden_dim], empty tensor will be created if not provided.
         residual_out: Residual output tensor [num_tokens, hidden_dim], empty tensor will be created if not provided.
@@ -495,7 +479,7 @@ def trtllm_mnnvl_fused_allreduce_add_rmsnorm(
 
 # Legacy API that has been deprecated; Left for backward compatibility
 @deprecated(
-    "get_allreduce_mnnvl_workspace is deprecated, use MNNVLAllReduceFusionWorkspace class to manage the workspace instead"
+    "get_allreduce_mnnvl_workspace is deprecated, use MNNVLAllreduceFusionWorkspace class to manage the workspace instead"
 )
 def get_allreduce_mnnvl_workspace(
     mapping: Mapping,
@@ -517,7 +501,6 @@ def get_allreduce_mnnvl_workspace(
     Args:
         mapping: Tensor parallel mapping configuration containing rank info
         dtype: Data type of the tensors being reduced
-        comm: Optional communication backend for multi-node synchronization
         buffer_size_in_bytes: Optional buffer size. Practically, assign this to 3 * 2 * dtype.itemsize * hidden_dim * max_tokens
 
     Returns:
@@ -538,32 +521,17 @@ def get_allreduce_mnnvl_workspace(
         TARGET_WORKSPACE_SIZE_BYTES / (lcm_hidden_dim * stride)
     ) * (lcm_hidden_dim * stride)
 
-    mcast_buffer = McastGPUBuffer(
-        buffer_size_in_bytes,
-        mapping.tp_size,
-        mapping.tp_rank,
-        torch.device("cuda", mapping.local_rank),
-        mapping.is_multi_node() or force_mn,
-        comm_backend_for_handle_transfer=comm_backend_for_handle_transfer,
+    # Redirect to the new workspace allocation logic. The new kernel needs the new flag buffer layout.
+    workspace = MNNVLAllreduceFusionWorkspace(
+        mapping,
+        buffer_size_in_bytes=buffer_size_in_bytes,
+        comm_backend=comm_backend_for_handle_transfer,
     )
 
-    # Initialize the unicast buffer with -0.0
-    mcast_buffer.lamport_initialize(mapping.tp_rank, dtype)
-
-    # CPU barrier since we assume this should not be called in cuda graph
-    torch.cuda.synchronize()
-    if comm_backend_for_handle_transfer is None:
-        mpi_barrier()
-    else:
-        comm_backend_for_handle_transfer.barrier()
-
-    # This is a buffer to maintain the state of this allreduce Op
-    # [Buffer_ptr, Clear_ptr, Buffer_size, num_tokens_prev, atomic access counter]
-    buffer_flags = torch.tensor(
-        [0, 2, max_num_elements, 0, 0],
-        dtype=torch.uint32,
-        device=torch.device("cuda", mapping.local_rank),
-    )
+    mcast_buffer = workspace.mcast_buffer_handle
+    buffer_flags = workspace.buffer_flags
+    # this is calculated using the legacy behavior. We do not use the actual allocated size.
+    max_num_elements = workspace.buffer_size_bytes // stride
 
     return (
         mcast_buffer,
@@ -616,11 +584,16 @@ def trtllm_mnnvl_all_reduce(
             f"The input tensor must be 2D, got {len(inp.shape)}D. The shape is {inp.shape}."
         )
 
+    # buffer_M is no longer used in this kernel but let's keep this check for consistency in behavior.
     if inp.shape[0] > buffer_M:
         raise ValueError(
             f"The number of tokens in the input tensor {inp.shape[0]} is greater than the buffer_M {buffer_M}. This is not supported. Please increase the workspace size, or decrease the amount of tokens to at most {buffer_M}."
         )
 
+    # Even in legacy code, this should only be used when we implement the fused allreduce+rmsnorm.
+    assert wait_for_results and (out is not None), (
+        "Calling the legacy trtllm_mnnvl_all_reduce with wait_for_results=False is not supported. Please use trtllm_mnnvl_allreduce instead."
+    )
     module = get_trtllm_mnnvl_comm_module()
     module.trtllm_mnnvl_allreduce_fusion(
         inp,

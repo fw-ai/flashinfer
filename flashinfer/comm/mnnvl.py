@@ -162,6 +162,9 @@ class CommBackend(ABC):
     def allgather(self, data: int) -> List[int]: ...
 
     @abstractmethod
+    def bcast(self, data: Any, root: int) -> Any: ...
+
+    @abstractmethod
     def barrier(self) -> None: ...
 
     @abstractmethod
@@ -217,6 +220,9 @@ class MPIBackend(CommBackend):
 
     def allgather(self, data: int) -> List[int]:
         return self._mpicomm.allgather(data)
+
+    def bcast(self, data: Any, root: int) -> Any:
+        return self._mpicomm.bcast(data, root)
 
     def barrier(self):
         self._mpicomm.Barrier()
@@ -838,34 +844,9 @@ class PosixFDHandleExchanger(HandleExchanger):
         self._socket.close()
 
 
-def is_mnnvl_fabric_supported(device_idx: int) -> bool:
-    fabric_handle_supported = checkCudaErrors(
-        cuda.cuDeviceGetAttribute(
-            cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED,
-            device_idx,
-        )
-    )
-    if fabric_handle_supported == 0:
-        return False
-
-    pynvml.nvmlInit()
-    try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device_idx)
-        fabric_info = pynvml.c_nvmlGpuFabricInfoV_t()
-        pynvml.nvmlDeviceGetGpuFabricInfoV(handle, ctypes.byref(fabric_info))
-        if (
-            fabric_info.state >= pynvml.NVML_GPU_FABRIC_STATE_COMPLETED
-            and fabric_info.clusterUuid[0] != 0
-        ):
-            return True
-        return False
-    finally:
-        pynvml.nvmlShutdown()
-
-
 # TODO: This class follows similar logic with MnnvlMemory, but the latter use single instance mode to manage the memory allocation.
-class SymmDeviceMemory:
-    """Python port of SymmDeviceMemory from TensorRT-LLM"""
+class McastDeviceMemory:
+    """Python port of McastDeviceMemory from TensorRT-LLM"""
 
     def __init__(
         self,
@@ -938,22 +919,27 @@ class SymmDeviceMemory:
             f"Signal pad offset: {self.signal_pad_offset}"
         )
 
-        # Create handle exchanger
-        if is_mnnvl_fabric_supported(device_idx):
-            self._exchanger: HandleExchanger = FabricHandleExchanger(
-                self.comm_backend, self.group_rank, self.group_size
+        # Create handle exchanger based on multi-node mode
+        if self.is_multi_node:
+            # Check if fabric handle is supported
+            fabric_handle_supported = checkCudaErrors(
+                cuda.cuDeviceGetAttribute(
+                    cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED,
+                    device_idx,
+                )
             )
             if fabric_handle_supported == 0:
                 raise RuntimeError(
                     "[McastDeviceMemory] Device does not support fabric handle."
                 )
-
-            self._alloc_mn_mcast_mem(buf_size, comm_backend_for_handle_transfer)
+            self._exchanger: HandleExchanger = FabricHandleExchanger(
+                self.comm_backend, self.group_rank, self.group_size
+            )
         else:
             self._exchanger = PosixFDHandleExchanger(
                 self.comm_backend, self.group_rank, self.group_size
             )
-        self._alloc_mn_mcast_mem(buf_size, enable_multicast)
+        self._alloc_mn_mcast_mem(buf_size)
 
         if allocate_signal_pads:
             # Initialize signal pads
@@ -970,6 +956,10 @@ class SymmDeviceMemory:
 
     def __del__(self):
         """Destructor - cleanup allocated memory"""
+
+        # Check if we're in a valid state for cleanup
+        if not hasattr(self, "is_multi_node"):
+            return
 
         if hasattr(self, "_exchanger"):
             self._exchanger.close()
@@ -1068,16 +1058,15 @@ class SymmDeviceMemory:
         """Get the total number of devices in the group"""
         return self.group_size
 
-    def _alloc_mn_mcast_mem(
-        self, buf_size: int, comm_backend_for_handle_transfer: Any = None
-    ):
-        """Allocate multi-node multicast memory using MNNVL"""
+    def get_allocation_size(self) -> int:
+        """Get the total allocation size (including signal pad)"""
+        return self.allocation_size
 
     def get_usable_buffer_size(self) -> int:
         """Get the usable buffer size (excluding signal pad)"""
         return self.allocation_size - self.SIGNAL_PAD_SIZE
 
-    def _alloc_mn_mcast_mem(self, buf_size: int, enable_multicast: bool):
+    def _alloc_mn_mcast_mem(self, buf_size: int):
         """Allocate multi-node multicast memory using MNNVL"""
         self._verify_cuda_context()
 
@@ -1088,8 +1077,7 @@ class SymmDeviceMemory:
         self._allocate_unicast_buffers(allocation_prop)
 
         # Setup multicast object, exchange handles, map and bind memory
-        if enable_multicast:
-            self._setup_multicast(mc_prop)
+        self._setup_multicast(mc_prop)
 
     def _verify_cuda_context(self):
         """Verify CUDA context is set to the correct device."""
@@ -1101,13 +1089,9 @@ class SymmDeviceMemory:
                 )
         except Exception as e:
             print(f"Error checking CUDA context: {e}")
-        if comm_backend_for_handle_transfer is None:
-            comm = MpiComm()
-        else:
-            comm = comm_backend_for_handle_transfer
-        # Set up allocation properties
-        handle_type = cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
 
+    def _get_allocation_prop(self, buf_size: int):
+        """Compute allocation size and return allocation/multicast properties."""
         allocation_prop = cuda.CUmemAllocationProp()
         allocation_prop.requestedHandleTypes = self._exchanger.handle_type
         allocation_prop.type = cuda.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
