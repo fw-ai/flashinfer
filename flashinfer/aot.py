@@ -558,14 +558,11 @@ def gen_all_modules(
             jit_specs.append(gen_fp4_quantization_sm121_module())
 
     if add_comm:
-        from .jit.comm import (
-            gen_comm_alltoall_module,
-            gen_moe_alltoall_module,
-            gen_nvshmem_module,
-            gen_trtllm_comm_module,
-            gen_trtllm_mnnvl_comm_module,
-            gen_vllm_comm_module,
-        )
+        from .jit.comm import gen_trtllm_comm_module, gen_vllm_comm_module
+        from .jit.comm import gen_nvshmem_module
+        from .jit.comm import gen_comm_alltoall_module
+        from .jit.comm import gen_trtllm_mnnvl_comm_module
+        from .jit.comm import gen_moe_alltoall_module
 
         jit_specs.append(gen_nvshmem_module())
         jit_specs.append(gen_comm_alltoall_module())
