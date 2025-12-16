@@ -1104,7 +1104,7 @@ def bench_gpu_time_with_cupti(
 
     def func_buffer_completed(
         launches: list[tuple[float, float, int, int, int]],
-        kernels: list[tuple[str, float, float, int]],
+        kernels: list[tuple[str, float, float, int, int, int, int, int]],
         activities: list,
     ):
         for activity in activities:
@@ -1115,20 +1115,6 @@ def bench_gpu_time_with_cupti(
             ):
                 # Kernel activity
                 kernels.append(collect_kernel_info(activity))
-            elif activity.kind in (
-                cupti.ActivityKind.RUNTIME,
-                cupti.ActivityKind.DRIVER,
-            ):
-                # Runtime or Driver activity
-                launches.append(
-                    (
-                        activity.start,
-                        activity.end,
-                        activity.correlation_id,
-                        activity.cbid,
-                        activity.kind,
-                    )
-                )
             elif activity.kind in (
                 cupti.ActivityKind.RUNTIME,
                 cupti.ActivityKind.DRIVER,
@@ -1211,11 +1197,13 @@ def bench_gpu_time_with_cupti(
 
     # CUPTI measurement
     launches: list[tuple[float, float, int, int, int]] = []
-    kernels: list[tuple[str, float, float, int]] = []
+    kernels: list[tuple[str, float, float, int, int, int, int, int]] = []
     iter_timestamps = []
     cupti.activity_enable(cupti.ActivityKind.RUNTIME)
     cupti.activity_enable(cupti.ActivityKind.CONCURRENT_KERNEL)
     cupti.activity_enable(cupti.ActivityKind.DRIVER)
+    cupti.activity_enable(cupti.ActivityKind.MEMCPY)
+    cupti.activity_enable(cupti.ActivityKind.MEMSET)
     cupti.activity_register_callbacks(
         func_buffer_requested, partial(func_buffer_completed, launches, kernels)
     )
@@ -1233,29 +1221,15 @@ def bench_gpu_time_with_cupti(
     cupti.activity_disable(cupti.ActivityKind.RUNTIME)
     cupti.activity_disable(cupti.ActivityKind.CONCURRENT_KERNEL)
     cupti.activity_disable(cupti.ActivityKind.DRIVER)
+    cupti.activity_disable(cupti.ActivityKind.MEMCPY)
+    cupti.activity_disable(cupti.ActivityKind.MEMSET)
     cupti.finalize()
 
     def generate_kernel_string(kernel):
         # No start, end, correlation_id is considered in the kernel string
         return f"{kernel[0]}_{kernel[4]}_{kernel[5]}_{kernel[6]}_{kernel[7]}"
 
-    # Process activities - OPTIMIZED O(N + M log M) algorithm
-    import bisect
-
-    # Step 1: Sort launches by start timestamp - O(M log M)
-    sorted_launches = sorted(launches, key=lambda l: l[0])
-    launch_starts = [l[0] for l in sorted_launches]
-
-    # Step 2: Build correlation_id -> kernels mapping - O(K)
-    corr_id_to_kernels: dict[
-        int, list[tuple[str, float, float, int, int, int, int, int]]
-    ] = {}
-    for k in kernels:
-        corr_id = k[3]
-        if corr_id not in corr_id_to_kernels:
-            corr_id_to_kernels[corr_id] = []
-        corr_id_to_kernels[corr_id].append(k)
-
+    # Process activities
     measured_times = []
     kernel_names = None
     for idx, (start_cpu, end_cpu) in enumerate(iter_timestamps):
