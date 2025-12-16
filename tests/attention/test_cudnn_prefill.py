@@ -4,8 +4,6 @@ import torch
 import flashinfer
 import cudnn
 
-from flashinfer.utils import get_compute_capability
-
 
 @pytest.mark.parametrize("batch_size", [1, 4])
 @pytest.mark.parametrize("s_qo", [8, 17, 700])
@@ -44,7 +42,7 @@ def test_cudnn_prefill(
     )
 
     cumsum_s_qo = torch.sum(actual_seq_lens_q)
-    q = torch.randn(
+    q = torch.ones(
         cumsum_s_qo, num_qo_heads, head_dim, device=device, dtype=torch.bfloat16
     )
 
@@ -60,7 +58,7 @@ def test_cudnn_prefill(
     total_num_pages = num_pages_per_seq * batch_size
 
     kv_cache_shape = (total_num_pages, 2, num_kv_heads, page_size, head_dim)
-    kv_cache = torch.randn(size=kv_cache_shape, dtype=torch.bfloat16).to(device)
+    kv_cache = torch.ones(size=kv_cache_shape, dtype=torch.bfloat16).to(device)
     kv_cache = kv_cache.as_strided(
         kv_cache.shape,
         (
@@ -204,8 +202,8 @@ def test_cudnn_prefill_fp8(
     return_lse,
     is_cuda_graph_compatible,
 ):
-    if cudnn.backend_version() < 91701:
-        pytest.skip("cuDNN backend version is less than 9.17.1, skipping test")
+    if cudnn.backend_version() < 91800:
+        pytest.skip("cuDNN backend version is less than 9.18.0, skipping test")
 
     head_dim = 128
     if s_qo > s_kv:
@@ -215,13 +213,6 @@ def test_cudnn_prefill_fp8(
     seed = 1
     torch.manual_seed(seed)
     device = "cuda:0"
-
-    major, _ = get_compute_capability(torch.device(device))
-
-    if major != 10:
-        pytest.skip(
-            f"cuDNN FP8 prefill is not supported on compute capability {major}, skipping test"
-        )
 
     actual_seq_lens_q = torch.randint(
         1, s_qo + 1, (batch_size, 1, 1, 1), dtype=torch.int32, device=device

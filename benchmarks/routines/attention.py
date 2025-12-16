@@ -856,14 +856,14 @@ def testBatchPrefillWithPagedKVCacheWrapper(args):
             backends.remove("fa2")
     if "cudnn" in backends:
         remove_cudnn = False
-        # cuDNN FP8 prefill requires cuDNN >= 9.17.1 (backend version 91701)
+        # cuDNN FP8 prefill requires cuDNN >= 9.18.0 (backend version 91800)
         if q_dtype in [torch.float8_e4m3fn, torch.float8_e5m2] or kv_dtype in [
             torch.float8_e4m3fn,
             torch.float8_e5m2,
         ]:
-            if not CUDNN_AVAILABLE or CUDNN_BACKEND_VERSION < 91701:
+            if not CUDNN_AVAILABLE or CUDNN_BACKEND_VERSION < 91800:
                 print(
-                    f"[INFO] cuDNN FP8 prefill requires cuDNN >= 9.17.1. "
+                    f"[INFO] cuDNN FP8 prefill requires cuDNN >= 9.18.0. "
                     f"Current version: {CUDNN_BACKEND_VERSION}. Skipping cudnn backend."
                 )
                 remove_cudnn = True
@@ -877,9 +877,9 @@ def testBatchPrefillWithPagedKVCacheWrapper(args):
             torch.float8_e4m3fn,
             torch.float8_e5m2,
         ]:
-            if not CUDNN_AVAILABLE or CUDNN_BACKEND_VERSION < 91701:
+            if not CUDNN_AVAILABLE or CUDNN_BACKEND_VERSION < 91800:
                 print(
-                    f"[INFO] cuDNN FP8 prefill requires cuDNN >= 9.17.1. "
+                    f"[INFO] cuDNN FP8 prefill requires cuDNN >= 9.18.0. "
                     f"Current version: {CUDNN_BACKEND_VERSION}. Skipping cudnn-native backend."
                 )
                 remove_cudnn_native = True
@@ -1150,7 +1150,6 @@ def testBatchPrefillWithPagedKVCacheWrapper(args):
                 kv_data_type=kv_dtype,
                 block_tables=block_tables,
             )
-            resolved_backends[backend] = backend_wrappers[backend]._backend
         elif backend == "cudnn":
             # cuDNN uses NHD layout and the wrapper API
             backend_wrappers[backend] = (
@@ -1180,25 +1179,9 @@ def testBatchPrefillWithPagedKVCacheWrapper(args):
                 max_sequence_kv=s_kv,
                 block_tables=block_tables,
             )
-            resolved_backends[backend] = backend_wrappers[backend]._backend
-        else:
-            resolved_backends[backend] = backend
 
-    def run_backend_wrapper(
-        backend,
-        q,
-        kv_cache,
-        k_cache,
-        v_cache,
-        workspace_buffer,
-        block_tables,
-        actual_seq_lens_q_device,
-        actual_seq_lens_kv_device,
-        q_indptr,
-        qo_indptr,
-        kv_indptr,
-    ):
-        if backend in ["fa2", "fa3", "auto", "trtllm-gen"]:
+    def run_backend_wrapper(backend):
+        if backend in ["fa2", "fa3", "trtllm-gen"]:
             return backend_wrappers[backend].run(
                 q, kv_cache, q_scale=q_scale, k_scale=k_scale, v_scale=v_scale
             )

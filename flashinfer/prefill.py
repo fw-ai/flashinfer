@@ -2180,7 +2180,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
         if out is None:
             # Use cached output data type if available (for FP8 attention with FP16 output)
             out_dtype = getattr(self, "_cached_o_data_type", None) or q.dtype
-            out = torch.empty(
+            out = torch.zeros(
                 q.shape[:-1] + v_cache.shape[-1:], dtype=out_dtype, device=q.device
             )
         else:

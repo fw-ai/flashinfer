@@ -176,9 +176,9 @@ if CUDNN_AVAILABLE:
         if (
             cudnn_q_data_type == cudnn.data_type.FP8_E4M3
             or cudnn_q_data_type == cudnn.data_type.FP8_E5M2
-        ) and cudnn.backend_version() < 91701:
+        ) and cudnn.backend_version() < 91800:
             raise RuntimeError(
-                f"FP8 is not supported in cuDNN backend version < 9.17.1, current version is {cudnn.backend_version()}"
+                f"FP8 is not supported in cuDNN backend version < 9.18.0, current version is {cudnn.backend_version()}"
             )
 
         with cudnn.graph(handle) as (g, _):
@@ -195,7 +195,7 @@ if CUDNN_AVAILABLE:
             cudnn_q = g.tensor(
                 name="q",
                 dim=(graph_b, h_qo, graph_s_qo, d_qk),
-                stride=(h_qo * d_qk, h_stride, s_stride, d_stride),
+                stride=(h_qo * d_qk, d_qk, d_qk * h_qo, 1),
                 data_type=cudnn_q_data_type,
             )
 
@@ -275,7 +275,7 @@ if CUDNN_AVAILABLE:
                 cudnn_k_cache = g.tensor(
                     name="k_cache",
                     dim=(graph_b, h_kv, graph_s_kv, d_qk),
-                    stride=(h_kv * d_qk * graph_s_kv, h_stride, s_stride, d_stride),
+                    stride=(h_kv * d_qk * graph_s_kv, d_qk, d_qk * h_kv, 1),
                     data_type=cudnn_k_data_type,
                 )
 
@@ -291,7 +291,7 @@ if CUDNN_AVAILABLE:
                 cudnn_v_cache = g.tensor(
                     name="v_cache",
                     dim=(graph_b, h_kv, graph_s_kv, d_vo),
-                    stride=(h_kv * d_vo * graph_s_kv, h_stride, s_stride, d_stride),
+                    stride=(h_kv * d_vo * graph_s_kv, d_vo, d_vo * h_kv, 1),
                     data_type=cudnn_v_data_type,
                 )
 
