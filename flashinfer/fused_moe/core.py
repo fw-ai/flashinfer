@@ -2195,7 +2195,7 @@ def get_trtllm_moe_sm100_module():
         tune_max_num_tokens: int,
     ):
         seq_len = hidden_states.shape[0]
-        hidden_size = hidden_states.shape[1]
+        hidden_size = hidden_states.shape[1] if output is None else output.shape[1]
 
         return [hidden_states.new_empty([seq_len, hidden_size], dtype=torch.bfloat16)]
 
