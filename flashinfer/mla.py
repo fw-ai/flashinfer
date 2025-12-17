@@ -619,10 +619,9 @@ def trtllm_batch_decode_with_kv_cache_mla(
             out_shape = query.shape[:-1] + (kv_lora_rank,)
             out = torch.empty(out_shape, dtype=torch.bfloat16, device=query.device)
         else:
-            batch_size, _, num_q_heads, _ = query.shape
             check_shape_dtype_device(
                 out,
-                [batch_size, num_q_heads, kv_lora_rank],
+                [*query.shape[:-1], kv_lora_rank],
                 torch.bfloat16,
                 query.device,
                 "out",
