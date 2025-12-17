@@ -594,9 +594,8 @@ def testBatchDecodeWithPagedKVCacheWrapper(args):
         block_tables,
         actual_seq_lens_kv,
         ragged_q,
-        speculative_mask,
     ):
-        if backend in ["fa2", "fa2_tc", "auto", "trtllm-gen"]:
+        if backend in ["fa2", "fa2_tc", "trtllm-gen"]:
             return backend_wrappers[backend].run(
                 q, kv_cache, k_scale=k_scale, v_scale=v_scale, q_len_per_req=s_qo
             )
@@ -650,7 +649,6 @@ def testBatchDecodeWithPagedKVCacheWrapper(args):
                     block_tables,
                     actual_seq_lens_kv,
                     ragged_q,
-                    speculative_mask,
                 )
                 .detach()
                 .clone()
@@ -677,7 +675,6 @@ def testBatchDecodeWithPagedKVCacheWrapper(args):
                 block_tables,
                 actual_seq_lens_kv,
                 ragged_q,
-                speculative_mask,
             ),
         )
 
@@ -1180,7 +1177,20 @@ def testBatchPrefillWithPagedKVCacheWrapper(args):
                 block_tables=block_tables,
             )
 
-    def run_backend_wrapper(backend):
+    def run_backend_wrapper(
+        backend,
+        q,
+        kv_cache,
+        k_cache,
+        v_cache,
+        workspace_buffer,
+        block_tables,
+        actual_seq_lens_q_device,
+        actual_seq_lens_kv_device,
+        q_indptr,
+        qo_indptr,
+        kv_indptr,
+    ):
         if backend in ["fa2", "fa3", "trtllm-gen"]:
             return backend_wrappers[backend].run(
                 q, kv_cache, q_scale=q_scale, k_scale=k_scale, v_scale=v_scale
