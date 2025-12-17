@@ -3068,7 +3068,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             out_dtype = torch.bfloat16 if q.dtype.itemsize == 1 else q.dtype
             out = torch.empty(
                 q.shape[:-1] + v.shape[-1:],
-                dtype=self._cached_o_data_type,
+                dtype=out_dtype,
                 device=q.device,
             )
         else:
