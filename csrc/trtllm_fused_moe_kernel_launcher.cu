@@ -1575,16 +1575,14 @@ class FP4BlockScaleLauncher : public FusedMoeLauncher {
   }
 };
 
-Array<Tensor> trtllm_bf16_moe(TensorView const& routing_logits,
-                              Optional<TensorView> const& routing_bias,
-                              TensorView const& hidden_states, TensorView const& gemm1_weights,
-                              TensorView const& gemm2_weights, TensorView output,
-                              int64_t num_experts, int64_t top_k, Optional<int64_t> n_group,
-                              Optional<int64_t> topk_group, int64_t intermediate_size,
-                              int64_t local_expert_offset, int64_t local_num_experts,
-                              Optional<double> routed_scaling_factor, int64_t routing_method_type,
-                              bool use_shuffled_weight, int64_t weight_layout, bool do_finalize,
-                              bool enable_pdl, Array<int64_t> moe_tactic) {
+Tensor trtllm_bf16_moe(TensorView const& routing_logits, Optional<TensorView> const& routing_bias,
+                       TensorView const& hidden_states, TensorView const& gemm1_weights,
+                       TensorView const& gemm2_weights, int64_t num_experts, int64_t top_k,
+                       Optional<int64_t> n_group, Optional<int64_t> topk_group,
+                       int64_t intermediate_size, int64_t local_expert_offset,
+                       int64_t local_num_experts, Optional<double> routed_scaling_factor,
+                       int64_t routing_method_type, bool use_shuffled_weight, int64_t weight_layout,
+                       bool enable_pdl, Array<int64_t> moe_tactic) {
   // Just some basic type validation first and leave more checks to the launcher
   TVM_FFI_ICHECK(routing_logits.dtype() == dl_float32 || routing_logits.dtype() == dl_bfloat16)
       << "BF16 MoE: routing_logits must be bfloat16 or float.";
@@ -2118,7 +2116,12 @@ Array<Tensor> trtllm_mxint4_block_scale_moe(
       << "routing_logits must be float or bfloat16.";
   TVM_FFI_ICHECK_EQ(routing_logits.ndim(), 2) << "routing_logits must be 2D.";
   TVM_FFI_ICHECK_EQ(routing_logits.size(1), num_experts) << "routing_logits has incorrect shape.";
-  TVM_FFI_ICHECK(!routing_bias.has_value()) << "routing_bias is not supported for MxInt4 MoE.";
+  if (routing_bias.has_value()) {
+    TVM_FFI_ICHECK(routing_bias.value().dtype() == dl_bfloat16) << "routing_bias must be bfloat16.";
+    TVM_FFI_ICHECK_EQ(routing_bias.value().ndim(), 1) << "routing_bias must be 1D.";
+    TVM_FFI_ICHECK_EQ(routing_bias.value().size(0), num_experts)
+        << "routing_bias has incorrect shape.";
+  }
 
   // Determine activation type
   TVM_FFI_ICHECK(gemm1_weights.dtype() == dl_uint8 && gemm2_weights.dtype() == dl_uint8)

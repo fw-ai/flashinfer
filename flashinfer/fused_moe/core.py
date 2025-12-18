@@ -3018,6 +3018,7 @@ def trtllm_mxint4_block_scale_moe(
 @flashinfer_api
 def trtllm_mxint4_block_scale_moe(
     routing_logits: torch.Tensor,
+    routing_bias: Optional[torch.Tensor],
     hidden_states: torch.Tensor,
     gemm1_weights: torch.Tensor,
     gemm1_weights_scale: torch.Tensor,
@@ -3044,6 +3045,8 @@ def trtllm_mxint4_block_scale_moe(
     Args:
         routing_logits (torch.Tensor): shape [seq_len, num_experts]
             Input tensor of routing logits. Supports float32, bfloat16.
+        routing_bias: Optional [num_experts] tensor of routing bias.
+            Must be bfloat16 if provided.
         hidden_states (torch.Tensor): shape [seq_len, hidden_size]
             Tensor of input hidden states. Supports bfloat16.
         gemm1_weights (torch.Tensor): shape [num_experts, 2 * intermediate_size, hidden_size // 2]
@@ -3083,7 +3086,7 @@ def trtllm_mxint4_block_scale_moe(
     """
     return get_trtllm_moe_sm100_module().trtllm_mxint4_block_scale_moe(
         routing_logits,
-        None,
+        routing_bias,
         hidden_states,
         gemm1_weights,
         gemm1_weights_scale,

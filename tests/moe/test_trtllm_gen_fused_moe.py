@@ -780,6 +780,7 @@ class MxInt4BlockScaleMoe(Moe):
     ):
         """Call MoE with runtime input quantization + kernel execution (done at runtime)."""
         expert_logits = kwargs["expert_logits"]
+        routing_bias = kwargs["routing_bias"]
         num_experts = kwargs["num_experts"]
         top_k = kwargs["top_k"]
         n_groups = kwargs["n_groups"]
@@ -787,11 +788,13 @@ class MxInt4BlockScaleMoe(Moe):
         intermediate_size = kwargs["intermediate_size"]
         routing_method_type = kwargs["routing_method_type"]
         enable_autotune = kwargs.get("enable_autotune", True)
+        routed_scaling = kwargs.get("routed_scaling", 1.0)
 
         # Use autotuner for optimal kernel selection
         with autotune(enable_autotune):
             output = trtllm_mxint4_block_scale_moe(
                 expert_logits,  # float
+                routing_bias,
                 hidden_states_orig,
                 static_data["gemm1_weights"],
                 static_data["gemm1_scales"],
@@ -807,7 +810,7 @@ class MxInt4BlockScaleMoe(Moe):
                 intermediate_size,
                 0,
                 num_experts,
-                1.0,
+                routed_scaling,
                 routing_method_type=routing_method_type,
                 tune_max_num_tokens=TUNE_MAX_NUM_TOKENS,
             )
