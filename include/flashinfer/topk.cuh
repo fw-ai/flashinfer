@@ -21,7 +21,6 @@
 #include <cstdlib>
 #include <cuda/std/limits>
 #include <numeric>
-#include <type_traits>
 
 #include "utils.cuh"
 #include "vec_dtypes.cuh"
@@ -891,23 +890,11 @@ __global__ void __launch_bounds__(BLOCK_THREADS) RadixTopKKernel_Unified(
         // k >= vocab_size: return all indices
         const uint32_t chunk_start = cta_in_group * chunk_size;
         const uint32_t chunk_end = min(chunk_start + chunk_size, length);
-        const uint32_t actual_chunk_size = ((chunk_start < length) ? (chunk_end - chunk_start) : 0);
-
-        for (uint32_t i = tx; i < actual_chunk_size; i += BLOCK_THREADS) {
+        for (uint32_t i = tx; i < chunk_end - chunk_start; i += BLOCK_THREADS) {
           if (chunk_start + i < k) {
             row_output[chunk_start + i] = static_cast<IdType>(chunk_start + i);
             output_values[row_idx * top_k_val + chunk_start + i] =
                 input[row_idx * stride + chunk_start + i];
-          }
-        }
-        // Clear histogram for next iteration (in case it's k < length)
-        if constexpr (!SINGLE_CTA) {
-          constexpr uint32_t NUM_ROUNDS = sizeof(OrderedType) * 8 / 8;
-          uint32_t next_first_hist_idx = ((iter + 1) * NUM_ROUNDS) % 3;
-          if (cta_in_group == 0) {
-            for (uint32_t i = tx; i < RADIX; i += BLOCK_THREADS) {
-              state->histogram[next_first_hist_idx][i] = 0;
-            }
           }
         }
         continue;
@@ -919,16 +906,6 @@ __global__ void __launch_bounds__(BLOCK_THREADS) RadixTopKKernel_Unified(
         for (uint32_t i = tx; i < top_k_val; i += BLOCK_THREADS) {
           row_output[i] = (i < length) ? src_page_entry[i] : static_cast<IdType>(-1);
         }
-        // Clear histogram for next iteration
-        if constexpr (!SINGLE_CTA) {
-          constexpr uint32_t NUM_ROUNDS = sizeof(OrderedType) * 8 / 8;
-          uint32_t next_first_hist_idx = ((iter + 1) * NUM_ROUNDS) % 3;
-          if (cta_in_group == 0) {
-            for (uint32_t i = tx; i < RADIX; i += BLOCK_THREADS) {
-              state->histogram[next_first_hist_idx][i] = 0;
-            }
-          }
-        }
         continue;
       }
     } else {  // RaggedTransform
@@ -937,23 +914,13 @@ __global__ void __launch_bounds__(BLOCK_THREADS) RadixTopKKernel_Unified(
         for (uint32_t i = tx; i < top_k_val; i += BLOCK_THREADS) {
           row_output[i] = (i < length) ? static_cast<IdType>(i) + offset : static_cast<IdType>(-1);
         }
-        // Clear histogram for next iteration
-        if constexpr (!SINGLE_CTA) {
-          constexpr uint32_t NUM_ROUNDS = sizeof(OrderedType) * 8 / 8;
-          uint32_t next_first_hist_idx = ((iter + 1) * NUM_ROUNDS) % 3;
-          if (cta_in_group == 0) {
-            for (uint32_t i = tx; i < RADIX; i += BLOCK_THREADS) {
-              state->histogram[next_first_hist_idx][i] = 0;
-            }
-          }
-        }
         continue;
       }
     }
 
     const uint32_t chunk_start = cta_in_group * chunk_size;
     const uint32_t chunk_end = min(chunk_start + chunk_size, length);
-    const uint32_t actual_chunk_size = ((chunk_start < length) ? (chunk_end - chunk_start) : 0);
+    const uint32_t actual_chunk_size = chunk_end - chunk_start;
 
     // Stage 1: Load and convert to ordered representation
     LoadToSharedOrdered<BLOCK_THREADS, VEC_SIZE, DType, Traits>(
@@ -1116,19 +1083,6 @@ __global__ void __launch_bounds__(BLOCK_THREADS) RadixTopKMaskLogitsKernel_Multi
       for (uint32_t i = aligned_size + tx; i < actual_chunk_size; i += BLOCK_THREADS) {
         masked_logits[row_idx * vocab_size + chunk_start + i] =
             logits[row_idx * vocab_size + chunk_start + i];
-      }
-
-      // Clear histogram for next iteration (in case it's k < vocab_size)
-      // Only needed for multi-CTA mode; single-CTA uses shared memory cleared each iteration
-      if constexpr (!SINGLE_CTA) {
-        constexpr uint32_t NUM_ROUNDS = sizeof(OrderedType) * 8 / 8;  // ORDERED_BITS / RADIX_BITS
-        uint32_t next_first_hist_idx = ((iter + 1) * NUM_ROUNDS) % 3;
-        if (cta_in_group == 0) {
-          for (uint32_t i = tx; i < RADIX; i += BLOCK_THREADS) {
-            state->histogram[next_first_hist_idx][i] = 0;
-          }
-        }
-        // No sync needed - next iteration's barrier will ensure visibility
       }
       continue;
     }
@@ -1405,20 +1359,6 @@ __global__ void __launch_bounds__(BLOCK_THREADS) RadixTopKRenormProbKernel_Multi
       for (uint32_t i = aligned_size + tx; i < actual_chunk_size; i += BLOCK_THREADS) {
         renormed_prob[row_idx * vocab_size + chunk_start + i] =
             DType(float(probs[row_idx * vocab_size + chunk_start + i]) * normalizer);
-      }
-
-      // Clear histogram for next iteration (in case it's k < vocab_size)
-      // Only needed for multi-CTA mode; single-CTA uses shared memory cleared each iteration
-      // Next iteration (iter+1) will use histogram[((iter+1)*NUM_ROUNDS) % 3] for its first round
-      if constexpr (!SINGLE_CTA) {
-        constexpr uint32_t NUM_ROUNDS = sizeof(OrderedType) * 8 / 8;  // ORDERED_BITS / RADIX_BITS
-        uint32_t next_first_hist_idx = ((iter + 1) * NUM_ROUNDS) % 3;
-        if (cta_in_group == 0) {
-          for (uint32_t i = tx; i < RADIX; i += BLOCK_THREADS) {
-            state->histogram[next_first_hist_idx][i] = 0;
-          }
-        }
-        // No sync needed - next iteration's barrier will ensure visibility
       }
       continue;
     }
@@ -2034,8 +1974,6 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   alignas(128) __shared__ int s_threshold_bin_id;
   alignas(128) __shared__ int s_num_input[2];
   alignas(128) __shared__ int s_indices[FILTERED_TOPK_MAX_K];
-  __shared__ int s_refine_overflow;
-  __shared__ int s_last_remain;
 
   auto& s_histogram = s_histogram_buf[0];
 
@@ -2044,7 +1982,6 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
 
   using Traits = FilteredTopKTraits<DType>;
   int topk = top_k;
-  if (tx == 0) s_refine_overflow = 0;
 
   // Stage 1: 8-bit coarse histogram with vectorized loads
   if (tx < RADIX + 1) s_histogram[tx] = 0;
@@ -2052,31 +1989,18 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
 
   vec_t<DType, VEC_SIZE> score_vec;
 
-  const int aligned_length = (length / VEC_SIZE) * VEC_SIZE;
-  // Full-row scan helper (vectorized body + tail). Overflow fallback reuses this traversal.
-  auto for_each_score_full = [&](auto&& fn) {
-  // vectorized body
 #pragma unroll 2
-    for (int base = tx * VEC_SIZE; base < aligned_length; base += BLOCK_SIZE * VEC_SIZE) {
-      score_vec.cast_load(&score[base]);
+  for (int base = tx * VEC_SIZE; base < length; base += BLOCK_SIZE * VEC_SIZE) {
+    score_vec.cast_load(&score[base]);
 #pragma unroll
-      for (int j = 0; j < VEC_SIZE; ++j) {
-        fn(score_vec[j], base + j);
-      }
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      const auto bin = Traits::ToCoarseKey(score_vec[j]);
+      atomicAdd(&s_histogram[bin], 1);
     }
-    // tail
-    for (int i = aligned_length + tx; i < length; i += BLOCK_SIZE) {
-      fn(score[i], i);
-    }
-  };
-  auto accumulate_coarse_hist = [&](auto raw_input, int /*index*/) {
-    const auto bin = Traits::ToCoarseKey(raw_input);
-    atomicAdd(&s_histogram[bin], 1);
-  };
-  for_each_score_full(accumulate_coarse_hist);
+  }
   __syncthreads();
 
-  // Suffix sum (Hillis Steele Scan)
+  // Suffix sum
   const auto run_cumsum = [&]() {
 #pragma unroll 8
     for (int i = 0; i < 8; ++i) {
@@ -2092,18 +2016,6 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
       __syncthreads();
     }
   };
-  auto update_refine_threshold = [&](int next_input_idx, auto reset_next_input_tag) {
-    constexpr bool RESET_NEXT_INPUT = decltype(reset_next_input_tag)::value;
-    run_cumsum();
-    if (tx < RADIX && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
-      s_threshold_bin_id = tx;
-      if constexpr (RESET_NEXT_INPUT) {
-        s_num_input[next_input_idx] = 0;
-      }
-      s_last_remain = topk - s_histogram[tx + 1];
-    }
-    __syncthreads();
-  };
 
   run_cumsum();
   if (tx < RADIX && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
@@ -2115,21 +2027,24 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
 
   const auto threshold_bin = s_threshold_bin_id;
   topk -= s_histogram[threshold_bin + 1];
-  [[maybe_unused]] const int topk_after_coarse = topk;
 
   constexpr int NUM_ROUNDS = Traits::NUM_REFINE_ROUNDS;
   constexpr int FIRST_SHIFT = Traits::FIRST_REFINE_SHIFT;
 
   if (topk == 0) {
     // Collect indices where bin > threshold
-    auto collect_coarse_gt = [&](auto raw_input, int index) {
-      const auto bin = static_cast<int>(Traits::ToCoarseKey(raw_input));
-      if (bin > threshold_bin) {
-        const auto pos = atomicAdd(&s_counter, 1);
-        s_indices[pos] = index;
+#pragma unroll 2
+    for (int base = tx * VEC_SIZE; base < length; base += BLOCK_SIZE * VEC_SIZE) {
+      score_vec.cast_load(&score[base]);
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        const auto bin = static_cast<int>(Traits::ToCoarseKey(score_vec[j]));
+        if (bin > threshold_bin) {
+          const auto pos = atomicAdd(&s_counter, 1);
+          s_indices[pos] = base + j;
+        }
       }
-    };
-    for_each_score_full(collect_coarse_gt);
+    }
     __syncthreads();
   } else {
     __syncthreads();
@@ -2137,87 +2052,53 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
     __syncthreads();
 
     // Filter + histogram for refinement
-    auto filter_and_add_to_histogram = [&](auto raw_input, int index) {
-      const auto bin = static_cast<int>(Traits::ToCoarseKey(raw_input));
-      if (bin > threshold_bin) {
-        const auto pos = atomicAdd(&s_counter, 1);
-        s_indices[pos] = index;
-      } else if (bin == threshold_bin) {
-        const auto pos = atomicAdd(&s_num_input[0], 1);
-        if (__builtin_expect(pos < SMEM_INPUT_SIZE, 1)) {
-          s_input_idx[0][pos] = index;
-          const auto ordered = Traits::ToOrdered(raw_input);
-          const auto sub_bin = (ordered >> FIRST_SHIFT) & 0xFF;
-          atomicAdd(&s_histogram[sub_bin], 1);
-        } else {
-          atomicOr(&s_refine_overflow, 1);
+#pragma unroll 2
+    for (int base = tx * VEC_SIZE; base < length; base += BLOCK_SIZE * VEC_SIZE) {
+      score_vec.cast_load(&score[base]);
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        const auto raw_input = score_vec[j];
+        const auto bin = static_cast<int>(Traits::ToCoarseKey(raw_input));
+        if (bin > threshold_bin) {
+          const auto pos = atomicAdd(&s_counter, 1);
+          s_indices[pos] = base + j;
+        } else if (bin == threshold_bin) {
+          const auto pos = atomicAdd(&s_num_input[0], 1);
+          if (__builtin_expect(pos < SMEM_INPUT_SIZE, 1)) {
+            s_input_idx[0][pos] = base + j;
+            const auto ordered = Traits::ToOrdered(raw_input);
+            const auto sub_bin = (ordered >> FIRST_SHIFT) & 0xFF;
+            atomicAdd(&s_histogram[sub_bin], 1);
+          }
         }
       }
-    };
-    for_each_score_full(filter_and_add_to_histogram);
+    }
     __syncthreads();
 
-    // Stage 2: refine with 8bit radix passes.
-    // If the threshold-bin candidate buffer overflows in 1-round refine mode
-    // (fp16/bf16), switch to a slow path that re-histograms the full threshold
-    // bin to preserve correctness.
-    auto collect_with_threshold_last_round = [&](int r_idx, int num_input, int offset,
-                                                 int threshold) {
-      for (int i = tx; i < num_input; i += BLOCK_SIZE) {
-        const auto idx = s_input_idx[r_idx][i];
-        const auto raw_input = score[idx];
-        const auto bin = (Traits::ToOrdered(raw_input) >> offset) & 0xFF;
-        if (static_cast<int>(bin) > threshold) {
-          const auto pos = atomicAdd(&s_counter, 1);
-          s_indices[pos] = idx;
-        } else if (static_cast<int>(bin) == threshold) {
-          const auto pos = atomicAdd(&s_last_remain, -1);
-          if (pos > 0) {
-            s_indices[top_k - pos] = idx;
-          }
-        }
-      }
-      __syncthreads();
-    };
-    auto collect_with_threshold_non_last_round = [&](int r_idx, int num_input, int offset,
-                                                     int threshold) {
-      const auto next_r_idx = r_idx ^ 1;
-      __syncthreads();
-      if (tx < RADIX + 1) s_histogram[tx] = 0;
-      __syncthreads();
-      for (int i = tx; i < num_input; i += BLOCK_SIZE) {
-        const auto idx = s_input_idx[r_idx][i];
-        const auto raw_input = score[idx];
-        const auto bin = (Traits::ToOrdered(raw_input) >> offset) & 0xFF;
-        if (static_cast<int>(bin) > threshold) {
-          const auto pos = atomicAdd(&s_counter, 1);
-          s_indices[pos] = idx;
-        } else if (static_cast<int>(bin) == threshold) {
-          const auto pos = atomicAdd(&s_num_input[next_r_idx], 1);
-          if (__builtin_expect(pos < SMEM_INPUT_SIZE, 1)) {
-            s_input_idx[next_r_idx][pos] = idx;
-            const auto bin32 = Traits::ToOrdered(raw_input);
-            const auto sub_bin = (bin32 >> (offset - 8)) & 0xFF;
-            atomicAdd(&s_histogram[sub_bin], 1);
-          } else {
-            atomicOr(&s_refine_overflow, 1);
-          }
-        }
-      }
-      __syncthreads();
-    };
-    auto run_refine_round = [&](int r_idx, int offset, auto is_last_round_tag) {
-      constexpr bool IS_LAST_ROUND = decltype(is_last_round_tag)::value;
-      const auto raw_num_input = s_num_input[r_idx];
-      const auto num_input = (raw_num_input < SMEM_INPUT_SIZE) ? raw_num_input : SMEM_INPUT_SIZE;
+    // Stage 2: refine with 8bit radix passes
+#pragma unroll
+    for (int round = 0; round < NUM_ROUNDS; ++round) {
+      __shared__ int s_last_remain;
+      const auto r_idx = round % 2;
 
-      update_refine_threshold(r_idx ^ 1, std::true_type{});
+      const auto _raw_num_input = s_num_input[r_idx];
+      const auto num_input = (_raw_num_input < SMEM_INPUT_SIZE) ? _raw_num_input : SMEM_INPUT_SIZE;
+
+      run_cumsum();
+      if (tx < RADIX && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
+        s_threshold_bin_id = tx;
+        s_num_input[r_idx ^ 1] = 0;
+        s_last_remain = topk - s_histogram[tx + 1];
+      }
+      __syncthreads();
 
       const auto threshold = s_threshold_bin_id;
       topk -= s_histogram[threshold + 1];
 
+      const int offset = FIRST_SHIFT - round * 8;
+      const bool is_last_round = (round == NUM_ROUNDS - 1);
+
       if (topk == 0) {
-        // Final round reached: only collect bins strictly greater than threshold.
         for (int i = tx; i < num_input; i += BLOCK_SIZE) {
           const auto idx = s_input_idx[r_idx][i];
           const auto bin = (Traits::ToOrdered(score[idx]) >> offset) & 0xFF;
@@ -2227,202 +2108,35 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
           }
         }
         __syncthreads();
-        return true;
-      }
-
-      if constexpr (IS_LAST_ROUND) {
-        collect_with_threshold_last_round(r_idx, num_input, offset, threshold);
+        break;
       } else {
-        collect_with_threshold_non_last_round(r_idx, num_input, offset, threshold);
-      }
-      return false;
-    };
-    if constexpr (NUM_ROUNDS == 1) {
-      if (s_refine_overflow) {
+        __syncthreads();
         if (tx < RADIX + 1) s_histogram[tx] = 0;
         __syncthreads();
-
-        auto build_full_threshold_hist = [&](auto raw_input, int /*index*/) {
-          const auto coarse_bin = static_cast<int>(Traits::ToCoarseKey(raw_input));
-          if (coarse_bin == threshold_bin) {
-            const auto ordered = Traits::ToOrdered(raw_input);
-            const auto sub_bin = ordered & 0xFF;
-            atomicAdd(&s_histogram[sub_bin], 1);
-          }
-        };
-
-        for_each_score_full(build_full_threshold_hist);
-        __syncthreads();
-
-        if (tx == 0) {
-          s_threshold_bin_id = 0;
-          s_last_remain = 0;
-        }
-        __syncthreads();
-
-        update_refine_threshold(/*next_input_idx=*/0, std::false_type{});
-
-        const auto threshold = s_threshold_bin_id;
-
-        // Keep s_counter continuity: it already counts coarse_bin > threshold_bin
-        // elements collected in filter_and_add_to_histogram. Here we append
-        // threshold-bin refined winners after that prefix.
-        auto collect_from_full_threshold_bin = [&](auto raw_input, int index) {
-          const auto coarse_bin = static_cast<int>(Traits::ToCoarseKey(raw_input));
-          if (coarse_bin != threshold_bin) {
-            return;
-          }
-          const auto sub_bin = Traits::ToOrdered(raw_input) & 0xFF;
-          if (static_cast<int>(sub_bin) > threshold) {
+        for (int i = tx; i < num_input; i += BLOCK_SIZE) {
+          const auto idx = s_input_idx[r_idx][i];
+          const auto raw_input = score[idx];
+          const auto bin = (Traits::ToOrdered(raw_input) >> offset) & 0xFF;
+          if (static_cast<int>(bin) > threshold) {
             const auto pos = atomicAdd(&s_counter, 1);
-            s_indices[pos] = index;
-          } else if (static_cast<int>(sub_bin) == threshold) {
-            const auto pos = atomicAdd(&s_last_remain, -1);
-            if (pos > 0) {
-              s_indices[top_k - pos] = index;
-            }
-          }
-        };
-
-        for_each_score_full(collect_from_full_threshold_bin);
-        __syncthreads();
-      } else {
-        // fast path for 1-round refine.
-        const int round = 0;
-        const auto r_idx = round % 2;
-        const int offset = FIRST_SHIFT;
-        run_refine_round(r_idx, offset, std::true_type{});
-      }
-    } else {
-      // Multi-round refine path (float32): if any refine-buffer overflow is detected,
-      // switch to a correctness-first full rebuild of the threshold-bin selection.
-      // This fallback may be slower than the fast path, but avoids partial-state corruption.
-      if (!s_refine_overflow) {
-#pragma unroll
-        for (int round = 0; round < NUM_ROUNDS; ++round) {
-          const auto r_idx = round % 2;
-          const int offset = FIRST_SHIFT - round * 8;
-          if (round == NUM_ROUNDS - 1) {
-            if (run_refine_round(r_idx, offset, std::true_type{})) {
-              break;
-            }
-          } else {
-            if (run_refine_round(r_idx, offset, std::false_type{})) {
-              break;
-            }
-          }
-          if (s_refine_overflow) {
-            break;
-          }
-        }
-      }
-      // run_refine_round can set s_refine_overflow during the loop above, so this
-      // check is intentionally separate from the first if (!s_refine_overflow).
-      if (s_refine_overflow) {
-        using OrderedType = typename Traits::OrderedType;
-        static_assert(sizeof(OrderedType) == 4,
-                      "Multi-round overflow fallback expects 32-bit ordered keys.");
-
-        uint32_t topk_remain = static_cast<uint32_t>(topk_after_coarse);
-        uint8_t threshold_bytes[NUM_ROUNDS];
-#pragma unroll
-        for (int i = 0; i < NUM_ROUNDS; ++i) {
-          threshold_bytes[i] = 0xFF;
-        }
-        int stop_round = NUM_ROUNDS - 1;
-
-#pragma unroll
-        for (int round = 0; round < NUM_ROUNDS; ++round) {
-          const int offset = FIRST_SHIFT - round * 8;
-
-          if (tx < RADIX + 1) s_histogram[tx] = 0;
-          __syncthreads();
-
-          auto build_hist = [&](auto raw_input, int /*index*/) {
-            const auto coarse_bin = static_cast<int>(Traits::ToCoarseKey(raw_input));
-            if (coarse_bin != threshold_bin) {
-              return;
-            }
-            const auto ordered = static_cast<uint32_t>(Traits::ToOrdered(raw_input));
-            bool prefix_match = true;
-#pragma unroll
-            for (int prev = 0; prev < round; ++prev) {
-              const int prev_offset = FIRST_SHIFT - prev * 8;
-              if (static_cast<uint8_t>((ordered >> prev_offset) & 0xFF) != threshold_bytes[prev]) {
-                prefix_match = false;
+            s_indices[pos] = idx;
+          } else if (static_cast<int>(bin) == threshold) {
+            if (is_last_round) {
+              const auto pos = atomicAdd(&s_last_remain, -1);
+              if (pos > 0) {
+                s_indices[top_k - pos] = idx;
+              }
+            } else {
+              const auto pos = atomicAdd(&s_num_input[r_idx ^ 1], 1);
+              if (__builtin_expect(pos < SMEM_INPUT_SIZE, 1)) {
+                s_input_idx[r_idx ^ 1][pos] = idx;
+                const auto bin32 = Traits::ToOrdered(raw_input);
+                const auto sub_bin = (bin32 >> (offset - 8)) & 0xFF;
+                atomicAdd(&s_histogram[sub_bin], 1);
               }
             }
-            if (prefix_match) {
-              const auto sub_bin = (ordered >> offset) & 0xFF;
-              atomicAdd(&s_histogram[sub_bin], 1);
-            }
-          };
-          for_each_score_full(build_hist);
-          __syncthreads();
-
-          run_cumsum();
-          if (tx < RADIX && s_histogram[tx] > static_cast<int>(topk_remain) &&
-              s_histogram[tx + 1] <= static_cast<int>(topk_remain)) {
-            s_threshold_bin_id = tx;
-          }
-          __syncthreads();
-
-          const int threshold = s_threshold_bin_id;
-          threshold_bytes[round] = static_cast<uint8_t>(threshold);
-          topk_remain -= static_cast<uint32_t>(s_histogram[threshold + 1]);
-
-          if (topk_remain == 0) {
-            stop_round = round;
-            break;
           }
         }
-
-        uint32_t pivot = 0;
-#pragma unroll
-        for (int round = 0; round < NUM_ROUNDS; ++round) {
-          const int offset = FIRST_SHIFT - round * 8;
-          uint32_t byte = static_cast<uint32_t>(threshold_bytes[round]);
-          if (topk_remain == 0 && round > stop_round) {
-            byte = 0xFFu;
-          }
-          pivot |= (byte << offset);
-        }
-        const int eq_needed = static_cast<int>(topk_remain);
-
-        // Overflow can happen after partial writes to s_indices/s_counter in earlier rounds.
-        // Reset and rebuild from full scans to avoid mixing stale partial state.
-        if (tx == 0) {
-          s_counter = 0;
-          s_last_remain = eq_needed;
-        }
-        __syncthreads();
-
-        // Re-collect all winners from scratch:
-        //   1) coarse_bin > threshold_bin
-        //   2) threshold_bin entries with ordered > pivot
-        //   3) first eq_needed entries where ordered == pivot
-        auto collect_by_pivot = [&](auto raw_input, int index) {
-          const auto coarse_bin = static_cast<int>(Traits::ToCoarseKey(raw_input));
-          if (coarse_bin > threshold_bin) {
-            const auto pos = atomicAdd(&s_counter, 1);
-            s_indices[pos] = index;
-            return;
-          }
-          if (coarse_bin != threshold_bin) {
-            return;
-          }
-          const auto ordered = static_cast<uint32_t>(Traits::ToOrdered(raw_input));
-          if (ordered > pivot) {
-            const auto pos = atomicAdd(&s_counter, 1);
-            s_indices[pos] = index;
-          } else if (eq_needed > 0 && ordered == pivot) {
-            const auto pos = atomicAdd(&s_last_remain, -1);
-            if (pos > 0) {
-              s_indices[top_k - pos] = index;
-            }
-          }
-        };
-        for_each_score_full(collect_by_pivot);
         __syncthreads();
       }
     }
@@ -2617,11 +2331,6 @@ inline TopKAlgoOverride GetTopKAlgoOverride() {
  * Heuristics:
  * - 16-bit types (fp16/bf16): FilteredTopK for seq <= 16K
  * - 32-bit types (fp32): FilteredTopK for seq <= 32K, or larger seq with batch > seq/16K
- *
- * Note:
- * - For tie-heavy long-sequence workloads, FilteredTopK can hit threshold-bin overflow
- *   in refinement and fall back to slower handling, which may cause visible performance
- *   degradation. In such cases, users can force multi-CTA via FLASHINFER_TOPK_ALGO=multi_cta.
  */
 template <typename DType>
 inline bool ShouldUseFilteredTopK(uint32_t num_rows, uint32_t top_k_val, uint32_t max_len) {
