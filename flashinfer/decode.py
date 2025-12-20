@@ -1949,6 +1949,11 @@ class TrtllmGenDecodeModule:
         if isinstance(bmm2_scale, torch.Tensor):
             assert bmm2_scale.dtype == torch.float32
 
+        assert len(query.size()) == 4
+        batch_size = query.size(0)
+        max_q_len = query.size(1)
+        query = query.flatten(0, 1)  # [B*S, H, D]
+
         self._op.trtllm_paged_attention_decode(
             out,
             None,  # fp4 output not supported in wrapper api yet.
@@ -1973,10 +1978,6 @@ class TrtllmGenDecodeModule:
             workspace_size,
             sinks,
             None,  # cum_seq_lens_q
-            skip_softmax_threshold_scale_factor,
-            None,  # lse
-            None,  # k_cache_scales
-            None,  # v_cache_scale
         )
         return out
 
@@ -2141,6 +2142,8 @@ def trtllm_batch_decode_with_kv_cache(
     q_len_per_req: Optional[int] = 1,
     o_scale: Optional[float] = 1.0,
     mask: Optional[torch.Tensor] = None,
+    max_q_len: Optional[int] = None,
+    cum_seq_lens_q: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
@@ -2213,6 +2216,16 @@ def trtllm_batch_decode_with_kv_cache(
 
     mask : Optional[torch.Tensor] = None
         causal attention mask for xqa speculative decoding.
+
+    max_q_len: Optional[int] = None
+        The maximum query sequence length across all requests when using variable-length queries.
+        Only supported by trtllm-gen backend. Must be provided together with ``cum_seq_lens_q``.
+        When None, all requests use uniform query length specified by ``q_len_per_req``.
+
+    cum_seq_lens_q : Optional[torch.Tensor] = None
+        Cumulative query sequence lengths for variable-length query support, shape: ``[batch_size + 1]``, dtype: ``torch.int32``.
+        Only supported by trtllm-gen backend. Must be provided together with ``max_q_len``.
+        When None, all requests use uniform query length specified by ``q_len_per_req``.
 
     Returns
     -------
@@ -2365,6 +2378,13 @@ def trtllm_batch_decode_with_kv_cache(
         if isinstance(bmm2_scale, torch.Tensor):
             assert bmm2_scale.dtype == torch.float32
 
+        if q_len_per_req is not None:
+            max_q_len = q_len_per_req
+            batch_size = query.size(0) // q_len_per_req
+        else:
+            assert max_q_len is not None
+            batch_size = cum_seq_lens_q.size(0) - 1
+
         run_func(
             out,
             out_scale_factor,
@@ -2389,10 +2409,6 @@ def trtllm_batch_decode_with_kv_cache(
             workspace_buffer.numel() * workspace_buffer.element_size(),
             sinks,
             cum_seq_lens_q,
-            skip_softmax_threshold_scale_factor,
-            lse,  # lse
-            k_cache_scale,  # k_cache_scale
-            v_cache_scale,  # v_cache_scale
         )
 
         out = (
