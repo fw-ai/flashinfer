@@ -844,9 +844,34 @@ class PosixFDHandleExchanger(HandleExchanger):
         self._socket.close()
 
 
+def is_mnnvl_fabric_supported(device_idx: int) -> bool:
+    fabric_handle_supported = checkCudaErrors(
+        cuda.cuDeviceGetAttribute(
+            cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED,
+            device_idx,
+        )
+    )
+    if fabric_handle_supported == 0:
+        return False
+
+    pynvml.nvmlInit()
+    try:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(device_idx)
+        fabric_info = pynvml.c_nvmlGpuFabricInfoV_t()
+        pynvml.nvmlDeviceGetGpuFabricInfoV(handle, ctypes.byref(fabric_info))
+        if (
+            fabric_info.state >= pynvml.NVML_GPU_FABRIC_STATE_COMPLETED
+            and fabric_info.clusterUuid[0] != 0
+        ):
+            return True
+        return False
+    finally:
+        pynvml.nvmlShutdown()
+
+
 # TODO: This class follows similar logic with MnnvlMemory, but the latter use single instance mode to manage the memory allocation.
-class McastDeviceMemory:
-    """Python port of McastDeviceMemory from TensorRT-LLM"""
+class SymmDeviceMemory:
+    """Python port of SymmDeviceMemory from TensorRT-LLM"""
 
     def __init__(
         self,
@@ -854,8 +879,9 @@ class McastDeviceMemory:
         group_size: int,
         group_rank: int,
         device_idx: int,
-        is_multi_node: bool = True,
         comm_backend_for_handle_transfer: Optional[CommBackend] = None,
+        enable_multicast: bool = True,
+        allocate_signal_pads: bool = True,
     ):
         cu_device = checkCudaErrors(cuda.cuDeviceGet(device_idx))
 
@@ -919,19 +945,8 @@ class McastDeviceMemory:
             f"Signal pad offset: {self.signal_pad_offset}"
         )
 
-        # Create handle exchanger based on multi-node mode
-        if self.is_multi_node:
-            # Check if fabric handle is supported
-            fabric_handle_supported = checkCudaErrors(
-                cuda.cuDeviceGetAttribute(
-                    cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED,
-                    device_idx,
-                )
-            )
-            if fabric_handle_supported == 0:
-                raise RuntimeError(
-                    "[McastDeviceMemory] Device does not support fabric handle."
-                )
+        # Create handle exchanger
+        if is_mnnvl_fabric_supported(device_idx):
             self._exchanger: HandleExchanger = FabricHandleExchanger(
                 self.comm_backend, self.group_rank, self.group_size
             )
@@ -939,7 +954,7 @@ class McastDeviceMemory:
             self._exchanger = PosixFDHandleExchanger(
                 self.comm_backend, self.group_rank, self.group_size
             )
-        self._alloc_mn_mcast_mem(buf_size)
+        self._alloc_mn_mcast_mem(buf_size, enable_multicast)
 
         if allocate_signal_pads:
             # Initialize signal pads
@@ -956,10 +971,6 @@ class McastDeviceMemory:
 
     def __del__(self):
         """Destructor - cleanup allocated memory"""
-
-        # Check if we're in a valid state for cleanup
-        if not hasattr(self, "is_multi_node"):
-            return
 
         if hasattr(self, "_exchanger"):
             self._exchanger.close()
@@ -1066,7 +1077,7 @@ class McastDeviceMemory:
         """Get the usable buffer size (excluding signal pad)"""
         return self.allocation_size - self.SIGNAL_PAD_SIZE
 
-    def _alloc_mn_mcast_mem(self, buf_size: int):
+    def _alloc_mn_mcast_mem(self, buf_size: int, enable_multicast: bool):
         """Allocate multi-node multicast memory using MNNVL"""
         self._verify_cuda_context()
 
@@ -1077,7 +1088,8 @@ class McastDeviceMemory:
         self._allocate_unicast_buffers(allocation_prop)
 
         # Setup multicast object, exchange handles, map and bind memory
-        self._setup_multicast(mc_prop)
+        if enable_multicast:
+            self._setup_multicast(mc_prop)
 
     def _verify_cuda_context(self):
         """Verify CUDA context is set to the correct device."""
@@ -1289,7 +1301,6 @@ class McastGPUBuffer:
         group_size: int,
         group_rank: int,
         device: torch.device,
-        mn_nvlink: bool = True,
         comm_backend_for_handle_transfer: Optional[CommBackend] = None,
     ):
         """
@@ -1303,12 +1314,11 @@ class McastGPUBuffer:
             mn_nvlink: Flag indicating if multi-node NVLink is used
             comm_backend_for_handle_transfer: Communication backend for handle transfer
         """
-        self.mcast_device_memory = McastDeviceMemory(
+        self.mcast_device_memory = SymmDeviceMemory(
             buf_size,
             group_size,
             group_rank,
             device.index,
-            mn_nvlink,
             comm_backend_for_handle_transfer,
         )
         # Update buf_size to reflect the actual usable buffer size after allocation

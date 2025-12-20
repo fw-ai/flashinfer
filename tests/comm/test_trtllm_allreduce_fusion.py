@@ -85,8 +85,7 @@ def _run_correctness_worker(
                 max_token_num=MAX_TOKEN_NUM,
                 hidden_dim=hidden_dim,
                 dtype=dtype,
-                topology="single_node",
-                process_group=group,
+                comm_backend=TorchDistBackend(),
             )
 
         test_loop = 5
