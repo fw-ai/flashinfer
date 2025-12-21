@@ -204,12 +204,7 @@ flashinfer clear-cache
 flashinfer export-compile-commands [output_path]
 ```
 
-This command displays:
-
-- FlashInfer version and installed packages (flashinfer-python, flashinfer-cubin, flashinfer-jit-cache)
-- PyTorch and CUDA version information
-- Environment variables and artifact paths
-- Downloaded cubin status and module compilation status
+For complete documentation, see the [CLI reference](https://docs.flashinfer.ai/cli.html).
 
 ## API Logging
 

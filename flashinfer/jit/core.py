@@ -367,7 +367,7 @@ class JitSpec:
         nvcc = os.environ.get("FLASHINFER_NVCC", f"{cuda_home}/bin/nvcc")
 
         # Build directory
-        build_dir = str(self.build_dir.resolve())
+        build_dir = str(self.jit_library_path.parent.resolve())
 
         # Generate entries for each source file
         compile_commands = []
