@@ -420,6 +420,7 @@ def _test_trtllm_batch_prefill(
     max_kv_len,
     device_scale,
     head_dim,
+    non_contiguous_query=False,
 ):
     compute_capability = get_compute_capability(torch.device(device="cuda"))
     if compute_capability[0] != 10:
@@ -536,8 +537,15 @@ def _test_trtllm_batch_prefill(
         bmm2_scale = bmm2_scale.item()
     elif not isinstance(bmm2_scale, torch.Tensor) and device_scale:
         bmm2_scale = torch.tensor(bmm2_scale, device=GPU_DEVICE, dtype=torch.float32)
+
+    # Optionally make query non-contiguous for testing stride support
+    if non_contiguous_query:
+        q_input = make_query_non_contiguous(q, num_qo_heads, head_dim)
+    else:
+        q_input = q.contiguous()
+
     output = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
-        q.contiguous(),
+        q_input,
         kv_cache,
         workspace_buffer,
         page_table,
@@ -662,6 +670,7 @@ def _test_trtllm_batch_prefill(
 @pytest.mark.parametrize("max_q_len", [511])
 @pytest.mark.parametrize("max_kv_len", [2047])
 @pytest.mark.parametrize("head_dim", [128, 256])
+@pytest.mark.parametrize("non_contiguous_query", [False, True])
 def test_trtllm_batch_prefill(
     kv_layout,
     batch_size,
@@ -677,6 +686,7 @@ def test_trtllm_batch_prefill(
     max_q_len,
     max_kv_len,
     head_dim,
+    non_contiguous_query,
 ):
     _test_trtllm_batch_prefill(
         kv_layout,
@@ -694,6 +704,7 @@ def test_trtllm_batch_prefill(
         max_kv_len,
         kv_dtype == "fp8",
         head_dim,
+        non_contiguous_query=non_contiguous_query,
     )
 
 
@@ -769,6 +780,7 @@ def _test_trtllm_batch_decode(
     head_dim,
     device_scale=False,
     max_q_len=None,
+    non_contiguous_query=False,
 ):
     """
     Common function for testing trtllm-gen decode.
@@ -940,8 +952,15 @@ def _test_trtllm_batch_decode(
         bmm2_scale = bmm2_scale.item()
     elif not isinstance(bmm2_scale, torch.Tensor) and device_scale:
         bmm2_scale = torch.tensor(bmm2_scale, device=GPU_DEVICE, dtype=torch.float32)
+
+    # Optionally make query non-contiguous for testing stride support
+    if non_contiguous_query:
+        q_input = make_query_non_contiguous(q, num_qo_heads, head_dim)
+    else:
+        q_input = q.contiguous()
+
     output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
-        q.contiguous(),
+        q_input,
         kv_cache,
         workspace_buffer,
         page_table,
@@ -1116,7 +1135,6 @@ def _test_trtllm_batch_decode(
 @pytest.mark.parametrize("max_in_kv_len", [110])
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("non_contiguous_query", [False, True])
-@pytest.mark.parametrize("skips_softmax", [False, True])
 def test_trtllm_batch_decode(
     backend,
     kv_layout,
@@ -1134,7 +1152,6 @@ def test_trtllm_batch_decode(
     max_in_kv_len,
     head_dim,
     non_contiguous_query,
-    skips_softmax,
 ):
     # xqa backend does not support non-contiguous query yet
     if backend == "xqa" and non_contiguous_query:
@@ -1158,6 +1175,7 @@ def test_trtllm_batch_decode(
         max_in_kv_len,
         head_dim,
         kv_dtype == "fp8",
+        non_contiguous_query=non_contiguous_query,
     )
 
 
@@ -1603,6 +1621,22 @@ def test_trtllm_batch_decode_spec(
         max_q_len=max_q_len,
         skips_softmax=skips_softmax,
     )
+
+
+def make_query_non_contiguous(q, num_qo_heads, head_dim):
+    """
+    Create a non-contiguous version of the query tensor.
+    Create a (N, H, 2*D) tensor and slice the first D dimensions: x[..., :D]
+    This produces a non-contiguous view with the same data.
+    """
+    n, h, d = q.shape
+    # Create a larger tensor with 2*D in the last dimension
+    large_tensor = torch.zeros(n, h, 2 * d, dtype=q.dtype, device=q.device)
+    large_tensor[..., :d] = q
+    # Slice to get non-contiguous query (only last dim is contiguous)
+    q_non_contiguous = large_tensor[..., :d]
+    assert not q_non_contiguous.is_contiguous(), "Query should be non-contiguous"
+    return q_non_contiguous
 
 
 @pytest.mark.parametrize("backend", ["trtllm-gen"])
