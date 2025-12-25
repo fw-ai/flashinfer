@@ -153,6 +153,7 @@ def parse_gemm_args(line, parser):
         action="store_true",
         help="In mm_fp4, whether to use nvfp4 quantization or mxfp4 quantization, defaults to False.",
     )
+    # TODO: add bmm_mxfp8 ?
     parser.add_argument(
         "--autotune",
         action="store_true",
