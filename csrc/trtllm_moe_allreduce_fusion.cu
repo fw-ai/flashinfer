@@ -24,6 +24,28 @@ using tvm::ffi::Optional;
     }                                                                         \
   }()
 
+#define DISPATCH_FLOATING_TYPES_FOR_SCALE(dtype, ScaleType, ...)                    \
+  [&] {                                                                             \
+    switch (encode_dlpack_dtype(dtype)) {                                           \
+      case float16_code: {                                                          \
+        using ScaleType = half;                                                     \
+        return __VA_ARGS__();                                                       \
+      }                                                                             \
+      case bfloat16_code: {                                                         \
+        using ScaleType = __nv_bfloat16;                                            \
+        return __VA_ARGS__();                                                       \
+      }                                                                             \
+      case float32_code: {                                                          \
+        using ScaleType = float;                                                    \
+        return __VA_ARGS__();                                                       \
+      }                                                                             \
+      default:                                                                      \
+        TVM_FFI_LOG_AND_THROW(NotImplementedError)                                  \
+            << "Unsupported expert_scale_factor dtype; only float16, bfloat16 "     \
+               "and float32 are supported in trtllm_moe_finalize_allreduce_fusion";\
+    }                                                                               \
+  }()
+
 void trtllm_moe_allreduce_fusion(
     int64_t world_size, int64_t world_rank, int64_t token_num, int64_t hidden_size,
     TensorView workspace_ptrs, bool launch_with_pdl, TensorView residual_in, TensorView rms_gamma,
@@ -86,7 +108,7 @@ void trtllm_moe_finalize_allreduce_fusion(
     TensorView expanded_idx_to_permuted_idx, TensorView norm_out, TensorView residual_out,
     bool launch_with_pdl, TensorView workspace, int64_t const world_rank, int64_t const world_size,
     double const eps, Optional<TensorView> shared_expert_output,
-    Optional<TensorView> expert_scale_factor) {
+    Optional<TensorView> expert_scale_factor, Optional<float> routing_scaling_factor) {
   DISPATCH_FLOATING_TYPES_FOR_ALLREDUCE(residual_in.dtype(), c_type, [&] {
     MoeFinalizeAllReduceFusionParams<c_type> params;
 
@@ -101,6 +123,17 @@ void trtllm_moe_finalize_allreduce_fusion(
     // size: num_token * hidden_dim
     params.size = residual_in.numel();
     params.hidden_dim = hidden_dim;
+    int num_tokens = residual_in.size(0);
+
+    FLASHINFER_CHECK(
+        expanded_idx_to_permuted_idx.size(0) == num_tokens,
+        "expanded_idx_to_permuted_idx.size(0) must equal num_tokens, got "
+        "expanded_idx_to_permuted_idx.size(0)=%d and num_tokens=%d",
+        expanded_idx_to_permuted_idx.size(0), num_tokens);
+
+    params.routing_scaling_factor =
+        routing_scaling_factor.has_value() ? static_cast<float>(routing_scaling_factor.value())
+                                           : 1.0f;
 
     // workspace: AR scratch space
     params.workspace = reinterpret_cast<void**>(workspace.data_ptr());
@@ -125,7 +158,35 @@ void trtllm_moe_finalize_allreduce_fusion(
     params.norm_out = norm_out.data_ptr();
     params.residual_out = residual_out.data_ptr();
 
-    auto status = moefinalize_allreduce_fusion_op(params, launch_with_pdl);
+    // Record norm_out dtype so kernels can specialize behavior if needed.
+    params.norm_out_dtype = encode_dlpack_dtype(norm_out.dtype());
+
+    // Dispatch on expert_scale_factor dtype for ScaleType. If no expert_scale_factor is
+    // provided, fall back to float (this value is unused when the pointer is nullptr).
+    cudaError_t status;
+    if (!expert_scale_factor.has_value()) {
+      // When no expert_scale_factor is provided, use float for ScaleType and select NormOutT
+      // based on norm_out dtype (fp8_e4m3fn vs. same as compute type).
+      auto norm_dtype = encode_dlpack_dtype(norm_out.dtype());
+      if (norm_dtype == float8_e4m3fn_code) {
+        status = moefinalize_allreduce_fusion_op<c_type, float, __nv_fp8_e4m3>(params,
+                                                                               launch_with_pdl);
+      } else {
+        status = moefinalize_allreduce_fusion_op<c_type, float, c_type>(params, launch_with_pdl);
+      }
+    } else {
+      DISPATCH_FLOATING_TYPES_FOR_SCALE(
+          expert_scale_factor.value().dtype(), ScaleType, [&]() {
+            auto norm_dtype = encode_dlpack_dtype(norm_out.dtype());
+            if (norm_dtype == float8_e4m3fn_code) {
+              status = moefinalize_allreduce_fusion_op<c_type, ScaleType, __nv_fp8_e4m3>(
+                  params, launch_with_pdl);
+            } else {
+              status =
+                  moefinalize_allreduce_fusion_op<c_type, ScaleType, c_type>(params, launch_with_pdl);
+            }
+          });
+    }
     TVM_FFI_ICHECK(status == cudaSuccess)
         << "moefinalize_allreduce_fusion_op failed with error code " << cudaGetErrorString(status);
   });
