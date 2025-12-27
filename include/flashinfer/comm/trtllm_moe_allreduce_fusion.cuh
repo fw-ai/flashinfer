@@ -1239,12 +1239,6 @@ cudaError_t moereduction_allreduce_fusion_op(MoeReductionAllReduceFusionParams<T
 
 #define FLASHINFER_MOE_FINALIZE_PROFILE
 
-/**
-Notes:
-- Workload we care about is bfloat16
-- For low-latency batch sizes so 1-128 tokens total
-*/
-
 /////////////////////////////////////////////////////////////////
 //                  * MoE Finalize Allreduce Fusion *                   //
 /////////////////////////////////////////////////////////////////
