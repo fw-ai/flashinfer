@@ -17,12 +17,6 @@
 #include "../utils.cuh"
 #include "../vec_dtypes.cuh"
 
-/**
-Notes:
-- Workload we care about is bfloat16
-- For low-latency batch sizes so 1-128 tokens total
-*/
-
 namespace flashinfer {
 
 namespace trtllm_moe_allreduce_fusion {
@@ -1241,6 +1235,16 @@ cudaError_t moereduction_allreduce_fusion_op(MoeReductionAllReduceFusionParams<T
   return status;
 }
 
+
+
+#define FLASHINFER_MOE_FINALIZE_PROFILE
+
+/**
+Notes:
+- Workload we care about is bfloat16
+- For low-latency batch sizes so 1-128 tokens total
+*/
+
 /////////////////////////////////////////////////////////////////
 //                  * MoE Finalize Allreduce Fusion *                   //
 /////////////////////////////////////////////////////////////////
@@ -1293,16 +1297,16 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
   int top_k = params.top_k;
   bool use_scale_factor = params.expert_scale_factor != nullptr;
 
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
   // Simple section-level timing using clock64(), sampled on a single
   // "profiler" thread (cluster 0, thread 0) to keep printf noise low.
   bool is_profiler_thread = (grid.cluster_rank() == 0) && (cluster.thread_rank() == 0);
-  unsigned long long t_moe_start = 0;
-  unsigned long long t_moe_finalize_done = 0;
-  unsigned long long t_ar_store_done = 0;
-  unsigned long long t_clear_done = 0;
-  unsigned long long t_ar_load_done = 0;
+  unsigned long long moe_cycles = 0;
+  unsigned long long ar_store_cycles = 0;
+  unsigned long long clear_cycles = 0;
   unsigned long long ar_load_cycles = 0;
   unsigned long long fuse_cycles = 0;
+#endif
 
   // Persistent Kernel
   // Each cluster iterate through all token it need to handle
@@ -1312,9 +1316,14 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
     }
 
     // * MoE finalize
-    if (is_profiler_thread && token_id == grid.cluster_rank()) {
-      t_moe_start = clock64();
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+    unsigned long long t_moe_start_local = 0;
+    unsigned long long t_moe_finalize_done_local = 0;
+    unsigned long long t_ar_store_done_local = 0;
+    if (is_profiler_thread) {
+      t_moe_start_local = clock64();
     }
+#endif
     vec_t<T, VEC_SIZE> accumulator;
     accumulator.fill(0.f);
 
@@ -1355,9 +1364,11 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
       accumulator = vec_add<T, VEC_SIZE>(accumulator, shared_expert_output);
     }
 
-    if (is_profiler_thread && token_id == grid.cluster_rank()) {
-      t_moe_finalize_done = clock64();
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+    if (is_profiler_thread) {
+      t_moe_finalize_done_local = clock64();
     }
+#endif
 
     // * AR Store
     int idx = token_id * params.hidden_dim / VEC_SIZE + access_id_in_token;
@@ -1370,73 +1381,93 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
       accumulator.store_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) + offset);
     }
 
-    if (is_profiler_thread && token_id == grid.cluster_rank()) {
-      t_ar_store_done = clock64();
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+    if (is_profiler_thread) {
+      t_ar_store_done_local = clock64();
+      moe_cycles +=
+          static_cast<unsigned long long>(t_moe_finalize_done_local - t_moe_start_local);
+      ar_store_cycles +=
+          static_cast<unsigned long long>(t_ar_store_done_local - t_moe_finalize_done_local);
     }
+#endif
   }
 
   // * Clear previous buffer
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+  unsigned long long t_clear_orig_start = 0;
+  unsigned long long t_clear_orig_done = 0;
+  if (is_profiler_thread) {
+    t_clear_orig_start = clock64();
+  }
+#endif
   for (int idx = access_id; idx < clear_access; idx += access_stride) {
     clear_vec.store(reinterpret_cast<T*>(comm.clear_buf) + idx * VEC_SIZE);
   }
-
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
   if (is_profiler_thread) {
-    t_clear_done = clock64();
+    t_clear_orig_done = clock64();
+    clear_cycles += static_cast<unsigned long long>(t_clear_orig_done - t_clear_orig_start);
   }
+#endif
 
   // * AR Load + Fusion
   for (int idx = access_id, tidx = token_id; idx < tot_access;
        idx += access_stride, tidx += token_stride) {
-    // * AR Load
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+    unsigned long long t_clear_start = 0;
+    unsigned long long t_clear_done_local = 0;
     unsigned long long t_load_start = 0;
     unsigned long long t_load_done_local = 0;
     unsigned long long t_fuse_start = 0;
     unsigned long long t_fuse_done = 0;
-    if (is_profiler_thread) {
-      t_load_start = clock64();
-    }
-    vec_t<T, VEC_SIZE> vals[NRanks];
-    bool done = false;
-    while (!done) {
-      done = true;
-#pragma unroll
-      for (int r = 0; r < NRanks; ++r) {
-        // LDG.128 from local rank
-        vals[r].load_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) +
-                                     (r * tot_access + idx) * VEC_SIZE);
-        done &= !has_neg_zero<T, VEC_SIZE>(vals[r]);
+#endif
+
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+      if (is_profiler_thread) {
+        t_load_start = clock64();
       }
-    }
-    vec_t<T, VEC_SIZE> sum_val = vals[0];
+#endif
+
+      vec_t<T, VEC_SIZE> vals[NRanks];
+      bool done = false;
+      while (!done) {
+        done = true;
 #pragma unroll
-    for (int r = 1; r < NRanks; ++r) {
-      sum_val = vec_add<T, VEC_SIZE>(sum_val, vals[r]);
-    }
+        for (int r = 0; r < NRanks; ++r) {
+          // LDG.128 from local rank
+          vals[r].load_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) +
+                                       (r * tot_access + idx) * VEC_SIZE);
+          done &= !has_neg_zero<T, VEC_SIZE>(vals[r]);
+        }
+      }
+      vec_t<T, VEC_SIZE> sum_val = vals[0];
+#pragma unroll
+      for (int r = 1; r < NRanks; ++r) {
+        sum_val = vec_add<T, VEC_SIZE>(sum_val, vals[r]);
+      }
 
-    if (is_profiler_thread) {
-      t_load_done_local = clock64();
-      t_fuse_start = t_load_done_local;
-    }
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+      if (is_profiler_thread) {
+        t_load_done_local = clock64();
+        t_fuse_start = t_load_done_local;
+      }
+#endif
 
-    // * Fuse: AllReduceOut is always false in finalize_moe_allreduce
-    fused_op<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
-        sum_val, idx, tidx, access_id_in_token, params);
+      // * Fuse: AllReduceOut is always false in finalize_moe_allreduce
+      fused_op<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
+          sum_val, idx, tidx, access_id_in_token, params);
 
-    if (is_profiler_thread) {
-      t_fuse_done = clock64();
-      ar_load_cycles += static_cast<unsigned long long>(t_load_done_local - t_load_start);
-      fuse_cycles += static_cast<unsigned long long>(t_fuse_done - t_fuse_start);
-    }
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+      if (is_profiler_thread) {
+        t_fuse_done = clock64();
+        ar_load_cycles += static_cast<unsigned long long>(t_load_done_local - t_load_start);
+        fuse_cycles += static_cast<unsigned long long>(t_fuse_done - t_fuse_start);
+      }
+#endif
   }
 
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
   if (is_profiler_thread) {
-    t_ar_load_done = clock64();
-    unsigned long long moe_cycles =
-        static_cast<unsigned long long>(t_moe_finalize_done - t_moe_start);
-    unsigned long long ar_store_cycles =
-        static_cast<unsigned long long>(t_ar_store_done - t_moe_finalize_done);
-    unsigned long long clear_cycles =
-        static_cast<unsigned long long>(t_clear_done - t_ar_store_done);
     unsigned long long total_cycles =
         moe_cycles + ar_store_cycles + clear_cycles + ar_load_cycles + fuse_cycles;
 
@@ -1472,6 +1503,7 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
         fuse_cycles, fuse_pct,
         total_cycles);
   }
+#endif
   comm.update(params.size * NRanks);
   cudaTriggerProgrammaticLaunchCompletion();
 #endif
@@ -1536,7 +1568,7 @@ cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
   attribute[0].val.programmaticStreamSerializationAllowed = launch_with_pdl ? 1 : 0;
   attribute[1].id = cudaLaunchAttributeClusterDimension;
   attribute[1].val.clusterDim.x = cluster_size;
-  printf("cluster_size: %d\n", cluster_size);
+  // printf("cluster_size: %d\n", cluster_size);
   attribute[1].val.clusterDim.y = 1;
   attribute[1].val.clusterDim.z = 1;
   cfg.attrs = attribute;
