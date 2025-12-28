@@ -933,6 +933,46 @@ int get_sm_count() {
   return sm_count;
 }
 
+int get_max_dynamic_smem_bytes() {
+  static int max_smem = 0;
+  if (max_smem == 0) {
+    int device_id;
+    auto status = cudaGetDevice(&device_id);
+    FLASHINFER_CHECK(status == cudaSuccess, "cudaGetDevice failed with error code " +
+                                                std::string(cudaGetErrorString(status)));
+    // Prefer opt-in attribute when available (Hopper/Blackwell).
+    status = cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id);
+    FLASHINFER_CHECK(status == cudaSuccess, "cudaDeviceGetAttribute failed with error code " +
+                                                std::string(cudaGetErrorString(status)));
+    if (max_smem == 0) {
+      status = cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlock, device_id);
+      FLASHINFER_CHECK(status == cudaSuccess, "cudaDeviceGetAttribute failed with error code " +
+                                                  std::string(cudaGetErrorString(status)));
+    }
+  }
+  return max_smem;
+}
+
+template <typename FuncPtr>
+int set_dynamic_smem_attr(FuncPtr func, int requested_bytes, const char* tag) {
+  cudaFuncAttributes attr{};
+  FLASHINFER_CUDA_CALL(cudaFuncGetAttributes(&attr, reinterpret_cast<const void*>(func)));
+  int max_smem = get_max_dynamic_smem_bytes();
+  // available dynamic = max - static
+  int available = max_smem - static_cast<int>(attr.sharedSizeBytes);
+  if (available < 0) available = 0;
+  int applied = std::min(requested_bytes, available);
+  if (requested_bytes > available) {
+    FLASHINFER_LOG_WARN(
+        "%s dynamic smem requested %d exceeds available %d (max %d, static %d); clamping to %d",
+        tag, requested_bytes, available, max_smem, static_cast<int>(attr.sharedSizeBytes), applied);
+  }
+  FLASHINFER_CUDA_CALL(
+      cudaFuncSetAttribute(reinterpret_cast<const void*>(func),
+                           cudaFuncAttributeMaxDynamicSharedMemorySize, applied));
+  return applied;
+}
+
 bool use_oneshot(int token_num) { return token_num <= details::kOneShotMaxToken; }
 
 /////////////////////////////////////////////////////////////////
@@ -1238,7 +1278,10 @@ cudaError_t moereduction_allreduce_fusion_op(MoeReductionAllReduceFusionParams<T
 
 
 #define FLASHINFER_MOE_FINALIZE_PROFILE
-
+#define FLASHINFER_MOE_FINALIZE_BENCH_TMA
+// #define FLASHINFER_MOE_FINALIZE_BENCH_TMA_FULLPUT
+// #define FLASHINFER_MOE_FINALIZE_BENCH_TMA_SPLITPUT
+#define FLASHINFER_MOE_FINALIZE_BENCH_TMA_SPLITPUT_ONE
 /////////////////////////////////////////////////////////////////
 //                  * MoE Finalize Allreduce Fusion *                   //
 /////////////////////////////////////////////////////////////////
@@ -1524,6 +1567,20 @@ cudaError_t launch_oneshot_moefinalize_lamport(MoeFinalizeAllReduceFusionParams<
   return cudaSuccess;
 }
 
+// Forward declaration for the TMA RTT micro-benchmark kernel.
+template <typename T, int NRanks>
+__global__ void bench_tma_bulk_store(MoeFinalizeAllReduceFusionParams<T> params);
+// Variant where each rank's PUT is issued by a distinct thread (tid < NRanks).
+template <typename T, int NRanks>
+__global__ void bench_tma_bulk_store_splitput(MoeFinalizeAllReduceFusionParams<T> params);
+// Split-put, single-token variant: one token copied once per rank by tid < NRanks.
+template <typename T, int NRanks>
+__global__ void bench_tma_bulk_store_splitput_one_token(MoeFinalizeAllReduceFusionParams<T> params);
+// Forward declaration for full-payload variant (enabled via
+// FLASHINFER_MOE_FINALIZE_BENCH_TMA_FULLPUT).
+template <typename T, int NRanks>
+__global__ void bench_tma_bulk_store_fullput(MoeFinalizeAllReduceFusionParams<T> params);
+
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
           typename NormOutT, typename ScaleType = T>
 cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
@@ -1571,9 +1628,44 @@ cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
   cfg.attrs = attribute;
   cfg.numAttrs = 2;
   if (oneshot) {
+#ifdef FLASHINFER_MOE_FINALIZE_BENCH_TMA
+    // Choose bench variant: default is per-token copy; FULLPUT copies the entire
+    // payload (params.size) in one TMA dispatch per rank. Caller must size
+    // dynamic shared memory accordingly.
+#ifdef FLASHINFER_MOE_FINALIZE_BENCH_TMA_FULLPUT
+    {
+      size_t required_smem = static_cast<size_t>(params.size) * sizeof(T);
+      int max_smem = get_max_dynamic_smem_bytes();
+      // printf("required_smem: %zu, max_smem: %d\n", required_smem, max_smem);
+      cfg.dynamicSmemBytes = set_dynamic_smem_attr(
+          bench_tma_bulk_store_fullput<T, NRanks>, static_cast<int>(required_smem),
+          "bench_tma_bulk_store_fullput");
+      FLASHINFER_CUDA_CALL(
+          (cudaLaunchKernelEx(&cfg, bench_tma_bulk_store_fullput<T, NRanks>, params)));
+    }
+#else
+    cfg.dynamicSmemBytes = params.hidden_dim * sizeof(T);
+#ifdef FLASHINFER_MOE_FINALIZE_BENCH_TMA_SPLITPUT_ONE
+    cfg.dynamicSmemBytes = set_dynamic_smem_attr(
+        bench_tma_bulk_store_splitput_one_token<T, NRanks>, cfg.dynamicSmemBytes,
+        "bench_tma_bulk_store_splitput_one_token");
+    FLASHINFER_CUDA_CALL(
+        (cudaLaunchKernelEx(&cfg, bench_tma_bulk_store_splitput_one_token<T, NRanks>, params)));
+#elif defined(FLASHINFER_MOE_FINALIZE_BENCH_TMA_SPLITPUT)
+    cfg.dynamicSmemBytes = set_dynamic_smem_attr(
+        bench_tma_bulk_store_splitput<T, NRanks>, cfg.dynamicSmemBytes, "bench_tma_bulk_store_splitput");
+    FLASHINFER_CUDA_CALL((cudaLaunchKernelEx(&cfg, bench_tma_bulk_store_splitput<T, NRanks>, params)));
+#else
+    cfg.dynamicSmemBytes =
+        set_dynamic_smem_attr(bench_tma_bulk_store<T, NRanks>, cfg.dynamicSmemBytes, "bench_tma_bulk_store");
+    FLASHINFER_CUDA_CALL((cudaLaunchKernelEx(&cfg, bench_tma_bulk_store<T, NRanks>, params)));
+#endif
+#endif
+#else
     FLASHINFER_CUDA_CALL(
         (launch_oneshot_moefinalize_lamport<T, NRanks, ResidualOut, NormOut, QuantOut, NormOutT,
                                             ScaleType>(params, cfg)));
+#endif
   }
   return cudaSuccess;
 }
@@ -1629,6 +1721,384 @@ cudaError_t moefinalize_allreduce_fusion_op(MoeFinalizeAllReduceFusionParams<T> 
                                                           ScaleType>(params, launch_with_pdl)));
       });
   return status;
+}
+
+// ---------------------------------------------------------------------------//
+// Micro-benchmark kernel to measure Lamport AllReduce RTT without fusion.
+// Launch `bench_tma_bulk_store` with dynamic shared memory =
+// params.hidden_dim * sizeof(T). Enable via FLASHINFER_MOE_FINALIZE_BENCH_TMA.
+// ---------------------------------------------------------------------------//
+template <typename T, int NRanks>
+__global__ void bench_tma_bulk_store(MoeFinalizeAllReduceFusionParams<T> params) {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  int tid = threadIdx.x;
+  int bid = blockIdx.x;
+  static constexpr int VEC_SIZE = 16 / sizeof(T);
+
+  extern __shared__ __align__(16) uint8_t smem_raw[];
+  T* smem_buffer = reinterpret_cast<T*>(smem_raw);
+
+  cudaGridDependencySynchronize();
+  LamportComm<NRanks> comm(params.workspace, params.rank);
+
+  int token_id = bid;
+  int num_vecs_per_token = params.hidden_dim / VEC_SIZE;
+  size_t copy_bytes = params.hidden_dim * sizeof(T);
+
+  vec_t<T, VEC_SIZE> dummy_data;
+  dummy_data.fill((T)1.0f);
+
+  for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
+    dummy_data.store(smem_buffer + idx * VEC_SIZE);
+  }
+  __syncthreads();
+
+  if (tid == 0) {
+#pragma unroll
+    for (int r = 0; r < NRanks; ++r) {
+      size_t dst_offset_elems =
+          (params.rank * (params.size / VEC_SIZE) + token_id * num_vecs_per_token) * VEC_SIZE;
+      void* dst_ptr = reinterpret_cast<T*>(comm.data_bufs[r]) + dst_offset_elems;
+      void* src_ptr = smem_buffer;
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
+      asm volatile(
+          "cp.async.bulk.global.shared.L2::cache_hint [%0], [%1], %2;"
+          :
+          : "l"(dst_ptr),
+            "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
+            "r"(static_cast<uint32_t>(copy_bytes))
+          : "memory");
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+      asm volatile(
+          "cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;"
+          :
+          : "l"(__cvta_generic_to_global(dst_ptr)),
+            "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
+            "r"(static_cast<uint32_t>(copy_bytes))
+          : "memory");
+#endif
+    }
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+    asm volatile("cp.async.bulk.commit_group;");
+    asm volatile("cp.async.bulk.wait_group 0;");
+#endif
+  }
+
+  for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
+    int global_idx = token_id * num_vecs_per_token + idx;
+
+    vec_t<T, VEC_SIZE> sum_val;
+    sum_val.fill(0.f);
+    uint32_t wait_mask = (1u << NRanks) - 1;
+
+    while (wait_mask != 0) {
+      bool progress = false;
+#pragma unroll
+      for (int r = 0; r < NRanks; ++r) {
+        if (wait_mask & (1u << r)) {
+          vec_t<T, VEC_SIZE> val;
+          val.load_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) +
+                                   (r * (params.size / VEC_SIZE) + global_idx) * VEC_SIZE);
+          if (!has_neg_zero<T, VEC_SIZE>(val)) {
+            sum_val = vec_add<T, VEC_SIZE>(sum_val, val);
+            wait_mask &= ~(1u << r);
+            progress = true;
+          }
+        }
+      }
+      if (!progress) __nanosleep(40);
+    }
+    if (static_cast<float>(sum_val[0]) > 99999.0f) {
+      *reinterpret_cast<float*>(params.residual_out) = static_cast<float>(sum_val[0]);
+    }
+  }
+
+  comm.update(params.size * NRanks);
+#endif
+}
+
+// Split-put variant: each rank's PUT is issued by a distinct thread (tid < NRanks).
+// Dynamic shared memory: params.hidden_dim * sizeof(T) (same as per-token bench).
+template <typename T, int NRanks>
+__global__ void bench_tma_bulk_store_splitput(MoeFinalizeAllReduceFusionParams<T> params) {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  int tid = threadIdx.x;
+  int bid = blockIdx.x;
+  static constexpr int VEC_SIZE = 16 / sizeof(T);
+
+  extern __shared__ __align__(16) uint8_t smem_raw[];
+  T* smem_buffer = reinterpret_cast<T*>(smem_raw);
+
+  cudaGridDependencySynchronize();
+  LamportComm<NRanks> comm(params.workspace, params.rank);
+
+  int token_id = bid;
+  int num_vecs_per_token = params.hidden_dim / VEC_SIZE;
+  size_t copy_bytes = params.hidden_dim * sizeof(T);
+
+  vec_t<T, VEC_SIZE> dummy_data;
+  dummy_data.fill((T)1.0f);
+
+  for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
+    dummy_data.store(smem_buffer + idx * VEC_SIZE);
+  }
+  __syncthreads();
+
+  // Ensure all threads reach the launch point together so PUTs start in sync.
+  __syncthreads();
+  unsigned send_mask = __ballot_sync(0xffffffff, tid < NRanks);
+  if (send_mask) __syncwarp(send_mask);
+  if (tid < NRanks) {
+    int r = tid;
+    size_t dst_offset_elems =
+        (params.rank * (params.size / VEC_SIZE) + token_id * num_vecs_per_token) * VEC_SIZE;
+    void* dst_ptr = reinterpret_cast<T*>(comm.data_bufs[r]) + dst_offset_elems;
+    void* src_ptr = smem_buffer;
+
+    // Keep issuing threads in lock-step before the cp.async.
+    __syncwarp();
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
+    asm volatile(
+        "cp.async.bulk.global.shared.L2::cache_hint [%0], [%1], %2;"
+        :
+        : "l"(dst_ptr),
+          "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
+          "r"(static_cast<uint32_t>(copy_bytes))
+        : "memory");
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+    asm volatile(
+        "cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;"
+        :
+        : "l"(__cvta_generic_to_global(dst_ptr)),
+          "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
+          "r"(static_cast<uint32_t>(copy_bytes))
+        : "memory");
+#endif
+  }
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  __syncthreads();  // ensure all cp.async issued before commit
+  if (tid == 0) {
+    asm volatile("cp.async.bulk.commit_group;");
+    asm volatile("cp.async.bulk.wait_group 0;");
+  }
+#endif
+  __syncthreads();
+
+  for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
+    int global_idx = token_id * num_vecs_per_token + idx;
+
+    vec_t<T, VEC_SIZE> sum_val;
+    sum_val.fill(0.f);
+    uint32_t wait_mask = (1u << NRanks) - 1;
+
+    while (wait_mask != 0) {
+      bool progress = false;
+#pragma unroll
+      for (int r = 0; r < NRanks; ++r) {
+        if (wait_mask & (1u << r)) {
+          vec_t<T, VEC_SIZE> val;
+          val.load_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) +
+                                   (r * (params.size / VEC_SIZE) + global_idx) * VEC_SIZE);
+          if (!has_neg_zero<T, VEC_SIZE>(val)) {
+            sum_val = vec_add<T, VEC_SIZE>(sum_val, val);
+            wait_mask &= ~(1u << r);
+            progress = true;
+          }
+        }
+      }
+      if (!progress) __nanosleep(40);
+    }
+    if (static_cast<float>(sum_val[0]) > 99999.0f) {
+      *reinterpret_cast<float*>(params.residual_out) = static_cast<float>(sum_val[0]);
+    }
+  }
+
+  comm.update(params.size * NRanks);
+#endif
+}
+
+// Split-put, single-token variant: force token_id = 0 so each rank gets exactly one token PUT.
+template <typename T, int NRanks>
+__global__ void bench_tma_bulk_store_splitput_one_token(MoeFinalizeAllReduceFusionParams<T> params) {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  int tid = threadIdx.x;
+  static constexpr int VEC_SIZE = 16 / sizeof(T);
+
+  extern __shared__ __align__(16) uint8_t smem_raw[];
+  T* smem_buffer = reinterpret_cast<T*>(smem_raw);
+
+  cudaGridDependencySynchronize();
+  LamportComm<NRanks> comm(params.workspace, params.rank);
+
+  int num_vecs_per_token = params.hidden_dim / VEC_SIZE;
+  size_t copy_bytes = params.hidden_dim * sizeof(T);
+
+  vec_t<T, VEC_SIZE> dummy_data;
+  dummy_data.fill((T)1.0f);
+
+  for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
+    dummy_data.store(smem_buffer + idx * VEC_SIZE);
+  }
+  __syncthreads();
+
+  // Ensure all threads are aligned before issuing cp.async.
+  __syncthreads();
+  unsigned send_mask = __ballot_sync(0xffffffff, tid < NRanks);
+  if (tid < NRanks) {
+    int r = tid;
+    size_t dst_offset_elems = (params.rank * (params.size / VEC_SIZE)) * VEC_SIZE;  // token_id fixed to 0
+    void* dst_ptr = reinterpret_cast<T*>(comm.data_bufs[r]) + dst_offset_elems;
+    void* src_ptr = smem_buffer;
+
+    __syncwarp(send_mask);
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
+    asm volatile(
+        "cp.async.bulk.global.shared.L2::cache_hint [%0], [%1], %2;"
+        :
+        : "l"(dst_ptr),
+          "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
+          "r"(static_cast<uint32_t>(copy_bytes))
+        : "memory");
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+    uint64_t cache_hint = 1;
+    asm volatile(
+        "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint [%0], [%1], %2, %3;"
+        :
+        : "l"(__cvta_generic_to_global(dst_ptr)),
+          "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
+          "r"(static_cast<uint32_t>(copy_bytes))
+          "l"(cache_hint)
+        : "memory");
+#endif
+  }
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  __syncthreads();
+  if (tid == 0) {
+    asm volatile("cp.async.bulk.commit_group;");
+    asm volatile("cp.async.bulk.wait_group 0;");
+  }
+#endif
+  __syncthreads();
+
+  // Only token 0 exists; reuse load/poll logic with idx over token 0.
+  for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
+    vec_t<T, VEC_SIZE> sum_val;
+    sum_val.fill(0.f);
+    uint32_t wait_mask = (1u << NRanks) - 1;
+
+    while (wait_mask != 0) {
+      bool progress = false;
+#pragma unroll
+      for (int r = 0; r < NRanks; ++r) {
+        if (wait_mask & (1u << r)) {
+          vec_t<T, VEC_SIZE> val;
+          val.load_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) +
+                                   (r * (params.size / VEC_SIZE) + idx) * VEC_SIZE);
+          if (!has_neg_zero<T, VEC_SIZE>(val)) {
+            sum_val = vec_add<T, VEC_SIZE>(sum_val, val);
+            wait_mask &= ~(1u << r);
+            progress = true;
+          }
+        }
+      }
+      if (!progress) __nanosleep(40);
+    }
+    if (static_cast<float>(sum_val[0]) > 99999.0f) {
+      *reinterpret_cast<float*>(params.residual_out) = static_cast<float>(sum_val[0]);
+    }
+  }
+
+  comm.update(params.size * NRanks);
+#endif
+}
+
+// Full-payload variant: one TMA dispatch per rank covering params.size elements.
+// Requires dynamic shared memory = params.size * sizeof(T).
+template <typename T, int NRanks>
+__global__ void bench_tma_bulk_store_fullput(MoeFinalizeAllReduceFusionParams<T> params) {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  int tid = threadIdx.x;
+  static constexpr int VEC_SIZE = 16 / sizeof(T);
+
+  extern __shared__ __align__(16) uint8_t smem_raw[];
+  T* smem_buffer = reinterpret_cast<T*>(smem_raw);
+
+  cudaGridDependencySynchronize();
+  LamportComm<NRanks> comm(params.workspace, params.rank);
+
+  int num_vecs_total = params.size / VEC_SIZE;
+  size_t copy_bytes = params.size * sizeof(T);
+
+  vec_t<T, VEC_SIZE> dummy_data;
+  dummy_data.fill((T)1.0f);
+
+  for (int idx = tid; idx < num_vecs_total; idx += blockDim.x) {
+    dummy_data.store(smem_buffer + idx * VEC_SIZE);
+  }
+  __syncthreads();
+
+  if (tid == 0) {
+#pragma unroll
+    for (int r = 0; r < NRanks; ++r) {
+      void* dst_ptr = reinterpret_cast<T*>(comm.data_bufs[r]) + params.rank * num_vecs_total * VEC_SIZE;
+      void* src_ptr = smem_buffer;
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
+      asm volatile(
+          "cp.async.bulk.global.shared.L2::cache_hint [%0], [%1], %2;"
+          :
+          : "l"(dst_ptr),
+            "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
+            "r"(static_cast<uint32_t>(copy_bytes))
+          : "memory");
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+      asm volatile(
+          "cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;"
+          :
+          : "l"(__cvta_generic_to_global(dst_ptr)),
+            "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
+            "r"(static_cast<uint32_t>(copy_bytes))
+          : "memory");
+#endif
+    }
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+    asm volatile("cp.async.bulk.commit_group;");
+    asm volatile("cp.async.bulk.wait_group 0;");
+#endif
+  }
+
+  for (int idx = tid; idx < num_vecs_total; idx += blockDim.x) {
+    vec_t<T, VEC_SIZE> sum_val;
+    sum_val.fill(0.f);
+    uint32_t wait_mask = (1u << NRanks) - 1;
+
+    while (wait_mask != 0) {
+      bool progress = false;
+#pragma unroll
+      for (int r = 0; r < NRanks; ++r) {
+        if (wait_mask & (1u << r)) {
+          vec_t<T, VEC_SIZE> val;
+          val.load_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) +
+                                   (r * num_vecs_total + idx) * VEC_SIZE);
+          if (!has_neg_zero<T, VEC_SIZE>(val)) {
+            sum_val = vec_add<T, VEC_SIZE>(sum_val, val);
+            wait_mask &= ~(1u << r);
+            progress = true;
+          }
+        }
+      }
+      if (!progress) __nanosleep(40);
+    }
+    if (static_cast<float>(sum_val[0]) > 99999.0f) {
+      *reinterpret_cast<float*>(params.residual_out) = static_cast<float>(sum_val[0]);
+    }
+  }
+
+  comm.update(params.size * NRanks);
+#endif
 }
 }  // namespace trtllm_moe_allreduce_fusion
 }  // namespace flashinfer
