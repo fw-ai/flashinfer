@@ -1281,7 +1281,9 @@ cudaError_t moereduction_allreduce_fusion_op(MoeReductionAllReduceFusionParams<T
 #define FLASHINFER_MOE_FINALIZE_BENCH_TMA
 // #define FLASHINFER_MOE_FINALIZE_BENCH_TMA_FULLPUT
 // #define FLASHINFER_MOE_FINALIZE_BENCH_TMA_SPLITPUT
-#define FLASHINFER_MOE_FINALIZE_BENCH_TMA_SPLITPUT_ONE
+// #define FLASHINFER_MOE_FINALIZE_BENCH_TMA_SPLITPUT_ONE
+#define FLASHINFER_MOE_FINALIZE_TMA_SPLITPUT_ONE_PROD
+
 /////////////////////////////////////////////////////////////////
 //                  * MoE Finalize Allreduce Fusion *                   //
 /////////////////////////////////////////////////////////////////
@@ -1576,6 +1578,9 @@ __global__ void bench_tma_bulk_store_splitput(MoeFinalizeAllReduceFusionParams<T
 // Split-put, single-token variant: one token copied once per rank by tid < NRanks.
 template <typename T, int NRanks>
 __global__ void bench_tma_bulk_store_splitput_one_token(MoeFinalizeAllReduceFusionParams<T> params);
+// Production trial: fork of splitput-one benchmark guarded by its own flag.
+template <typename T, int NRanks>
+__global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusionParams<T> params);
 // Forward declaration for full-payload variant (enabled via
 // FLASHINFER_MOE_FINALIZE_BENCH_TMA_FULLPUT).
 template <typename T, int NRanks>
@@ -1628,7 +1633,14 @@ cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
   cfg.attrs = attribute;
   cfg.numAttrs = 2;
   if (oneshot) {
-#ifdef FLASHINFER_MOE_FINALIZE_BENCH_TMA
+#ifdef FLASHINFER_MOE_FINALIZE_TMA_SPLITPUT_ONE_PROD
+    cfg.dynamicSmemBytes = params.hidden_dim * sizeof(T);
+    cfg.dynamicSmemBytes = set_dynamic_smem_attr(
+        tma_bulk_store_splitput_one_token_prod<T, NRanks>, cfg.dynamicSmemBytes,
+        "tma_bulk_store_splitput_one_token_prod");
+    FLASHINFER_CUDA_CALL(
+        (cudaLaunchKernelEx(&cfg, tma_bulk_store_splitput_one_token_prod<T, NRanks>, params)));
+#elif defined(FLASHINFER_MOE_FINALIZE_BENCH_TMA)
     // Choose bench variant: default is per-token copy; FULLPUT copies the entire
     // payload (params.size) in one TMA dispatch per rank. Caller must size
     // dynamic shared memory accordingly.
@@ -1968,7 +1980,7 @@ __global__ void bench_tma_bulk_store_splitput_one_token(MoeFinalizeAllReduceFusi
         : "memory");
 #endif
   }
-
+ 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   __syncthreads();
   if (tid == 0) {
@@ -1979,6 +1991,95 @@ __global__ void bench_tma_bulk_store_splitput_one_token(MoeFinalizeAllReduceFusi
   __syncthreads();
 
   // Only token 0 exists; reuse load/poll logic with idx over token 0.
+  for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
+    vec_t<T, VEC_SIZE> sum_val;
+    sum_val.fill(0.f);
+    uint32_t wait_mask = (1u << NRanks) - 1;
+
+    while (wait_mask != 0) {
+      bool progress = false;
+#pragma unroll
+      for (int r = 0; r < NRanks; ++r) {
+        if (wait_mask & (1u << r)) {
+          vec_t<T, VEC_SIZE> val;
+          val.load_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) +
+                                   (r * (params.size / VEC_SIZE) + idx) * VEC_SIZE);
+          if (!has_neg_zero<T, VEC_SIZE>(val)) {
+            sum_val = vec_add<T, VEC_SIZE>(sum_val, val);
+            wait_mask &= ~(1u << r);
+            progress = true;
+          }
+        }
+      }
+      if (!progress) __nanosleep(40);
+    }
+    if (static_cast<float>(sum_val[0]) > 99999.0f) {
+      *reinterpret_cast<float*>(params.residual_out) = static_cast<float>(sum_val[0]);
+    }
+  }
+
+  comm.update(params.size * NRanks);
+#endif
+}
+
+// Production trial: fork of split-put single-token variant, under its own guard.
+template <typename T, int NRanks>
+__global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusionParams<T> params) {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  int tid = threadIdx.x;
+  static constexpr int VEC_SIZE = 16 / sizeof(T);
+
+  extern __shared__ __align__(16) uint8_t smem_raw[];
+  T* smem_buffer = reinterpret_cast<T*>(smem_raw);
+
+  cudaGridDependencySynchronize();
+  LamportComm<NRanks> comm(params.workspace, params.rank);
+
+  int num_vecs_per_token = params.hidden_dim / VEC_SIZE;
+  size_t copy_bytes = params.hidden_dim * sizeof(T);
+
+  vec_t<T, VEC_SIZE> dummy_data;
+  dummy_data.fill((T)1.0f);
+
+  for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
+    dummy_data.store(smem_buffer + idx * VEC_SIZE);
+  }
+  __syncthreads();
+
+  if (tid < NRanks) {
+    int r = tid;
+    size_t dst_offset_elems = (params.rank * (params.size / VEC_SIZE)) * VEC_SIZE;  // token_id fixed to 0
+    void* dst_ptr = reinterpret_cast<T*>(comm.data_bufs[r]) + dst_offset_elems;
+    void* src_ptr = smem_buffer;
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
+    asm volatile(
+        "cp.async.bulk.global.shared.L2::cache_hint [%0], [%1], %2;"
+        :
+        : "l"(dst_ptr),
+          "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
+          "r"(static_cast<uint32_t>(copy_bytes))
+        : "memory");
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+    asm volatile(
+        "cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;"
+        :
+        : "l"(__cvta_generic_to_global(dst_ptr)),
+          "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
+          "r"(static_cast<uint32_t>(copy_bytes))
+        : "memory");
+#endif
+  }
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  __syncthreads();
+  if (tid == 0) {
+    asm volatile("cp.async.bulk.commit_group;");
+    asm volatile("cp.async.bulk.wait_group 0;");
+  }
+#endif
+  __syncthreads();
+
   for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
     vec_t<T, VEC_SIZE> sum_val;
     sum_val.fill(0.f);
