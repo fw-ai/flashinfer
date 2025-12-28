@@ -665,6 +665,8 @@ struct AllReduceFusionParams {
   void* residual_in;
   void* residual_out;
   void* norm_out;
+  // Encoded DLPack dtype for norm_out (or -1 if unspecified).
+  int64_t norm_out_dtype = -1;
   void* quant_out;
   void* scale_out;
   void* rms_gamma;
@@ -700,6 +702,8 @@ struct MoeFinalizeAllReduceFusionParams : public AllReduceFusionParams<T> {
   // Refer to kernel implementation on layout of those params
   // number of active experts on current device
   int top_k;
+  // Optional scalar multiplier applied to routing scores before combine.
+  float routing_scaling_factor = 1.0f;
   // [num_tokens, top_k]
   void* expert_scale_factor = nullptr;
   void* shared_expert_output = nullptr;
@@ -800,7 +804,7 @@ __device__ __forceinline__ vec_t<T, VEC_SIZE> rms_norm(vec_t<T, VEC_SIZE> const&
 }
 
 template <bool AllReduceOut, bool ResidualOut, bool NormOut, bool QuantOut, typename T,
-          uint32_t VEC_SIZE, typename NormOutT = T>
+          typename NormOutT = T, uint32_t VEC_SIZE>
 __device__ __forceinline__ void fused_op(vec_t<T, VEC_SIZE> const& val, int access_id, int token_id,
                                          int access_id_in_token, AllReduceFusionParams<T>& params) {
   if constexpr (AllReduceOut) {
@@ -818,7 +822,13 @@ __device__ __forceinline__ void fused_op(vec_t<T, VEC_SIZE> const& val, int acce
   vec_t<T, VEC_SIZE> norm_val;
   norm_val = rms_norm<T, VEC_SIZE>(residual_val, gamma_val, params.rms_eps, params.hidden_dim);
   if constexpr (NormOut) {
-    norm_val.store(reinterpret_cast<NormOutT*>(params.norm_out) + access_id * VEC_SIZE);
+    // Allow norm_out to use a different dtype (e.g. FP8) via NormOutT.
+    auto norm_out_ptr =
+        reinterpret_cast<NormOutT*>(params.norm_out) + access_id * VEC_SIZE;
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      norm_out_ptr[i] = static_cast<NormOutT>(norm_val[i]);
+    }
   }
 #if CUDA_VERSION >= 12080
   if constexpr (QuantOut) {
@@ -1067,8 +1077,8 @@ __global__ void moereduce_allreduce_fusion_kernel_oneshot_lamport(
     }
 
     // * Fuse
-    fused_op<AllReduceOut, ResidualOut, NormOut, QuantOut, T, VEC_SIZE>(sum_val, idx, tidx,
-                                                                        access_id_in_token, params);
+  fused_op<AllReduceOut, ResidualOut, NormOut, QuantOut, T, T, VEC_SIZE>(
+      sum_val, idx, tidx, access_id_in_token, params);
   }
   comm.update(params.size * NRanks);
   cudaTriggerProgrammaticLaunchCompletion();
@@ -1342,7 +1352,7 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
     // Fuse finalize (residual/norm/quant) using the summed value.
     int access_id = token_id * num_vecs_per_token + idx;
     int access_id_in_token = idx;  // Thread-local offset within the token (in vec units).
-    fused_op<false, ResidualOut, NormOut, QuantOut, T, VEC_SIZE, NormOutT>(
+    fused_op<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
         sum_val, access_id, token_id, access_id_in_token, params);
   }
 
@@ -1372,27 +1382,26 @@ cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
                         token_num);
     oneshot = true;
   }
-  // Override launch geometry for the TMA prod path: one block per token, threads cover the
-  // entire hidden_dim (vec granularity). Cluster dims are unused here.
-  int token_num_tma = params.size / params.hidden_dim;
   static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
   int threads_per_token = params.hidden_dim / VEC_SIZE;
   FLASHINFER_CHECK(threads_per_token <= 1024, "threads_per_token must be <= 1024");
-  cfg.gridDim = token_num_tma;
+
+  cudaLaunchConfig_t cfg{};
+  cfg.gridDim = token_num;
   cfg.blockDim = threads_per_token;
   cfg.dynamicSmemBytes = params.hidden_dim * sizeof(T);
-  cfg.attrs = nullptr;
-  cfg.numAttrs = 0;
-  cfg.dynamicSmemBytes = set_dynamic_smem_attr(
-      tma_bulk_store_splitput_one_token_prod<T, NRanks, ResidualOut, NormOut, QuantOut, NormOutT,
-                                              ScaleType>,
-      cfg.dynamicSmemBytes, "tma_bulk_store_splitput_one_token_prod");
-  FLASHINFER_CUDA_CALL((cudaLaunchKernelEx(
-      &cfg,
-      tma_bulk_store_splitput_one_token_prod<T, NRanks, ResidualOut, NormOut, QuantOut, NormOutT,
-                                              ScaleType>,
-      params)));
-  
+  cfg.stream = params.stream;
+  cudaLaunchAttribute attribute[1];
+  attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attribute[0].val.programmaticStreamSerializationAllowed = launch_with_pdl ? 1 : 0;
+  cfg.attrs = attribute;
+  cfg.numAttrs = 1;
+
+  if (oneshot) {
+    FLASHINFER_CUDA_CALL((launch_oneshot_moefinalize_lamport<T, NRanks, ResidualOut, NormOut,
+                                                            QuantOut, NormOutT, ScaleType>(params,
+                                                                                            cfg)));
+  }
   return cudaSuccess;
 }
 
@@ -1424,7 +1433,7 @@ cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
     }                                                                                          \
   }()
 
-template <typename T>
+template <typename T, typename ScaleType, typename NormOutT>
 cudaError_t moefinalize_allreduce_fusion_op(MoeFinalizeAllReduceFusionParams<T> const& params,
                                             bool launch_with_pdl) {
   static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
@@ -1443,7 +1452,8 @@ cudaError_t moefinalize_allreduce_fusion_op(MoeFinalizeAllReduceFusionParams<T> 
           return cudaErrorNotSupported;
         }
         FLASHINFER_CUDA_CALL(
-            (moefinalize_allreduce_fusion_kernel_launcher<T, N_RANKS, RES, RMS, QUANT>(
+            (moefinalize_allreduce_fusion_kernel_launcher<T, N_RANKS, RES, RMS, QUANT, NormOutT,
+                                                          ScaleType>(
                 (params), (launch_with_pdl))));
       });
   return status;
