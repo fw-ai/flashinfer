@@ -1578,8 +1578,10 @@ __global__ void bench_tma_bulk_store_splitput(MoeFinalizeAllReduceFusionParams<T
 // Split-put, single-token variant: one token copied once per rank by tid < NRanks.
 template <typename T, int NRanks>
 __global__ void bench_tma_bulk_store_splitput_one_token(MoeFinalizeAllReduceFusionParams<T> params);
-// Production trial: fork of splitput-one benchmark guarded by its own flag.
-template <typename T, int NRanks>
+// Production trial: fork of splitput-one benchmark guarded by its own flag. Includes fused
+// MoE finalize path to mimic moefinalize_allreduce_fusion_kernel_oneshot_lamport.
+template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
+          typename NormOutT, typename ScaleType = T>
 __global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusionParams<T> params);
 // Forward declaration for full-payload variant (enabled via
 // FLASHINFER_MOE_FINALIZE_BENCH_TMA_FULLPUT).
@@ -1634,12 +1636,27 @@ cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
   cfg.numAttrs = 2;
   if (oneshot) {
 #ifdef FLASHINFER_MOE_FINALIZE_TMA_SPLITPUT_ONE_PROD
+    // Override launch geometry for the TMA prod path: one block per token, threads cover the
+    // entire hidden_dim (vec granularity). Cluster dims are unused here.
+    int token_num = params.size / params.hidden_dim;
+    static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
+    int threads_per_token = params.hidden_dim / VEC_SIZE;
+    FLASHINFER_CHECK(threads_per_token <= 1024, "threads_per_token must be <= 1024");
+    cfg.gridDim = token_num;
+    cfg.blockDim = threads_per_token;
     cfg.dynamicSmemBytes = params.hidden_dim * sizeof(T);
+    cfg.attrs = nullptr;
+    cfg.numAttrs = 0;
     cfg.dynamicSmemBytes = set_dynamic_smem_attr(
-        tma_bulk_store_splitput_one_token_prod<T, NRanks>, cfg.dynamicSmemBytes,
+        tma_bulk_store_splitput_one_token_prod<T, NRanks, ResidualOut, NormOut, QuantOut, NormOutT,
+                                               ScaleType>,
+        cfg.dynamicSmemBytes,
         "tma_bulk_store_splitput_one_token_prod");
     FLASHINFER_CUDA_CALL(
-        (cudaLaunchKernelEx(&cfg, tma_bulk_store_splitput_one_token_prod<T, NRanks>, params)));
+        (cudaLaunchKernelEx(&cfg,
+                            tma_bulk_store_splitput_one_token_prod<T, NRanks, ResidualOut, NormOut,
+                                                                   QuantOut, NormOutT, ScaleType>,
+                            params)));
 #elif defined(FLASHINFER_MOE_FINALIZE_BENCH_TMA)
     // Choose bench variant: default is per-token copy; FULLPUT copies the entire
     // payload (params.size) in one TMA dispatch per rank. Caller must size
@@ -1936,6 +1953,7 @@ template <typename T, int NRanks>
 __global__ void bench_tma_bulk_store_splitput_one_token(MoeFinalizeAllReduceFusionParams<T> params) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   int tid = threadIdx.x;
+  int token_id = blockIdx.x;  // one block per token
   static constexpr int VEC_SIZE = 16 / sizeof(T);
 
   extern __shared__ __align__(16) uint8_t smem_raw[];
@@ -1946,6 +1964,8 @@ __global__ void bench_tma_bulk_store_splitput_one_token(MoeFinalizeAllReduceFusi
 
   int num_vecs_per_token = params.hidden_dim / VEC_SIZE;
   size_t copy_bytes = params.hidden_dim * sizeof(T);
+  int top_k = params.top_k;
+  bool use_scale_factor = params.expert_scale_factor != nullptr;
 
   vec_t<T, VEC_SIZE> dummy_data;
   dummy_data.fill((T)1.0f);
@@ -2023,10 +2043,13 @@ __global__ void bench_tma_bulk_store_splitput_one_token(MoeFinalizeAllReduceFusi
 }
 
 // Production trial: fork of split-put single-token variant, under its own guard.
-template <typename T, int NRanks>
+// Mirrors the fused MoE finalize logic while retaining TMA-based PUT/LOAD.
+template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut, typename NormOutT,
+          typename ScaleType>
 __global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusionParams<T> params) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   int tid = threadIdx.x;
+  int token_id = blockIdx.x;  // one block per token
   static constexpr int VEC_SIZE = 16 / sizeof(T);
 
   extern __shared__ __align__(16) uint8_t smem_raw[];
@@ -2037,18 +2060,56 @@ __global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusio
 
   int num_vecs_per_token = params.hidden_dim / VEC_SIZE;
   size_t copy_bytes = params.hidden_dim * sizeof(T);
+  int top_k = params.top_k;
+  bool use_scale_factor = params.expert_scale_factor != nullptr;
 
-  vec_t<T, VEC_SIZE> dummy_data;
-  dummy_data.fill((T)1.0f);
-
+  // Compute MoE finalize for this token directly into shared memory that will be
+  // TMA-copied to peers.
   for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
-    dummy_data.store(smem_buffer + idx * VEC_SIZE);
+    vec_t<T, VEC_SIZE> accumulator;
+    accumulator.fill(0.f);
+
+    // Accumulate selected experts
+    for (int k = 0; k < top_k; ++k) {
+      int expanded_idx = token_id * top_k + k;
+      int32_t permuted_idx = params.expanded_idx_to_permuted_idx[expanded_idx];
+      if (permuted_idx == -1) continue;
+
+      int thread_offset_across_token = permuted_idx * params.hidden_dim + idx * VEC_SIZE;
+      float block_scale = params.routing_scaling_factor;
+      if (use_scale_factor) {
+        block_scale = static_cast<float>(
+                          static_cast<ScaleType*>(params.expert_scale_factor)[expanded_idx]) *
+                      params.routing_scaling_factor;
+      }
+
+      vec_t<T, VEC_SIZE> permuted_data;
+      permuted_data.load(reinterpret_cast<T*>(params.allreduce_in) + thread_offset_across_token);
+
+#pragma unroll
+      for (int i = 0; i < VEC_SIZE; ++i) {
+        accumulator[i] += static_cast<T>(static_cast<float>(permuted_data[i]) * block_scale);
+      }
+    }
+
+    // Add shared expert output if provided
+    if (params.shared_expert_output) {
+      int thread_offset_across_token = token_id * params.hidden_dim + idx * VEC_SIZE;
+      vec_t<T, VEC_SIZE> shared_expert_output;
+      shared_expert_output.load(reinterpret_cast<T*>(params.shared_expert_output) +
+                                thread_offset_across_token);
+      accumulator = vec_add<T, VEC_SIZE>(accumulator, shared_expert_output);
+    }
+
+    remove_neg_zero<T, VEC_SIZE>(accumulator);
+    accumulator.store(smem_buffer + idx * VEC_SIZE);
   }
   __syncthreads();
 
   if (tid < NRanks) {
     int r = tid;
-    size_t dst_offset_elems = (params.rank * (params.size / VEC_SIZE)) * VEC_SIZE;  // token_id fixed to 0
+    size_t dst_offset_elems =
+        (params.rank * (params.size / VEC_SIZE) + token_id * num_vecs_per_token) * VEC_SIZE;
     void* dst_ptr = reinterpret_cast<T*>(comm.data_bufs[r]) + dst_offset_elems;
     void* src_ptr = smem_buffer;
 
@@ -2081,30 +2142,29 @@ __global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusio
   __syncthreads();
 
   for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
-    vec_t<T, VEC_SIZE> sum_val;
-    sum_val.fill(0.f);
-    uint32_t wait_mask = (1u << NRanks) - 1;
-
-    while (wait_mask != 0) {
-      bool progress = false;
+    vec_t<T, VEC_SIZE> vals[NRanks];
+    bool done = false;
+    while (!done) {
+      done = true;
 #pragma unroll
       for (int r = 0; r < NRanks; ++r) {
-        if (wait_mask & (1u << r)) {
-          vec_t<T, VEC_SIZE> val;
-          val.load_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) +
-                                   (r * (params.size / VEC_SIZE) + idx) * VEC_SIZE);
-          if (!has_neg_zero<T, VEC_SIZE>(val)) {
-            sum_val = vec_add<T, VEC_SIZE>(sum_val, val);
-            wait_mask &= ~(1u << r);
-            progress = true;
-          }
-        }
+        vals[r].load_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) +
+                                     (r * (params.size / VEC_SIZE) + token_id * num_vecs_per_token + idx) *
+                                         VEC_SIZE);
+        done &= !has_neg_zero<T, VEC_SIZE>(vals[r]);
       }
-      if (!progress) __nanosleep(40);
     }
-    if (static_cast<float>(sum_val[0]) > 99999.0f) {
-      *reinterpret_cast<float*>(params.residual_out) = static_cast<float>(sum_val[0]);
+    vec_t<T, VEC_SIZE> sum_val = vals[0];
+#pragma unroll
+    for (int r = 1; r < NRanks; ++r) {
+      sum_val = vec_add<T, VEC_SIZE>(sum_val, vals[r]);
     }
+
+    // Fuse finalize (residual/norm/quant) using the summed value.
+    int access_id = token_id * num_vecs_per_token + idx;
+    int access_id_in_token = idx;  // Thread-local offset within the token (in vec units).
+    fused_op<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
+        sum_val, access_id, token_id, access_id_in_token, params);
   }
 
   comm.update(params.size * NRanks);
