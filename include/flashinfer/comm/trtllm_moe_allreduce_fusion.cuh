@@ -1300,6 +1300,7 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
   unsigned long long clear_cycles = 0;
   unsigned long long ar_load_cycles = 0;
   unsigned long long fuse_cycles = 0;
+  unsigned long long ar_poll_iters = 0;
 #endif
 
   // Persistent Kernel
@@ -1408,15 +1409,11 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
   for (int idx = access_id, tidx = token_id; idx < tot_access;
        idx += access_stride, tidx += token_stride) {
 #ifdef FLASHINFER_MOE_FINALIZE_PROFILE
-    unsigned long long t_clear_start = 0;
-    unsigned long long t_clear_done_local = 0;
-    unsigned long long t_load_start = 0;
-    unsigned long long t_load_done_local = 0;
-    unsigned long long t_fuse_start = 0;
-    unsigned long long t_fuse_done = 0;
-#endif
-
-#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+      unsigned long long t_load_start = 0;
+      unsigned long long t_load_done_local = 0;
+      unsigned long long t_fuse_start = 0;
+      unsigned long long t_fuse_done = 0;
+      unsigned long long poll_iters_local = 0;
       if (is_profiler_thread) {
         t_load_start = clock64();
       }
@@ -1433,6 +1430,11 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
                                        (r * tot_access + idx) * VEC_SIZE);
           done &= !has_neg_zero<T, VEC_SIZE>(vals[r]);
         }
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+        if (is_profiler_thread) {
+          ++poll_iters_local;
+        }
+#endif
       }
       vec_t<T, VEC_SIZE> sum_val = vals[0];
 #pragma unroll
@@ -1456,6 +1458,7 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
         t_fuse_done = clock64();
         ar_load_cycles += static_cast<unsigned long long>(t_load_done_local - t_load_start);
         fuse_cycles += static_cast<unsigned long long>(t_fuse_done - t_fuse_start);
+        ar_poll_iters += poll_iters_local;
       }
 #endif
   }
