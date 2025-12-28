@@ -800,7 +800,7 @@ __device__ __forceinline__ vec_t<T, VEC_SIZE> rms_norm(vec_t<T, VEC_SIZE> const&
 }
 
 template <bool AllReduceOut, bool ResidualOut, bool NormOut, bool QuantOut, typename T,
-          uint32_t VEC_SIZE>
+          uint32_t VEC_SIZE, typename NormOutT = T>
 __device__ __forceinline__ void fused_op(vec_t<T, VEC_SIZE> const& val, int access_id, int token_id,
                                          int access_id_in_token, AllReduceFusionParams<T>& params) {
   if constexpr (AllReduceOut) {
@@ -818,7 +818,7 @@ __device__ __forceinline__ void fused_op(vec_t<T, VEC_SIZE> const& val, int acce
   vec_t<T, VEC_SIZE> norm_val;
   norm_val = rms_norm<T, VEC_SIZE>(residual_val, gamma_val, params.rms_eps, params.hidden_dim);
   if constexpr (NormOut) {
-    norm_val.store(reinterpret_cast<T*>(params.norm_out) + access_id * VEC_SIZE);
+    norm_val.store(reinterpret_cast<NormOutT*>(params.norm_out) + access_id * VEC_SIZE);
   }
 #if CUDA_VERSION >= 12080
   if constexpr (QuantOut) {
@@ -1231,130 +1231,105 @@ cudaError_t moereduction_allreduce_fusion_op(MoeReductionAllReduceFusionParams<T
 /////////////////////////////////////////////////////////////////
 
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
-          typename ScaleType = T>
+          typename NormOutT = T, typename ScaleType = T>
 __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
     MoeFinalizeAllReduceFusionParams<T> params) {
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  namespace cg = cooperative_groups;
-  cg::cluster_group cluster = cg::this_cluster();
-  cg::grid_group grid = cg::this_grid();
+  int tid = threadIdx.x;
+  int token_id = blockIdx.x;  // one block per token
+  static constexpr int VEC_SIZE = 16 / sizeof(T);
 
-  static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
-
-  // Each token is handled by one cluster
-  // which token is handled by current cluster
-  int token_id = grid.cluster_rank();
-  // total number of token
-  int num_token = params.size / params.hidden_dim;
-  // Each thread handle VEC_SIZE num elem in token. Total cluster.num_threads() to handle one
-  // token For current token, which VEC_SIZE is handled by current thread (in unit of
-  // VEC_SIZE)
-  int access_id_in_token = cluster.thread_rank();
-  // Across all token, which VEC_SIZE is handled by current thread (in unit of
-  // VEC_SIZE)
-  int access_id = token_id * params.hidden_dim / VEC_SIZE + access_id_in_token;
-  // Persistent kernel
-  // stride to next token handled by current cta
-  int token_stride = grid.num_clusters();
-  // stride in unit of VEC_SIZE
-  int access_stride = token_stride * params.hidden_dim / VEC_SIZE;
-  // Total number of access in unit of VEC_SIZE to handle (token_num * hidden_dim)
-  // This is within one rank
-  int tot_access = params.size / VEC_SIZE;
-  vec_t<T, VEC_SIZE> clear_vec;
-  clear_vec.fill(neg_zero_v<T>);
+  extern __shared__ __align__(16) uint8_t smem_raw[];
+  T* smem_buffer = reinterpret_cast<T*>(smem_raw);
 
   cudaGridDependencySynchronize();
   LamportComm<NRanks> comm(params.workspace, params.rank);
-  int clear_access = comm.clear_size / VEC_SIZE;
 
-  // * MoE related
-  int threadid_in_cluster = cluster.thread_rank();
-  // Start Offset within one token's hidden_size of element
-  // Current thread handle token[thread_offset_within_token : thread_offset_within_token +
-  // VEC_SIZE]
-  int thread_offset_within_token = threadid_in_cluster * VEC_SIZE;
-
+  int num_vecs_per_token = params.hidden_dim / VEC_SIZE;
+  size_t copy_bytes = params.hidden_dim * sizeof(T);
   int top_k = params.top_k;
   bool use_scale_factor = params.expert_scale_factor != nullptr;
 
-  // Persistent Kernel
-  // Each cluster iterate through all token it need to handle
-  for (int token_id = grid.cluster_rank(); token_id < num_token; token_id += grid.num_clusters()) {
-    if (thread_offset_within_token >= params.hidden_dim) {
-      break;
-    }
-
-    // * MoE finalize
+  // Compute MoE finalize for this token directly into shared memory that will be
+  // TMA-copied to peers.
+  for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
     vec_t<T, VEC_SIZE> accumulator;
     accumulator.fill(0.f);
 
-    for (int k = 0; k < top_k; k++) {
-      int const expanded_idx = token_id * top_k + k;
-      int32_t const permuted_idx = params.expanded_idx_to_permuted_idx[expanded_idx];
-
+    // Accumulate selected experts
+    for (int k = 0; k < top_k; ++k) {
+      int expanded_idx = token_id * top_k + k;
+      int32_t permuted_idx = params.expanded_idx_to_permuted_idx[expanded_idx];
       if (permuted_idx == -1) continue;
 
-      int thread_offset_across_token =
-          permuted_idx * params.hidden_dim + thread_offset_within_token;
-      float block_scale = 1.0;
+      int thread_offset_across_token = permuted_idx * params.hidden_dim + idx * VEC_SIZE;
+      float block_scale = params.routing_scaling_factor;
       if (use_scale_factor) {
-        block_scale =
-            static_cast<float>(static_cast<ScaleType*>(params.expert_scale_factor)[expanded_idx]);
+        block_scale = static_cast<float>(
+                          static_cast<ScaleType*>(params.expert_scale_factor)[expanded_idx]) *
+                      params.routing_scaling_factor;
       }
 
       vec_t<T, VEC_SIZE> permuted_data;
       permuted_data.load(reinterpret_cast<T*>(params.allreduce_in) + thread_offset_across_token);
 
-      // * acc += scale(data)
 #pragma unroll
       for (int i = 0; i < VEC_SIZE; ++i) {
-        // assume computation is done in ScaleType
         accumulator[i] += static_cast<T>(static_cast<float>(permuted_data[i]) * block_scale);
       }
     }
 
-    // * Add shared expert output
+    // Add shared expert output if provided
     if (params.shared_expert_output) {
-      // * Load shared expert output
-      int thread_offset_across_token = token_id * params.hidden_dim + thread_offset_within_token;
+      int thread_offset_across_token = token_id * params.hidden_dim + idx * VEC_SIZE;
       vec_t<T, VEC_SIZE> shared_expert_output;
       shared_expert_output.load(reinterpret_cast<T*>(params.shared_expert_output) +
                                 thread_offset_across_token);
-#pragma unroll
       accumulator = vec_add<T, VEC_SIZE>(accumulator, shared_expert_output);
     }
 
-    // * AR Store
-    int idx = token_id * params.hidden_dim / VEC_SIZE + access_id_in_token;
     remove_neg_zero<T, VEC_SIZE>(accumulator);
+    accumulator.store(smem_buffer + idx * VEC_SIZE);
+  }
+  __syncthreads();
 
-#pragma unroll
-    for (int r = 0; r < NRanks; ++r) {
-      // STG.128 to remote rank
-      int offset = (params.rank * tot_access + idx) * VEC_SIZE;
-      accumulator.store_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) + offset);
-    }
+  if (tid < NRanks) {
+    int r = tid;
+    size_t dst_offset_elems =
+        (params.rank * (params.size / VEC_SIZE) + token_id * num_vecs_per_token) * VEC_SIZE;
+    void* dst_ptr = reinterpret_cast<T*>(comm.data_bufs[r]) + dst_offset_elems;
+    void* src_ptr = smem_buffer;
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+    asm volatile(
+        "cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;"
+        :
+        : "l"(__cvta_generic_to_global(dst_ptr)),
+          "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
+          "r"(static_cast<uint32_t>(copy_bytes))
+        : "memory");
+#endif
+    // TOOD - do a fallback for architectures before hopper
   }
 
-  // * Clear previous buffer
-  for (int idx = access_id; idx < clear_access; idx += access_stride) {
-    clear_vec.store(reinterpret_cast<T*>(comm.clear_buf) + idx * VEC_SIZE);
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  __syncthreads();
+  if (tid == 0) {
+    asm volatile("cp.async.bulk.commit_group;");
+    asm volatile("cp.async.bulk.wait_group 0;");
   }
+#endif
+  __syncthreads();
 
-  // * AR Load + Fusion
-  for (int idx = access_id, tidx = token_id; idx < tot_access;
-       idx += access_stride, tidx += token_stride) {
-    // * AR Load
+  for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
     vec_t<T, VEC_SIZE> vals[NRanks];
     bool done = false;
     while (!done) {
       done = true;
 #pragma unroll
       for (int r = 0; r < NRanks; ++r) {
-        // LDG.128 from local rank
         vals[r].load_global_volatile(reinterpret_cast<T*>(comm.data_bufs[r]) +
-                                     (r * tot_access + idx) * VEC_SIZE);
+                                     (r * (params.size / VEC_SIZE) + token_id * num_vecs_per_token + idx) *
+                                         VEC_SIZE);
         done &= !has_neg_zero<T, VEC_SIZE>(vals[r]);
       }
     }
@@ -1364,29 +1339,30 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
       sum_val = vec_add<T, VEC_SIZE>(sum_val, vals[r]);
     }
 
-    // * Fuse: AllReduceOut is always false in finalize_moe_allreduce
-    fused_op<false, ResidualOut, NormOut, QuantOut, T, VEC_SIZE>(sum_val, idx, tidx,
-                                                                 access_id_in_token, params);
+    // Fuse finalize (residual/norm/quant) using the summed value.
+    int access_id = token_id * num_vecs_per_token + idx;
+    int access_id_in_token = idx;  // Thread-local offset within the token (in vec units).
+    fused_op<false, ResidualOut, NormOut, QuantOut, T, VEC_SIZE, NormOutT>(
+        sum_val, access_id, token_id, access_id_in_token, params);
   }
+
   comm.update(params.size * NRanks);
-  cudaTriggerProgrammaticLaunchCompletion();
-#endif
 }
 
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
-          typename ScaleType = T>
+          typename NormOutT = T, typename ScaleType = T>
 cudaError_t launch_oneshot_moefinalize_lamport(MoeFinalizeAllReduceFusionParams<T> const& params,
                                                cudaLaunchConfig_t& cfg) {
   FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(
       &cfg,
       moefinalize_allreduce_fusion_kernel_oneshot_lamport<T, NRanks, ResidualOut, NormOut, QuantOut,
-                                                          ScaleType>,
+                                                          NormOutT, ScaleType>,
       params));
   return cudaSuccess;
 }
 
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
-          typename ScaleType = T>
+          typename NormOutT = T, typename ScaleType = T>
 cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
     MoeFinalizeAllReduceFusionParams<T> const& params, bool launch_with_pdl) {
   int token_num = params.size / params.hidden_dim;
@@ -1396,45 +1372,27 @@ cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
                         token_num);
     oneshot = true;
   }
-  // Only support one shot
-  // FLASHINFER_CHECK(oneshot, "only support one shot");
-  // Each token is handled by one cluster
-  int cluster_num = token_num;
-  // Total number of threads (within one cluster) that's need to handle one token
-  // given that each thread handle VEC_SIZE
+  // Override launch geometry for the TMA prod path: one block per token, threads cover the
+  // entire hidden_dim (vec granularity). Cluster dims are unused here.
+  int token_num_tma = params.size / params.hidden_dim;
   static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
   int threads_per_token = params.hidden_dim / VEC_SIZE;
-  // Total number of warp (within one cluster) that's need to handle one token
-  // given that each thread handle VEC_SIZE
-  int warps_per_token = (threads_per_token + 31) / 32;
-  int cluster_size = 8;
-  while (warps_per_token % cluster_size != 0) {
-    cluster_size /= 2;
-  }
-  int block_size = warps_per_token / cluster_size * 32;
-  FLASHINFER_CHECK(block_size <= 1024 && cluster_size > 0,
-                   "block_size <= 1024 && cluster_size > 0");
-  int sm_count = get_sm_count();
-  int grid_size = (std::min(sm_count, cluster_num * cluster_size) / cluster_size) * cluster_size;
-  cudaLaunchConfig_t cfg;
-  cudaLaunchAttribute attribute[2];
-  cfg.gridDim = grid_size;
-  cfg.blockDim = block_size;
-  cfg.dynamicSmemBytes = 0;
-  cfg.stream = params.stream;
-  attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attribute[0].val.programmaticStreamSerializationAllowed = launch_with_pdl ? 1 : 0;
-  attribute[1].id = cudaLaunchAttributeClusterDimension;
-  attribute[1].val.clusterDim.x = cluster_size;
-  attribute[1].val.clusterDim.y = 1;
-  attribute[1].val.clusterDim.z = 1;
-  cfg.attrs = attribute;
-  cfg.numAttrs = 2;
-  if (oneshot) {
-    FLASHINFER_CUDA_CALL(
-        (launch_oneshot_moefinalize_lamport<T, NRanks, ResidualOut, NormOut, QuantOut, ScaleType>(
-            params, cfg)));
-  }
+  FLASHINFER_CHECK(threads_per_token <= 1024, "threads_per_token must be <= 1024");
+  cfg.gridDim = token_num_tma;
+  cfg.blockDim = threads_per_token;
+  cfg.dynamicSmemBytes = params.hidden_dim * sizeof(T);
+  cfg.attrs = nullptr;
+  cfg.numAttrs = 0;
+  cfg.dynamicSmemBytes = set_dynamic_smem_attr(
+      tma_bulk_store_splitput_one_token_prod<T, NRanks, ResidualOut, NormOut, QuantOut, NormOutT,
+                                              ScaleType>,
+      cfg.dynamicSmemBytes, "tma_bulk_store_splitput_one_token_prod");
+  FLASHINFER_CUDA_CALL((cudaLaunchKernelEx(
+      &cfg,
+      tma_bulk_store_splitput_one_token_prod<T, NRanks, ResidualOut, NormOut, QuantOut, NormOutT,
+                                              ScaleType>,
+      params)));
+  
   return cudaSuccess;
 }
 
