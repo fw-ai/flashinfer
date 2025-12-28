@@ -1943,16 +1943,12 @@ __global__ void bench_tma_bulk_store_splitput_one_token(MoeFinalizeAllReduceFusi
   }
   __syncthreads();
 
-  // Ensure all threads are aligned before issuing cp.async.
-  __syncthreads();
-  unsigned send_mask = __ballot_sync(0xffffffff, tid < NRanks);
   if (tid < NRanks) {
     int r = tid;
     size_t dst_offset_elems = (params.rank * (params.size / VEC_SIZE)) * VEC_SIZE;  // token_id fixed to 0
     void* dst_ptr = reinterpret_cast<T*>(comm.data_bufs[r]) + dst_offset_elems;
     void* src_ptr = smem_buffer;
 
-    __syncwarp(send_mask);
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
     asm volatile(
         "cp.async.bulk.global.shared.L2::cache_hint [%0], [%1], %2;"
@@ -1962,14 +1958,13 @@ __global__ void bench_tma_bulk_store_splitput_one_token(MoeFinalizeAllReduceFusi
           "r"(static_cast<uint32_t>(copy_bytes))
         : "memory");
 #elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-    uint64_t cache_hint = 1;
+    // uint64_t cache_hint = 1;
     asm volatile(
-        "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint [%0], [%1], %2, %3;"
+        "cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;"
         :
         : "l"(__cvta_generic_to_global(dst_ptr)),
           "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src_ptr))),
           "r"(static_cast<uint32_t>(copy_bytes))
-          "l"(cache_hint)
         : "memory");
 #endif
   }
