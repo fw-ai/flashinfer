@@ -1357,6 +1357,7 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
   }
 
   comm.update(params.size * NRanks);
+  cudaTriggerProgrammaticLaunchCompletion();
 }
 
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
