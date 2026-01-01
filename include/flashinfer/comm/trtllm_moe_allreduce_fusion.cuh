@@ -1549,14 +1549,16 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
         "clear=%llu (%.2f%%), "
         "ar_load_total=%llu (%.2f%%), "
         "fused_op_total=%llu (%.2f%%), "
-        "total=%llu\n",
+        "total=%llu, "
+        "ar_poll_iters=%llu\n",
         VEC_SIZE,
         moe_cycles, moe_pct,
         ar_store_cycles, ar_store_pct,
         clear_cycles, clear_pct,
         ar_load_cycles, ar_load_pct,
         fuse_cycles, fuse_pct,
-        total_cycles);
+        total_cycles,
+        ar_poll_iters);
   }
 #endif
   comm.update(params.size * NRanks);
@@ -2209,6 +2211,11 @@ __global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusio
   cudaGridDependencySynchronize();
   LamportComm<NRanks> comm(params.workspace, params.rank);
 
+  // Sentinel value used to clear the Lamport "next" buffer so that the subsequent
+  // phase observes a clean -0 pattern when polling via has_neg_zero.
+  vec_t<T, VEC_SIZE> clear_vec;
+  clear_vec.fill(neg_zero_v<T>);
+
   int num_vecs_per_token = params.hidden_dim / VEC_SIZE;
   size_t copy_bytes = params.hidden_dim * sizeof(T);
   int top_k = params.top_k;
@@ -2342,6 +2349,30 @@ if (is_profiler_thread) {
   }
 #endif
 
+  // Clear the previous Lamport buffer so the next phase observes a fresh
+  // -0-initialized region when polling via has_neg_zero.
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+  unsigned long long t_clear_start = 0;
+  unsigned long long t_clear_done = 0;
+  if (is_profiler_thread) {
+    t_clear_start = clock64();
+  }
+#endif
+
+  int clear_access = comm.clear_size / VEC_SIZE;
+  int global_thread_id = blockIdx.x * blockDim.x + tid;
+  int total_threads = gridDim.x * blockDim.x;
+  for (int idx = global_thread_id; idx < clear_access; idx += total_threads) {
+    clear_vec.store(reinterpret_cast<T*>(comm.clear_buf) + idx * VEC_SIZE);
+  }
+
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+  if (is_profiler_thread) {
+    t_clear_done = clock64();
+    clear_cycles += static_cast<unsigned long long>(t_clear_done - t_clear_start);
+  }
+#endif
+
   for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
 #ifdef FLASHINFER_MOE_FINALIZE_PROFILE
     unsigned long long t_load_start = 0;
@@ -2434,7 +2465,8 @@ if (is_profiler_thread) {
         "clear=%llu (%.2f%%), "
         "ar_load_total=%llu (%.2f%%), "
         "fused_op_total=%llu (%.2f%%), "
-        "total=%llu\n",
+        "total=%llu, "
+        "ar_poll_iters=%llu\n",
         VEC_SIZE,
         moe_cycles, moe_pct,
         smem_store_cycles, smem_store_pct,
@@ -2442,7 +2474,8 @@ if (is_profiler_thread) {
         clear_cycles, clear_pct,
         ar_load_cycles, ar_load_pct,
         fuse_cycles, fuse_pct,
-        total_cycles);
+        total_cycles,
+        ar_poll_iters);
   }
 #endif
 
