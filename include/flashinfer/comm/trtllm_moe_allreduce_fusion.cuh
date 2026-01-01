@@ -2211,6 +2211,28 @@ __global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusio
   int top_k = params.top_k;
   bool use_scale_factor = params.expert_scale_factor != nullptr;
 
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+  // Simple section-level timing using clock64(), sampled on a single
+  // "profiler" thread (block 0, thread 0) to keep printf noise low.
+  bool is_profiler_thread = (blockIdx.x == 0) && (threadIdx.x == 0);
+  unsigned long long moe_cycles = 0;
+  unsigned long long ar_store_cycles = 0;
+  unsigned long long clear_cycles = 0;
+  unsigned long long ar_load_cycles = 0;
+  unsigned long long fuse_cycles = 0;
+  unsigned long long ar_poll_iters = 0;
+  unsigned long long smem_store_cycles = 0;
+
+  unsigned long long t_moe_start_local = 0;
+  unsigned long long t_moe_finalize_done_local = 0;
+  unsigned long long t_ar_store_done_local = 0;
+  unsigned long long t_smem_store_start_local = 0;
+  unsigned long long t_smem_store_done_local = 0;
+  if (is_profiler_thread) {
+    t_moe_start_local = clock64();
+  }
+#endif
+
   // Compute MoE finalize for this token directly into shared memory that will be
   // TMA-copied to peers.
   for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
@@ -2248,11 +2270,29 @@ __global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusio
                                 thread_offset_across_token);
       accumulator = vec_add<T, VEC_SIZE>(accumulator, shared_expert_output);
     }
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+    if (is_profiler_thread) {
+        t_smem_store_start_local = clock64();
+    }
+#endif
 
     remove_neg_zero<T, VEC_SIZE>(accumulator);
     accumulator.store(smem_buffer + idx * VEC_SIZE);
+
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+if (is_profiler_thread) {
+    t_smem_store_done_local = clock64();
+    smem_store_cycles += static_cast<unsigned long long>(t_smem_store_done_local - t_smem_store_start_local);
+}
+#endif
   }
   __syncthreads();
+
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+  if (is_profiler_thread) {
+    t_moe_finalize_done_local = clock64();
+  }
+#endif
 
   if (tid < NRanks) {
     int r = tid;
@@ -2289,7 +2329,28 @@ __global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusio
 #endif
   __syncthreads();
 
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+  if (is_profiler_thread) {
+    t_ar_store_done_local = clock64();
+    moe_cycles +=
+        static_cast<unsigned long long>(t_moe_finalize_done_local - t_moe_start_local);
+    ar_store_cycles +=
+        static_cast<unsigned long long>(t_ar_store_done_local - t_moe_finalize_done_local);
+  }
+#endif
+
   for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+    unsigned long long t_load_start = 0;
+    unsigned long long t_load_done_local = 0;
+    unsigned long long t_fuse_start = 0;
+    unsigned long long t_fuse_done = 0;
+    unsigned long long poll_iters_local = 0;
+    if (is_profiler_thread) {
+      t_load_start = clock64();
+    }
+#endif
+
     vec_t<T, VEC_SIZE> vals[NRanks];
     bool done = false;
     while (!done) {
@@ -2301,6 +2362,11 @@ __global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusio
                                          VEC_SIZE);
         done &= !has_neg_zero<T, VEC_SIZE>(vals[r]);
       }
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+      if (is_profiler_thread) {
+        ++poll_iters_local;
+      }
+#endif
     }
     vec_t<T, VEC_SIZE> sum_val = vals[0];
 #pragma unroll
@@ -2308,12 +2374,74 @@ __global__ void tma_bulk_store_splitput_one_token_prod(MoeFinalizeAllReduceFusio
       sum_val = vec_add<T, VEC_SIZE>(sum_val, vals[r]);
     }
 
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+    if (is_profiler_thread) {
+      t_load_done_local = clock64();
+      t_fuse_start = t_load_done_local;
+    }
+#endif
+
     // Fuse finalize (residual/norm/quant) using the summed value.
     int access_id = token_id * num_vecs_per_token + idx;
     int access_id_in_token = idx;  // Thread-local offset within the token (in vec units).
     fused_op<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
         sum_val, access_id, token_id, access_id_in_token, params);
+
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+    if (is_profiler_thread) {
+      t_fuse_done = clock64();
+      ar_load_cycles +=
+          static_cast<unsigned long long>(t_load_done_local - t_load_start);
+      fuse_cycles +=
+          static_cast<unsigned long long>(t_fuse_done - t_fuse_start);
+      ar_poll_iters += poll_iters_local;
+    }
+#endif
   }
+
+#ifdef FLASHINFER_MOE_FINALIZE_PROFILE
+  if (is_profiler_thread) {
+    unsigned long long total_cycles =
+        moe_cycles + ar_store_cycles + clear_cycles + ar_load_cycles + fuse_cycles;
+
+    double moe_pct = 0.0;
+    double smem_store_pct = 0.0;
+    double ar_store_pct = 0.0;
+    double clear_pct = 0.0;
+    double ar_load_pct = 0.0;
+    double fuse_pct = 0.0;
+    if (total_cycles > 0) {
+      moe_pct = 100.0 * static_cast<double>(moe_cycles) / static_cast<double>(total_cycles);
+      smem_store_pct =
+          100.0 * static_cast<double>(smem_store_cycles) / static_cast<double>(total_cycles);
+      ar_store_pct =
+          100.0 * static_cast<double>(ar_store_cycles) / static_cast<double>(total_cycles);
+      clear_pct = 100.0 * static_cast<double>(clear_cycles) / static_cast<double>(total_cycles);
+      ar_load_pct =
+          100.0 * static_cast<double>(ar_load_cycles) / static_cast<double>(total_cycles);
+      fuse_pct = 100.0 * static_cast<double>(fuse_cycles) / static_cast<double>(total_cycles);
+    }
+
+    printf(
+        "tma_bulk_store_splitput_one_token_prod timings (clocks): "
+        "VEC_SIZE=%d, "
+        "moe_finalize=%llu (%.2f%%), "
+        "smem_store=%llu (%.2f%%), "
+        "ar_store=%llu (%.2f%%), "
+        "clear=%llu (%.2f%%), "
+        "ar_load_total=%llu (%.2f%%), "
+        "fused_op_total=%llu (%.2f%%), "
+        "total=%llu\n",
+        VEC_SIZE,
+        moe_cycles, moe_pct,
+        smem_store_cycles, smem_store_pct,
+        ar_store_cycles, ar_store_pct,
+        clear_cycles, clear_pct,
+        ar_load_cycles, ar_load_pct,
+        fuse_cycles, fuse_pct,
+        total_cycles);
+  }
+#endif
 
   comm.update(params.size * NRanks);
 #endif
