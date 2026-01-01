@@ -714,6 +714,9 @@ struct MoeFinalizeAllReduceFusionParams : public AllReduceFusionParams<T> {
 template <int NRanks>
 struct LamportComm {
   __device__ __forceinline__ LamportComm(void** workspace, int rank) {
+    /*
+    * workspace: [buffer x NRanks, flag x NRanks, lamport x NRanks, lamport_flags x NRanks]
+    */
     counter_ptr = &reinterpret_cast<int*>(workspace[NRanks * 3])[0];
     flag_ptr = &reinterpret_cast<int*>(workspace[NRanks * 3])[2];
     clear_ptr = &reinterpret_cast<int*>(workspace[NRanks * 3])[4];
