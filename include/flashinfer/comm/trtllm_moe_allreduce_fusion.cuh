@@ -720,7 +720,9 @@ struct LamportComm {
     clear_ptr = &reinterpret_cast<int*>(workspace[NRanks * 3])[4];
     flag_value = *flag_ptr;
     int comm_size = reinterpret_cast<int*>(workspace[NRanks * 3])[3];
+    // printf("comm_size: %d\n", comm_size);
     clear_size = *clear_ptr;
+    // printf("clear_size: %d\n", clear_size);
     int data_offset = flag_value % 3;
     int clear_offset = (flag_value + 2) % 3;
     for (int r = 0; r < NRanks; ++r) {
@@ -1259,6 +1261,9 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
   int top_k = params.top_k;
   bool use_scale_factor = params.expert_scale_factor != nullptr;
 
+  vec_t<T, VEC_SIZE> clear_vec;
+  clear_vec.fill(neg_zero_v<T>);
+
   // Compute MoE finalize for this token directly into shared memory that will be
   // TMA-copied to peers.
   for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
@@ -1329,6 +1334,18 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
   }
 #endif
   __syncthreads();
+
+  {
+    // Clear the entire previous Lamport buffer (size given by comm.clear_size),
+    // treating it as a 1D array of VEC_SIZE-wide vectors.
+    int clear_access = comm.clear_size / VEC_SIZE;
+    int global_thread_id = blockIdx.x * blockDim.x + tid;
+    int total_threads = gridDim.x * blockDim.x;
+
+    for (int idx = global_thread_id; idx < clear_access; idx += total_threads) {
+      clear_vec.store(reinterpret_cast<T*>(comm.clear_buf) + idx * VEC_SIZE);
+    }
+  }
 
   for (int idx = tid; idx < num_vecs_per_token; idx += blockDim.x) {
     vec_t<T, VEC_SIZE> vals[NRanks];
