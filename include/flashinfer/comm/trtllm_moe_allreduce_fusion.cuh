@@ -851,15 +851,13 @@ template <bool AllReduceOut, bool ResidualOut, bool NormOut, bool QuantOut, type
           typename NormOutT, uint32_t VEC_SIZE>
 __device__ __forceinline__ void fused_op_v2(vec_t<T, VEC_SIZE> const& val, int access_id,
                                             int token_id, int access_id_in_token,
-                                            AllReduceFusionParams<T>& params) {
+                                            AllReduceFusionParams<T>& params,
+                                            vec_t<T, VEC_SIZE>& residual_val,
+                                            vec_t<T, VEC_SIZE>& gamma_val
+                                          ) {
   if constexpr (AllReduceOut) {
     val.store(reinterpret_cast<T*>(params.moe_allreduce_out) + access_id * VEC_SIZE);
   }
-  vec_t<T, VEC_SIZE> residual_val;
-  residual_val.load(reinterpret_cast<T*>(params.residual_in) + access_id * VEC_SIZE);
-
-  vec_t<T, VEC_SIZE> gamma_val;
-  gamma_val.load(reinterpret_cast<T*>(params.rms_gamma) + access_id_in_token * VEC_SIZE);
   residual_val = vec_add<T, VEC_SIZE>(val, residual_val);
   if constexpr (ResidualOut) {
     residual_val.store(reinterpret_cast<T*>(params.residual_out) + access_id * VEC_SIZE);
@@ -1323,7 +1321,7 @@ cudaError_t moereduction_allreduce_fusion_op(MoeReductionAllReduceFusionParams<T
 
 
 
-#define FLASHINFER_MOE_FINALIZE_PROFILE
+// #define FLASHINFER_MOE_FINALIZE_PROFILE
 // #define FLASHINFER_MOE_FINALIZE_BENCH_TMA
 // #define FLASHINFER_MOE_FINALIZE_DISABLE_SYNC_FOR_PROFILE
 
@@ -1560,7 +1558,7 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
 #endif
 
       // * Fuse: AllReduceOut is always false in finalize_moe_allreduce
-      fused_op_v2<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
+      fused_op<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
           sum_val, idx, tidx, access_id_in_token, params);
 
 #ifdef FLASHINFER_MOE_FINALIZE_PROFILE
@@ -1780,6 +1778,10 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport_v2(
   }
 #endif
 
+  // While we wait for PUT to arrive - preload gamma_val for fused_op
+  vec_t<T, VEC_SIZE> gamma_val;
+  gamma_val.load(reinterpret_cast<T*>(params.rms_gamma) + access_id_in_token * VEC_SIZE);
+
   // * AR Load + Fusion
   for (int idx = access_id, tidx = token_id; idx < tot_access;
        idx += access_stride, tidx += token_stride) {
@@ -1793,6 +1795,9 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport_v2(
         t_load_start = clock64();
       }
 #endif
+      // While we wait for PUT to arrive - preload residual_val for fused_op
+      vec_t<T, VEC_SIZE> residual_val;
+      residual_val.load(reinterpret_cast<T*>(params.residual_in) + idx * VEC_SIZE);
 
       vec_t<T, VEC_SIZE> vals[NRanks];
       bool done = false;
@@ -1831,9 +1836,8 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport_v2(
       }
 #endif
 
-      // * Fuse: AllReduceOut is always false in finalize_moe_allreduce
-      fused_op<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
-          sum_val, idx, tidx, access_id_in_token, params);
+      fused_op_v2<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
+          sum_val, idx, tidx, access_id_in_token, params, residual_val, gamma_val);
 
 #ifdef FLASHINFER_MOE_FINALIZE_PROFILE
       if (is_profiler_thread) {
