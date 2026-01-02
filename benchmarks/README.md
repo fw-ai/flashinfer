@@ -117,7 +117,7 @@ The output CSV will contain detailed metrics including:
 | `--verbose`, `-v`        | Print additional information (can be used multiple times for more verbosity, e.g. `-vv`)                   |
 | `--case_tag`              | Optional tag for the test case, useful for annotating or filtering results in the output CSV.              |
 | `--generate_repro_command`| If set, prints a reproducer command for the test case and stores it in the output CSV.                     |
-| `--backends`             | Space-separated list of backends to test, e.g. fa2, fa2_tc, fa3, cudnn, cutlass, trtllm, trtllm-gen, trtllm-native, cublas|
+| `--backends`             | Space-separated list of backends to test, e.g. fa2, fa2_tc, fa3, cudnn, cudnn-native, cutlass, trtllm, trtllm-gen, trtllm-native, cublas|
 
 ### Attention Flags
 | Flag                     | Description                                                                                                 |
@@ -166,8 +166,7 @@ The output CSV will contain detailed metrics including:
 | `--topk_group`           | Number of groups to consider for top-k routing. Default: 1                                                 |
 | `--routed_scaling_factor`| Scaling factor for routing. Default: 2.5                                                                   |
 | `--local_expert_offset`  | Offset of local experts in global expert space. Default: 0                                                 |
-| `--local_num_experts`    | Number of experts handled by this device. Default: equals num_experts                                      |
-| `--tile_tokens_dim`      | Tile dimension for tokens. Default: 8                                                                      |
+| `--local_num_experts`    | Number of experts handled by this device. Default: equals num_experts                                      |                                                                    |
 | `--routing_method`       | Routing method: `renormalize`, `deepseek_v3`, `llama4`, `renormalize_naive`. Default: `deepseek_v3`.       |
 | `--use_shuffled_weight`  | Whether to use shuffled weight layout                                                                      |
 | `--weight_layout`        | Weight layout: 0=MajorK, 1=MajorMn,  2=BlockMajorK. Default: 0                                             |

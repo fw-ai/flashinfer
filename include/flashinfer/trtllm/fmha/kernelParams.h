@@ -194,24 +194,38 @@ struct KernelParams {
         static_cast<uint64_t>(options.mHeadDimQk), static_cast<uint64_t>(numGroupedHeads),
         static_cast<uint64_t>(numHeads), static_cast<uint64_t>(numTokens)};
 
-    // The hidden dimension when the tensor contains only Q (i.e. not QKV packed).
-    int32_t const hiddenDimQ{options.mNumHeadsQ * options.mHeadDimQk};
-
-    // The hidden dimension when the Q, K and V tensors are packed.
-    int32_t hiddenDimQkv{hiddenDimQ};
-    if (isPackedQkv(options.mQkvLayout)) {
-      FLASHINFER_CHECK(!groupsHeadsQ, "internal error");
-      hiddenDimQkv += options.mNumHeadsKv * (options.mHeadDimQk + options.mHeadDimV);
+    // The stride between tokens.
+    // Use user-provided stride if available, otherwise compute from layout.
+    int32_t strideTokens{options.qStrideTokens};
+    if (strideTokens == 0) {
+      // The hidden dimension when the tensor contains only Q (i.e. not QKV packed).
+      int32_t const hiddenDimQ{options.mNumHeadsQ * options.mHeadDimQk};
+      // The hidden dimension when the Q, K and V tensors are packed.
+      int32_t hiddenDimQkv{hiddenDimQ};
+      if (isPackedQkv(options.mQkvLayout)) {
+        FLASHINFER_CHECK(!groupsHeadsQ, "internal error");
+        hiddenDimQkv += options.mNumHeadsKv * (options.mHeadDimQk + options.mHeadDimV);
+      }
+      strideTokens = hiddenDimQkv;
     }
 
-    // The stride between tokens.
-    int32_t strideTokens{hiddenDimQkv};
-
     // The stride between heads.
-    int32_t strideHeads{groupsHeadsQ ? numGroupedHeads * options.mHeadDimQk : options.mHeadDimQk};
+    // Use user-provided stride if available, otherwise compute from layout.
+    int32_t strideHeads{options.qStrideHeads};
+    if (strideHeads == 0) {
+      strideHeads = options.mHeadDimQk;
+    }
+    // The stride between grouped heads (consecutive heads within a GQA group).
+    // Use user-provided stride if available, otherwise use headDimQk.
+    int32_t strideGroupedHeads{options.qStrideHeads};
+    if (strideGroupedHeads == 0) {
+      strideGroupedHeads = options.mHeadDimQk;
+    }
 
-    // The stride between grouped heads.
-    int32_t strideGroupedHeads{options.mHeadDimQk};
+    // For GQA, the TMA iterates over groups of heads, so we need to multiply by numGroupedHeads.
+    if (groupsHeadsQ) {
+      strideHeads = numGroupedHeads * strideHeads;
+    }
 
     // Assemble the stride (1, strideTokens, strideHeads).
     // Swap the first two dimension as mentioned before.
@@ -331,6 +345,12 @@ struct KernelParams {
       strideHeads = options.vStrideHeads;
       strideBatch = options.vStrideBatch;
     }
+
+    // Ragged layout has no batch stride; reset negative overflow to 0 for TMA descriptor.
+    if (!isPagedKv(options.mQkvLayout) && !isContiguousKv(options.mQkvLayout) && strideBatch < 0) {
+      strideBatch = 0;
+    }
+
     // The 3 strides (the other ones are 1 and 0).
     return std::make_tuple(strideKeysVals, strideHeads, strideBatch);
   }
@@ -486,8 +506,8 @@ struct KernelParams {
 
     // Check shape must be in range [1, 2^32]
     int32_t dim = shapes.size();
-    // Max five dimension and min 3 dimension.
-    FLASHINFER_CHECK((dim <= 5) && (dim >= 3));
+    // Max five dimension and min 2 dimension.
+    FLASHINFER_CHECK((dim <= 5) && (dim >= 2));
     // Check shape range.
     for (int32_t ii = 0; ii < dim; ++ii) {
       FLASHINFER_CHECK(shapes[ii] >= (uint64_t(1)));        // Size must be min 1
@@ -597,6 +617,16 @@ struct KernelParams {
     std::vector<uint32_t> tileShapeKv(shapeK.size(), 1);
     tileShapeKv[0] = numEltsInClampedHeadDimKv / numEltsDivisor;
     tileShapeKv[1] = numKeysPerTile;
+
+    // If sparse MLA is enabled, the shape and stride for K need to be updated for 2D layout
+    // (numTokensKvInPagedKv, headDimQk).
+    if (options.mSparseMla) {
+      shapeK = std::vector<uint64_t>{static_cast<uint64_t>(options.mHeadDimQk),
+                                     static_cast<uint64_t>(INT_MAX)};
+      strideK = std::vector<uint64_t>{1, static_cast<uint64_t>(options.mHeadDimQk)};
+      tileShapeKv[1] = 1;
+    }
+
     // Build tma descriptor for K.
     params.tmaK_ = buildNdTmaDescriptor(options, kernelMeta.mDataTypeKv, shapeK, strideK,
                                         tileShapeKv, const_cast<void*>(kPtr),
@@ -715,12 +745,16 @@ struct KernelParams {
     params.mNumHeadsKv = options.mNumHeadsKv;
     params.mNumHeadsQPerKv = options.mNumHeadsQPerKv;
     params.mNumHiddenEltsO = options.mNumHeadsQ * options.mHeadDimQk;
-    // todo(Yingyi): might take a scalar tensor later
     params.mOutputScale = options.outputScale;
     params.mScaleSoftmaxLog2 = options.scaleSoftmaxLog2;
     params.mStartTokenIdxSfO = options.mSfStartTokenIdx;
     params.mScaleSfKv = options.mScaleSfKv;
     params.ptrSoftmaxStats = options.softmaxStatsPtr;
+    // The sparseMlaTopK needs to be a multiple of 4 as we use 16B cpAsync instructions for the
+    // indices.
+    FLASHINFER_CHECK(!options.mSparseMla || (options.mSparseMlaTopK % 4) == 0,
+                     "SparseMlaTopK must be a multiple of 4");
+    params.mSparseMlaTopK = options.mSparseMlaTopK;
     // TODO: Integrate trtllm block-sparse attention kernels when needed.
     params.mUseBlockSparseAttention = false;
     return params;
