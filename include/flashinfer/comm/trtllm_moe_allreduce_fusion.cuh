@@ -1280,8 +1280,9 @@ cudaError_t moereduction_allreduce_fusion_op(MoeReductionAllReduceFusionParams<T
 
 
 
-#define FLASHINFER_MOE_FINALIZE_PROFILE
+// #define FLASHINFER_MOE_FINALIZE_PROFILE
 #define FLASHINFER_MOE_FINALIZE_BENCH_TMA
+// #define FLASHINFER_MOE_FINALIZE_DISABLE_SYNC_FOR_PROFILE
 
 // #define FLASHINFER_MOE_FINALIZE_BENCH_TMA_FULLPUT
 // #define FLASHINFER_MOE_FINALIZE_BENCH_TMA_SPLITPUT
@@ -2387,6 +2388,7 @@ if (is_profiler_thread) {
 
     vec_t<T, VEC_SIZE> vals[NRanks];
     bool done = false;
+#ifndef FLASHINFER_MOE_FINALIZE_DISABLE_SYNC_FOR_PROFILE
     while (!done) {
       done = true;
 #pragma unroll
@@ -2402,6 +2404,13 @@ if (is_profiler_thread) {
       }
 #endif
     }
+#else
+    // When wait is disabled for profiling, initialize vals with zeros
+#pragma unroll
+    for (int r = 0; r < NRanks; ++r) {
+      vals[r].fill(0.f);
+    }
+#endif
     vec_t<T, VEC_SIZE> sum_val = vals[0];
 #pragma unroll
     for (int r = 1; r < NRanks; ++r) {
