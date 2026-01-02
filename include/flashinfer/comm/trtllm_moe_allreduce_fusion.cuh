@@ -3,6 +3,9 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include <cuda/barrier>
+#include <cuda/ptx>
+
 #if CUDA_VERSION >= 12080
 #include <cuda_fp4.h>
 #endif
@@ -2196,6 +2199,8 @@ __global__ void bench_tma_bulk_store_splitput_n_tokens(MoeFinalizeAllReduceFusio
 #endif
 }
 
+namespace ptx = cuda::ptx;
+
 // Production trial: fork of split-put single-token variant, under its own guard.
 // Mirrors the fused MoE finalize logic while retaining TMA-based PUT/LOAD.
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut, typename NormOutT,
@@ -2311,6 +2316,8 @@ if (is_profiler_thread) {
         (params.rank * (params.size / VEC_SIZE) + token_id * num_vecs_per_token) * VEC_SIZE;
     void* dst_ptr = reinterpret_cast<T*>(comm.data_bufs[r]) + dst_offset_elems;
     void* src_ptr = smem_buffer;
+
+    ptx::fence_proxy_async(ptx::space_shared);
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
     asm volatile(
