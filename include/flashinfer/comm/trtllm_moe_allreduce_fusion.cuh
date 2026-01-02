@@ -847,6 +847,46 @@ __device__ __forceinline__ void fused_op(vec_t<T, VEC_SIZE> const& val, int acce
 #endif
 }
 
+template <bool AllReduceOut, bool ResidualOut, bool NormOut, bool QuantOut, typename T,
+          typename NormOutT, uint32_t VEC_SIZE>
+__device__ __forceinline__ void fused_op_v2(vec_t<T, VEC_SIZE> const& val, int access_id,
+                                            int token_id, int access_id_in_token,
+                                            AllReduceFusionParams<T>& params) {
+  if constexpr (AllReduceOut) {
+    val.store(reinterpret_cast<T*>(params.moe_allreduce_out) + access_id * VEC_SIZE);
+  }
+  vec_t<T, VEC_SIZE> residual_val;
+  residual_val.load(reinterpret_cast<T*>(params.residual_in) + access_id * VEC_SIZE);
+
+  vec_t<T, VEC_SIZE> gamma_val;
+  gamma_val.load(reinterpret_cast<T*>(params.rms_gamma) + access_id_in_token * VEC_SIZE);
+  residual_val = vec_add<T, VEC_SIZE>(val, residual_val);
+  if constexpr (ResidualOut) {
+    residual_val.store(reinterpret_cast<T*>(params.residual_out) + access_id * VEC_SIZE);
+  }
+  vec_t<T, VEC_SIZE> norm_val;
+  norm_val = rms_norm<T, VEC_SIZE>(residual_val, gamma_val, params.rms_eps, params.hidden_dim);
+  if constexpr (NormOut) {
+    // Allow norm_out to be stored in a different dtype (e.g. FP8) via NormOutT.
+    auto norm_out_ptr =
+        reinterpret_cast<NormOutT*>(params.norm_out) + access_id * VEC_SIZE;
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      norm_out_ptr[i] = static_cast<NormOutT>(norm_val[i]);
+    }
+  }
+#if CUDA_VERSION >= 12080
+  if constexpr (QuantOut) {
+    constexpr int SF_VEC_SIZE = 16;
+    auto sf_out = utils::cvt_quant_to_fp4_get_sf_out_offset<uint32_t, 2>(
+        std::nullopt /* batchIdx */, token_id, access_id_in_token, std::nullopt /* numRows */,
+        params.hidden_dim, reinterpret_cast<uint32_t*>(params.scale_out), params.layout);
+    reinterpret_cast<uint32_t*>(params.quant_out)[access_id] =
+        utils::cvt_warp_fp16_to_fp4<T, VEC_SIZE>(norm_val, params.scale_factor, sf_out);
+  }
+#endif
+}
+
 template <typename T>
 struct neg_zero {
   static constexpr T value = -T(0);
@@ -1520,7 +1560,7 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
 #endif
 
       // * Fuse: AllReduceOut is always false in finalize_moe_allreduce
-      fused_op<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
+      fused_op_v2<false, ResidualOut, NormOut, QuantOut, T, NormOutT, VEC_SIZE>(
           sum_val, idx, tidx, access_id_in_token, params);
 
 #ifdef FLASHINFER_MOE_FINALIZE_PROFILE
