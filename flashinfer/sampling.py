@@ -101,7 +101,8 @@ def get_sampling_module():
         # to float32
         logits = logits.float()
         batch_size = indices.size(0) if indices is not None else logits.size(0)
-        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
+        out_dtype = indices.dtype if indices is not None else torch.int32
+        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
         if seed is None or offset is None:
             seed, offset = get_seed_and_offset(batch_size * logits.size(1), generator)
         module.sampling_from_logits(
@@ -141,7 +142,8 @@ def get_sampling_module():
         device = probs.device
         probs = probs.float()
         batch_size = indices.size(0) if indices is not None else probs.size(0)
-        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
+        out_dtype = indices.dtype if indices is not None else torch.int32
+        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
         if seed is None or offset is None:
             seed, offset = get_seed_and_offset(batch_size, generator)
         module.sampling_from_probs(
@@ -188,7 +190,8 @@ def get_sampling_module():
             maybe_top_p_arr.float() if maybe_top_p_arr is not None else None
         )
         batch_size = indices.size(0) if indices is not None else probs.size(0)
-        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
+        out_dtype = indices.dtype if indices is not None else torch.int32
+        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
         if seed is None or offset is None:
             seed, offset = get_seed_and_offset(batch_size * 32, generator)
         module.top_p_sampling_from_probs(
@@ -236,7 +239,8 @@ def get_sampling_module():
         probs = probs.float()
         batch_size = indices.size(0) if indices is not None else probs.size(0)
         maybe_top_k_arr = maybe_top_k_arr.int() if maybe_top_k_arr is not None else None
-        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
+        out_dtype = indices.dtype if indices is not None else torch.int32
+        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
         if seed is None or offset is None:
             seed, offset = get_seed_and_offset(batch_size * 32, generator)
         module.top_k_sampling_from_probs(
@@ -286,7 +290,8 @@ def get_sampling_module():
             maybe_min_p_arr.float() if maybe_min_p_arr is not None else None
         )
         batch_size = indices.size(0) if indices is not None else probs.size(0)
-        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
+        out_dtype = indices.dtype if indices is not None else torch.int32
+        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
         if seed is None or offset is None:
             seed, offset = get_seed_and_offset(batch_size, generator)
         module.min_p_sampling_from_probs(
@@ -325,7 +330,8 @@ def get_sampling_module():
             maybe_top_p_arr.float() if maybe_top_p_arr is not None else None
         )
         batch_size = indices.size(0) if indices is not None else probs.size(0)
-        samples = torch.empty(batch_size, dtype=torch.int32, device=device)
+        out_dtype = indices.dtype if indices is not None else torch.int32
+        samples = torch.empty(batch_size, dtype=out_dtype, device=device)
         if seed is None or offset is None:
             seed, offset = get_seed_and_offset(batch_size * 32, generator)
         module.top_k_top_p_sampling_from_probs(
@@ -622,7 +628,8 @@ def sampling_from_logits(
         shape should be ``(unique_batch_size, num_classes)`` where unique_batch_size is the number of unique
         probability distributions.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in logits.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
+        that maps each output to a row in logits. The output tensor will have the same dtype as indices.
         For example, if indices[i] = j, then the i-th output will be sampled from logits[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of logits
@@ -688,7 +695,8 @@ def sampling_from_probs(
         shape should be ``(unique_batch_size, num_classes)`` where unique_batch_size is the number of unique
         probability distributions.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
+        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
@@ -770,7 +778,8 @@ def top_p_sampling_from_probs(
         If a float, the same threshold is used for all requests.
         If a tensor, each request has its own threshold.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
+        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
@@ -866,7 +875,8 @@ def top_k_sampling_from_probs(
         If a scalar, the same threshold is used for all requests.
         If a tensor, each request has its own threshold.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
+        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
@@ -963,7 +973,8 @@ def min_p_sampling_from_probs(
         If a scalar, the same threshold is used for all requests.
         If a tensor, each request has its own threshold.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
+        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
@@ -1061,7 +1072,8 @@ def top_k_top_p_sampling_from_logits(
         If a scalar, the same threshold is used for all requests.
         If a tensor, each request has its own threshold.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
+        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
@@ -1193,7 +1205,8 @@ def top_k_top_p_sampling_from_probs(
         If a scalar, the same threshold is used for all requests.
         If a tensor, each request has its own threshold.
     indices: Optional[torch.Tensor]
-        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` that maps each output to a row in probs.
+        Optional indices tensor of shape ``(batch_size,)``, dtype ``torch.int32`` or ``torch.int64``
+        that maps each output to a row in probs. The output tensor will have the same dtype as indices.
         For example, if indices[i] = j, then the i-th output will be sampled from probs[j].
         This allows reusing the same probability distribution for multiple outputs.
         If indices is not provided, the i-th output will be sampled from the i-th row of probs
