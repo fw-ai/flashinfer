@@ -72,8 +72,8 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
   using ElementAccumulator = float;  // Element Accumulator will also be our scale factor type
   using ElementCompute = float;
 
-  using MmaTileShape_MNK = Shape<cute::Int<MmaSM * 128>, _128, _128>;
-  using ClusterShape_MNK = Shape<cute::Int<MmaSM>, _1, _1>;
+  using MmaTileShape_MNK = Shape<cute::Int<128>, _128, _128>;
+  using ClusterShape_MNK = Shape<cute::Int<1>, _1, _1>;
   
   // NOTE(Zihao):: UMMA::Major::MN, UMMA::Major::MN is the fastest configuration.
   
@@ -93,21 +93,30 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
   using LayoutSFB =
       decltype(ScaleConfig::deduce_layoutSFB());  // Layout type for SFB matrix operand
   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-      /*ArchTag=*/cutlass::arch::Sm100, /*OpClass=*/cutlass::arch::OpClassTensorOp, /*TileShapeMNK=*/MmaTileShape_MNK, /*ClusterShape=*/ClusterShape_MNK,
-      /*EpilogueTileType=*/cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator, ElementCompute, ElementC,
-      /*GemmLayoutTagC=*/LayoutC, AlignmentC, ElementD, /*GemmLayoutTagD=*/LayoutC, AlignmentD,
-      /*EpilogueScheduleType=*/cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
+      cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp,
+      /*TileShapeMNK=*/MmaTileShape_MNK, /*ClusterShape=*/ClusterShape_MNK,
+      /*EpilogueTileType=*/cutlass::epilogue::collective::EpilogueTileAuto,
+      ElementAccumulator, ElementCompute,
+      ElementC,/*GemmLayoutTagC=*/LayoutC, AlignmentC,
+      ElementD, /*GemmLayoutTagD=*/LayoutC, AlignmentD,
+      /*EpilogueScheduleType=*/cutlass::epilogue::collective::EpilogueScheduleAuto
+    >::CollectiveOp;
 
   using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-      /*ArchTag=*/cutlass::arch::Sm100, /*OpClass=*/cutlass::arch::OpClassTensorOp, ElementA,
-      /*GemmLayoutA=*/cute::tuple<LayoutA, LayoutSFA>, AlignmentA, ElementB, /*GemmLayoutB=*/cute::tuple<LayoutB, LayoutSFB>,
-      AlignmentB, ElementAccumulator, /*TileShapeMNK=*/MmaTileShape_MNK, ClusterShape_MNK,
+      /*ArchTag=*/cutlass::arch::Sm100, /*OpClass=*/cutlass::arch::OpClassTensorOp,
+      ElementA,/*GemmLayoutA=*/cute::tuple<LayoutA, LayoutSFA>, AlignmentA,
+      ElementB, /*GemmLayoutB=*/cute::tuple<LayoutB, LayoutSFB>, AlignmentB,
+      ElementAccumulator,
+      /*TileShapeMNK=*/MmaTileShape_MNK, ClusterShape_MNK,
       /*StageCountType=*/cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
           sizeof(typename CollectiveEpilogue::SharedStorage))>,
-      /*KernelScheduleType=*/cutlass::gemm::KernelScheduleSm100Blockwise>::CollectiveOp;
+      /*KernelScheduleType=*/cutlass::gemm::KernelScheduleSm100Blockwise
+    >::CollectiveOp;
 
   using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      /*ProblemShapeOrThreadblockMma_=*/Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
+      /*ProblemShapeOrThreadblockMma_=*/Shape<int, int, int, int>,
+      CollectiveMainloop,
+      CollectiveEpilogue,
       /*TileScheduler_=*/void>;  // Default to ClusterLaunchControl (CLC) based tile scheduler
 
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
