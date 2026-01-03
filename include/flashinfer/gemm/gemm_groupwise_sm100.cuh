@@ -17,6 +17,8 @@
 #define FLASHINFER_GEMM_GROUPWISE_SM100_CUH_
 
 #include <type_traits>
+#include <typeinfo>
+#include <cstdio>
 
 #include "../allocator.h"
 #include "../cutlass_utils.cuh"
@@ -34,6 +36,14 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
                                             DTypeIn* A_ptr, DTypeIn* B_ptr, float* SFA_ptr,
                                             float* SFB_ptr, DTypeOut* C_ptr, int m, int n, int k,
                                             int l, cudaStream_t stream) {
+
+//   printf("DTypeIn: %s\n", typeid(DTypeIn).name());
+//   printf("DTypeOut: %s\n", typeid(DTypeOut).name());
+//   printf("m: %d, n: %d, k: %d, l: %d\n", m, n, k, l);
+
+  // x=(batch, In) * W^T=(In, Out)
+  // x=(m,     k)  * W^T=(k,  n)
+  // W=(n, k) row-major or W=(k, n) column-major
   using ElementA = DTypeIn;                   // Element type for A matrix operand
   using LayoutA = cutlass::layout::RowMajor;  // Layout type for A matrix operand
   constexpr int AlignmentA =
