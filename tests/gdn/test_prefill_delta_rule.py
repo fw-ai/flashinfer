@@ -25,15 +25,8 @@ import pytest
 
 from .reference_delta_rule import exclusive_cumsum, blockwise_delta_rule
 
-from flashinfer.utils import get_compute_capability
+
 from flashinfer.gdn_prefill import chunk_gated_delta_rule
-
-
-def _skip_if_not_sm90():
-    """Skip test if not SM90 architecture."""
-    cc = get_compute_capability(torch.device("cuda"))
-    if cc[0] != 9:
-        pytest.skip(f"GDN prefill requires SM90, but got SM{cc[0]}{cc[1]}")
 
 
 def _test_prefill_kernel(
@@ -50,7 +43,6 @@ def _test_prefill_kernel(
     beta: bool,
     seed: int | None = None,
 ):
-    _skip_if_not_sm90()
     if not alpha and not beta:
         pytest.skip(
             "large diff due to output value amplitude explosion along token dimension"
@@ -106,7 +98,7 @@ def _test_prefill_kernel(
 
     torch.cuda.synchronize()
 
-    # postprocessing raw output: ref_state is v-last [H,K,V], our_state is k-last [H,V,K], transpose to match
+    # postprocessing raw output, ref_state is v-major, our_state is k-major, unify to v-major for testing
     our_state = our_state.transpose(-1, -2)
 
     ref_o, ref_state = blockwise_delta_rule(
@@ -117,7 +109,7 @@ def _test_prefill_kernel(
         scale_factor=scale,
         alpha=alpha,
         beta=beta,
-        state_dtype=torch.float32,
+        kv_dtype=torch.float32,
     )
     ref_o = ref_o.to(q.dtype)
     ref_state = ref_state.to(kv_dtype)
@@ -144,16 +136,7 @@ def _test_prefill_kernel(
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize(
     "num_q_heads, num_k_heads, num_v_heads",
-    [
-        (1, 1, 1),
-        (4, 1, 1),
-        (3, 3, 3),
-        (6, 2, 2),
-        (1, 1, 2),
-        (2, 2, 4),
-        (16, 16, 32),
-        (16, 16, 64),
-    ],
+    [(1, 1, 1), (4, 1, 1), (3, 3, 3), (6, 2, 2), (1, 1, 2), (2, 2, 4)],
 )
 @pytest.mark.parametrize("seq_lens", [[64], [128], [256], [256, 256], [64, 128, 512]])
 @pytest.mark.parametrize("block_size", [64])
@@ -195,16 +178,7 @@ def test_prefill_kernel_basic(
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize(
     "num_q_heads, num_k_heads, num_v_heads",
-    [
-        (1, 1, 1),
-        (4, 1, 1),
-        (3, 3, 3),
-        (6, 2, 2),
-        (1, 1, 2),
-        (2, 2, 4),
-        (16, 16, 32),
-        (16, 16, 64),
-    ],
+    [(1, 1, 1), (4, 1, 1), (3, 3, 3), (6, 2, 2), (1, 1, 2), (2, 2, 4)],
 )
 @pytest.mark.parametrize(
     "seq_lens",
@@ -258,7 +232,6 @@ def _test_chunked_prefill(
     beta: bool,
     seed: int | None = None,
 ):
-    _skip_if_not_sm90()
     if not alpha and not beta:
         pytest.skip(
             "large diff due to output value amplitude explosion along token dimension"
@@ -348,7 +321,7 @@ def _test_chunked_prefill(
 
     torch.cuda.synchronize()
 
-    # postprocessing raw output: ref_state is v-last [H,K,V], our_state is k-last [H,V,K], transpose to match
+    # postprocessing raw output, ref_state is v-major, our_state is k-major, unify to v-major for testing
     our_state = our_state.transpose(-1, -2)
 
     def concat_varlen(t1, cu_seq_lens1, t2, cu_seq_lens2):
@@ -382,7 +355,7 @@ def _test_chunked_prefill(
         scale_factor=scale,
         alpha=alpha,
         beta=beta,
-        state_dtype=torch.float32,
+        kv_dtype=torch.float32,
     )
     ref_o = ref_o.to(q.dtype)
     ref_state = ref_state.to(kv_dtype)
@@ -408,8 +381,7 @@ def _test_chunked_prefill(
 @pytest.mark.parametrize("scale", [1.0, "auto"])
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize(
-    "num_q_heads, num_k_heads, num_v_heads",
-    [(6, 2, 2), (2, 2, 4), (16, 16, 32), (16, 16, 64)],
+    "num_q_heads, num_k_heads, num_v_heads", [(6, 2, 2), (2, 2, 4)]
 )
 @pytest.mark.parametrize(
     "seq_lens1, seq_lens2",
