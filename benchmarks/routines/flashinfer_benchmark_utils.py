@@ -53,7 +53,6 @@ output_column_dict = {
         "routed_scaling_factor",
         "local_expert_offset",
         "local_num_experts",
-        "tile_tokens_dim",
         "routing_method",
         "use_shuffled_weight",
         "weight_layout",
@@ -174,14 +173,15 @@ routine_cc_to_supported_backends = {
     },
     "BatchPrefillWithPagedKVCacheWrapper": {
         # NOTE: trtllm-native calls trtllm_batch_context_with_kv_cache
+        # NOTE: cudnn-native calls cudnn_batch_prefill_with_kv_cache
         "7.5": [],
-        "8.0": ["fa2", "cudnn"],
-        "8.6": ["fa2", "cudnn"],
-        "8.9": ["fa2", "cudnn"],
-        "9.0": ["fa2", "fa3", "cudnn"],
-        "10.0": ["fa2", "cudnn", "trtllm-gen", "trtllm-native"],
-        "10.3": ["fa2", "cudnn", "trtllm-gen", "trtllm-native"],
-        "12.0": ["fa2", "cudnn"],
+        "8.0": ["fa2", "cudnn", "cudnn-native"],
+        "8.6": ["fa2", "cudnn", "cudnn-native"],
+        "8.9": ["fa2", "cudnn", "cudnn-native"],
+        "9.0": ["fa2", "fa3", "cudnn", "cudnn-native"],
+        "10.0": ["fa2", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
+        "10.3": ["fa2", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
+        "12.0": ["fa2", "cudnn", "cudnn-native"],
     },
     "BatchPrefillWithRaggedKVCacheWrapper": {
         # NOTE: trtllm-native calls trtllm_ragged_attention_deepseek
@@ -236,17 +236,7 @@ routine_cc_to_supported_backends = {
         "10.3": ["cudnn", "cublas", "cutlass"],
         "12.0": ["cudnn", "cublas"],
     },
-    "mm_fp4": {
-        "7.5": [],
-        "8.0": [],
-        "8.6": [],
-        "8.9": [],
-        "9.0": [],
-        "10.0": ["cudnn", "trtllm", "cutlass"],
-        "10.3": ["cudnn", "trtllm", "cutlass"],
-        "12.0": ["cudnn", "cutlass"],
-        "12.1": ["cudnn", "cutlass"],
-    },
+    # Note: mm_fp4 uses support checkers to filter backends, so it is not listed here
     # MOE
     "trtllm_fp4_block_scale_moe": {
         "7.5": [],

@@ -331,6 +331,12 @@ struct KernelParams {
       strideHeads = options.vStrideHeads;
       strideBatch = options.vStrideBatch;
     }
+
+    // Ragged layout has no batch stride; reset negative overflow to 0 for TMA descriptor.
+    if (!isPagedKv(options.mQkvLayout) && !isContiguousKv(options.mQkvLayout) && strideBatch < 0) {
+      strideBatch = 0;
+    }
+
     // The 3 strides (the other ones are 1 and 0).
     return std::make_tuple(strideKeysVals, strideHeads, strideBatch);
   }
@@ -411,7 +417,7 @@ struct KernelParams {
 
   // Prepare pointers for TMA descriptors.
   static std::tuple<void const*, void const*, void const*> getDevicePtrs(
-      TllmGenFmhaRunnerParams const& runnerParams, int32_t bytesPerElt) {
+      TllmGenFmhaRunnerParams const& runnerParams, int32_t bitsPerElt) {
     // Declare the q, k, v ptrs.
     void const *qPtr{runnerParams.qPtr}, *kPtr{runnerParams.kPtr}, *vPtr{runnerParams.vPtr};
 
@@ -419,11 +425,10 @@ struct KernelParams {
     if (isPackedQkv(runnerParams.mQkvLayout)) {
       qPtr = runnerParams.qkvPtr;
       kPtr = reinterpret_cast<void const*>(reinterpret_cast<char const*>(runnerParams.qkvPtr) +
-                                           runnerParams.mNumHeadsQ * runnerParams.mHeadDimQk *
-                                               bytesPerElt);
+                                           runnerParams.mNumHeadsQ * (runnerParams.mHeadDimQk * bitsPerElt / 8));
       vPtr = reinterpret_cast<void const*>(reinterpret_cast<char const*>(runnerParams.qkvPtr) +
                                            (runnerParams.mNumHeadsQ + runnerParams.mNumHeadsKv) *
-                                               runnerParams.mHeadDimQk * bytesPerElt);
+                                               (runnerParams.mHeadDimQk * bitsPerElt / 8));
     }
     // Set K and V pointer from pagedKv tensor.
     else if (isPagedKv(runnerParams.mQkvLayout)) {
@@ -439,7 +444,7 @@ struct KernelParams {
       int32_t const maxHeadDimKv{std::max(runnerParams.mHeadDimQk, runnerParams.mHeadDimV)};
       vPtr = reinterpret_cast<void const*>(
           reinterpret_cast<char const*>(runnerParams.kvPtr) +
-          runnerParams.mNumHeadsKv * runnerParams.mMaxSeqLenCacheKv * maxHeadDimKv * bytesPerElt);
+          runnerParams.mNumHeadsKv * runnerParams.mMaxSeqLenCacheKv * (maxHeadDimKv * bitsPerElt / 8));
     }
 
     // Return the pointers.
@@ -486,8 +491,8 @@ struct KernelParams {
 
     // Check shape must be in range [1, 2^32]
     int32_t dim = shapes.size();
-    // Max five dimension and min 3 dimension.
-    FLASHINFER_CHECK((dim <= 5) && (dim >= 3));
+    // Max five dimension and min 2 dimension.
+    FLASHINFER_CHECK((dim <= 5) && (dim >= 2));
     // Check shape range.
     for (int32_t ii = 0; ii < dim; ++ii) {
       FLASHINFER_CHECK(shapes[ii] >= (uint64_t(1)));        // Size must be min 1
@@ -549,7 +554,7 @@ struct KernelParams {
     memset(&params, 0, sizeof(KernelParams));
 
     // Get the device pointers for TMA descriptors.
-    auto [qPtr, kPtr, vPtr] = getDevicePtrs(options, get_size_in_bytes(kernelMeta.mDataTypeKv));
+    auto [qPtr, kPtr, vPtr] = getDevicePtrs(options, get_size_in_bits(kernelMeta.mDataTypeKv));
 
     // The maximum headDim of K and V.
     // Note that contiguousKv or pagedKv will pad K and V to maxHeadDimKv.
@@ -597,6 +602,16 @@ struct KernelParams {
     std::vector<uint32_t> tileShapeKv(shapeK.size(), 1);
     tileShapeKv[0] = numEltsInClampedHeadDimKv / numEltsDivisor;
     tileShapeKv[1] = numKeysPerTile;
+
+    // If sparse MLA is enabled, the shape and stride for K need to be updated for 2D layout
+    // (numTokensKvInPagedKv, headDimQk).
+    if (options.mSparseMla) {
+      shapeK = std::vector<uint64_t>{static_cast<uint64_t>(options.mHeadDimQk),
+                                     static_cast<uint64_t>(INT_MAX)};
+      strideK = std::vector<uint64_t>{1, static_cast<uint64_t>(options.mHeadDimQk)};
+      tileShapeKv[1] = 1;
+    }
+
     // Build tma descriptor for K.
     params.tmaK_ = buildNdTmaDescriptor(options, kernelMeta.mDataTypeKv, shapeK, strideK,
                                         tileShapeKv, const_cast<void*>(kPtr),
@@ -715,12 +730,16 @@ struct KernelParams {
     params.mNumHeadsKv = options.mNumHeadsKv;
     params.mNumHeadsQPerKv = options.mNumHeadsQPerKv;
     params.mNumHiddenEltsO = options.mNumHeadsQ * options.mHeadDimQk;
-    // todo(Yingyi): might take a scalar tensor later
     params.mOutputScale = options.outputScale;
     params.mScaleSoftmaxLog2 = options.scaleSoftmaxLog2;
     params.mStartTokenIdxSfO = options.mSfStartTokenIdx;
     params.mScaleSfKv = options.mScaleSfKv;
     params.ptrSoftmaxStats = options.softmaxStatsPtr;
+    // The sparseMlaTopK needs to be a multiple of 4 as we use 16B cpAsync instructions for the
+    // indices.
+    FLASHINFER_CHECK(!options.mSparseMla || (options.mSparseMlaTopK % 4) == 0,
+                     "SparseMlaTopK must be a multiple of 4");
+    params.mSparseMlaTopK = options.mSparseMlaTopK;
     // TODO: Integrate trtllm block-sparse attention kernels when needed.
     params.mUseBlockSparseAttention = false;
     return params;

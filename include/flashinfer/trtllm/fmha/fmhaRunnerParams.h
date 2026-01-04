@@ -225,6 +225,9 @@ struct TllmGenFmhaRunnerParams {
   // The LSE buffer.
   float* lsePtr;
 
+  int lseStrideTokens;
+  int lseStrideHeads;
+
   // Attention sink
   float const* ptrAttentionSinks{nullptr};
   // The output buffer.
@@ -287,6 +290,10 @@ struct TllmGenFmhaRunnerParams {
   float mScaleSfKv;
   // The SF scale for output.
   float mScaleSfO;
+  // Whether to use sparse MLA.
+  bool mSparseMla;
+  // The top k value for sparse MLA.
+  int mSparseMlaTopK;
   // The cuda stream.
   cudaStream_t stream;
   // Whether to enable PDL (Programmatic Dependent Launch).

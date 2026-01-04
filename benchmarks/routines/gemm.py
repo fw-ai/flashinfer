@@ -131,7 +131,7 @@ def parse_gemm_args(line, parser):
         required=False,
         nargs="+",
         default=["cudnn"],
-        choices=["cudnn", "cublas", "trtllm", "cutlass"],
+        choices=["cudnn", "cublas", "trtllm", "cutlass", "auto"],
         help="Kernel backends to test. Default: cudnn",
     )
     parser.add_argument(
@@ -262,7 +262,7 @@ def testGemmFp8NtGroupwise(args):
     a_dequant = dequantize_fp8(a_fp8, a_scale, scale_major_mode)
     b_dequant = dequantize_fp8(b_fp8, b_scale, scale_major_mode)
 
-    def run_backend(backend):
+    def run_backend(backend, a_fp8, b_fp8, a_scale, b_scale):
         if backend in ["cutlass", "trtllm"]:
             return flashinfer.gemm.gemm_fp8_nt_groupwise(
                 a=a_fp8,
@@ -287,17 +287,18 @@ def testGemmFp8NtGroupwise(args):
     outputs = {}
     for cur_backend in backends:
         if run_refcheck:
-            outputs[cur_backend] = run_backend(cur_backend).detach()
+            outputs[cur_backend] = run_backend(
+                cur_backend, a_fp8, b_fp8, a_scale, b_scale
+            ).detach()
         backend_times[cur_backend] = bench_gpu_time(
-            fn=lambda: run_backend(cur_backend),
+            fn=run_backend,
             dry_run_iters=args.dry_run_iters,
             repeat_iters=args.num_iters,
-            l2_flush=True,
-            l2_flush_size_mb=256,
-            l2_flush_device=device,
             sleep_after_run=True,  # GEMMs are very MMA-heavy, so prefer sleep to reduce throttling.
             enable_cupti=args.use_cupti,
             use_cuda_graph=is_cuda_graph_compatible,
+            cold_l2_cache=True,
+            input_args=(cur_backend, a_fp8, b_fp8, a_scale, b_scale),
         )
 
     tested_backends = list(outputs.keys())
@@ -438,7 +439,7 @@ def testGroupGemmFp8NtGroupwise(args):
         print(f"[VVERBOSE] {b_scale.shape = }")
         print(f"[VVERBOSE] {m_indptr.shape = }")
 
-    def run_backend(backend):
+    def run_backend(backend, a_fp8, b_fp8, a_scale, b_scale, m_indptr):
         if backend == "cutlass":
             return flashinfer.gemm.group_gemm_fp8_nt_groupwise(
                 a=a_fp8,
@@ -469,17 +470,18 @@ def testGroupGemmFp8NtGroupwise(args):
     outputs = {}
     for cur_backend in backends:
         if run_refcheck:
-            outputs[cur_backend] = run_backend(cur_backend).detach()
+            outputs[cur_backend] = run_backend(
+                cur_backend, a_fp8, b_fp8, a_scale, b_scale, m_indptr
+            ).detach()
         backend_times[cur_backend] = bench_gpu_time(
-            fn=lambda: run_backend(cur_backend),
+            fn=run_backend,
             dry_run_iters=args.dry_run_iters,
             repeat_iters=args.num_iters,
-            l2_flush=True,
-            l2_flush_size_mb=256,
-            l2_flush_device=device,
             sleep_after_run=True,  # GEMMs are very MMA-heavy, so prefer sleep to reduce throttling.
             enable_cupti=args.use_cupti,
             use_cuda_graph=is_cuda_graph_compatible,
+            cold_l2_cache=True,
+            input_args=(cur_backend, a_fp8, b_fp8, a_scale, b_scale, m_indptr),
         )
 
     tested_backends = list(outputs.keys())
@@ -637,7 +639,7 @@ def testBmmFp8(args):
         print(f"[VVERBOSE] {mat2_inv_s = }")
         print(f"[VVERBOSE] {mat2_inv_s.dtype = }")
 
-    def run_backend(backend):
+    def run_backend(backend, input_fp8, mat2_fp8, input_inv_s, mat2_inv_s):
         if backend in ["cudnn", "cublas", "cutlass"]:
             return flashinfer.gemm.bmm_fp8(
                 A=input_fp8,
@@ -665,24 +667,27 @@ def testBmmFp8(args):
                     print(f"[INFO] Autotune warmup for bmm_fp8: {warmup_iters} iters")
                 with autotune(True):
                     for _ in range(warmup_iters):
-                        run_backend(cur_backend)
+                        run_backend(
+                            cur_backend, input_fp8, mat2_fp8, input_inv_s, mat2_inv_s
+                        )
 
     # Storage for timing results and outputs
     backend_times = {backend: [] for backend in backends}
     outputs = {}
     for cur_backend in backends:
         if run_refcheck:
-            outputs[cur_backend] = run_backend(cur_backend).detach()
+            outputs[cur_backend] = run_backend(
+                cur_backend, input_fp8, mat2_fp8, input_inv_s, mat2_inv_s
+            ).detach()
         backend_times[cur_backend] = bench_gpu_time(
-            fn=lambda: run_backend(cur_backend),
+            fn=run_backend,
             dry_run_iters=args.dry_run_iters,
             repeat_iters=args.num_iters,
-            l2_flush=True,
-            l2_flush_size_mb=256,
-            l2_flush_device=device,
             sleep_after_run=True,
             enable_cupti=args.use_cupti,
             use_cuda_graph=is_cuda_graph_compatible,
+            cold_l2_cache=True,
+            input_args=(cur_backend, input_fp8, mat2_fp8, input_inv_s, mat2_inv_s),
         )
 
     tested_backends = list(outputs.keys())
@@ -790,61 +795,14 @@ def testMmFp4(args):
     run_refcheck = args.refcheck
     use_128x4_sf_layout = args.use_128x4_sf_layout
     use_nvfp4 = args.use_nvfp4
-    autotune_supported_backends = ["cutlass", "trtllm"]
+    autotune_supported_backends = ["cudnn", "cutlass", "trtllm", "auto"]
     res = []
-
-    backends = filter_backends_by_compute_capability(backends, args.routine, device)
 
     res_dtype = dtype_str_to_torch_dtype(args.out_dtype)
     if res_dtype not in [torch.bfloat16, torch.float16]:
         raise ValueError(
             f"Unsupported res dtype: {res_dtype}. Supported dtypes are bfloat16 and float16."
         )
-    ## Done parsing input arguments
-
-    if "trtllm" in backends:
-        remove_trtllm = False
-        if res_dtype == torch.float16:
-            print("[INFO] trtllm backend does not support float16 output")
-            remove_trtllm = True
-        if remove_trtllm:
-            backends.remove("trtllm")
-        if not use_nvfp4:
-            print(
-                "[INFO] trtllm backend does not support mxfp4 quantization (use_nvfp4=False)"
-            )
-            backends.remove("trtllm")
-    if "cutlass" in backends:
-        remove_cutlass = False
-        if not use_128x4_sf_layout:
-            print("[INFO] cutlass backend does not support use_128x4_sf_layout=False")
-            remove_cutlass = True
-        if not use_nvfp4:
-            print(
-                "[INFO] cutlass backend does not support mxfp4 quantization (use_nvfp4=False)"
-            )
-            backends.remove("cutlass")
-        if remove_cutlass:
-            backends.remove("cutlass")
-    if "cudnn" in backends:
-        remove_cudnn = False
-        if not use_128x4_sf_layout:
-            print("[INFO] cudnn backend does not support use_128x4_sf_layout=False")
-            remove_cudnn = True
-        if remove_cudnn:
-            backends.remove("cudnn")
-    if getattr(args, "autotune", False):
-        backends_to_remove = []
-        for cur_backend in backends:
-            if cur_backend not in autotune_supported_backends:
-                print(f"[INFO] {cur_backend} backend does not support autotune")
-                backends_to_remove.append(cur_backend)
-        for cur_backend in backends_to_remove:
-            backends.remove(cur_backend)
-
-    if len(backends) == 0:
-        print("[ERROR] No backends to test. Exiting.")
-        return
 
     input = torch.randn([m, k], device=device, dtype=torch.bfloat16)
     mat2 = torch.randn([n, k], device=device, dtype=torch.bfloat16)
@@ -886,11 +844,22 @@ def testMmFp4(args):
         print(f"[VVERBOSE] {mat2_fp4.dtype = }")
 
     alpha = 1.0 / (global_sf_input * global_sf_mat2) if use_nvfp4 else None
-    # res = torch.empty([m, n], device="cuda", dtype=res_dtype)
+    # Completed preparing inputs. Now programmatically filter backends
+    block_size = 16 if use_nvfp4 else 32
+    backends_to_remove = []
 
-    def run_backend(backend):
-        if backend in ["cudnn", "trtllm", "cutlass"]:
-            return flashinfer.gemm.mm_fp4(
+    for backend in backends:
+        # Skip autotune check for now (handled separately below)
+        if (
+            getattr(args, "autotune", False)
+            and backend not in autotune_supported_backends
+        ):
+            print(f"[INFO] {backend} backend does not support autotune")
+            backends_to_remove.append(backend)
+            continue
+
+        try:
+            flashinfer.gemm.mm_fp4(
                 a=input_fp4,
                 b=mat2_fp4.T if backend != "trtllm" else mat2_fp4_trtllm.T,
                 a_descale=input_inv_s,
@@ -900,6 +869,42 @@ def testMmFp4(args):
                 block_size=16
                 if use_nvfp4
                 else 32,  # nvfp4 only supports 16; mxfp4 only supports 32.
+                use_8x4_sf_layout=not use_128x4_sf_layout,
+                backend=backend,
+                use_nvfp4=use_nvfp4,
+            )
+        except Exception as e:
+            print(
+                f"[INFO] {backend} backend does not support this configuration: {type(e).__name__}: {e}"
+            )
+            backends_to_remove.append(backend)
+
+    # Remove unsupported backends
+    for backend in backends_to_remove:
+        backends.remove(backend)
+
+    if len(backends) == 0:
+        print("[ERROR] No backends passed validation. Exiting.")
+        return
+
+    def run_backend(
+        backend,
+        input_fp4,
+        mat2_fp4,
+        mat2_fp4_trtllm,
+        input_inv_s,
+        mat2_inv_s,
+        mat2_inv_s_trtllm,
+    ):
+        if backend in ["cudnn", "trtllm", "cutlass", "auto"]:
+            return flashinfer.gemm.mm_fp4(
+                a=input_fp4,
+                b=mat2_fp4.T if backend != "trtllm" else mat2_fp4_trtllm.T,
+                a_descale=input_inv_s,
+                b_descale=mat2_inv_s.T if backend != "trtllm" else mat2_inv_s_trtllm.T,
+                alpha=alpha,
+                out_dtype=res_dtype,
+                block_size=block_size,
                 use_8x4_sf_layout=not use_128x4_sf_layout,
                 backend=backend,
                 use_nvfp4=use_nvfp4,
@@ -917,29 +922,51 @@ def testMmFp4(args):
             args.dry_run_iters if args.dry_run_iters and args.dry_run_iters > 0 else 10
         )
         for cur_backend in backends:
-            if cur_backend in autotune_supported_backends:
-                if args.verbose >= 1:
-                    print(f"[INFO] Autotune warmup for mm_fp4: {warmup_iters} iters")
-                with autotune(True):
-                    for _ in range(warmup_iters):
-                        run_backend(cur_backend)
+            if args.verbose >= 1:
+                print(f"[INFO] Autotune warmup for mm_fp4: {warmup_iters} iters")
+            with autotune(True):
+                for _ in range(warmup_iters):
+                    run_backend(
+                        cur_backend,
+                        input_fp4,
+                        mat2_fp4,
+                        mat2_fp4_trtllm,
+                        input_inv_s,
+                        mat2_inv_s,
+                        mat2_inv_s_trtllm,
+                    )
 
     # Storage for timing results and outputs
     backend_times = {backend: [] for backend in backends}
     outputs = {}
     for cur_backend in backends:
         if run_refcheck:
-            outputs[cur_backend] = run_backend(cur_backend).detach()
+            outputs[cur_backend] = run_backend(
+                cur_backend,
+                input_fp4,
+                mat2_fp4,
+                mat2_fp4_trtllm,
+                input_inv_s,
+                mat2_inv_s,
+                mat2_inv_s_trtllm,
+            ).detach()
         backend_times[cur_backend] = bench_gpu_time(
-            fn=lambda: run_backend(cur_backend),
+            fn=run_backend,
             dry_run_iters=args.dry_run_iters,
             repeat_iters=args.num_iters,
-            l2_flush=True,
-            l2_flush_size_mb=256,
-            l2_flush_device=device,
             sleep_after_run=True,
             enable_cupti=args.use_cupti,
             use_cuda_graph=is_cuda_graph_compatible,
+            cold_l2_cache=True,
+            input_args=(
+                cur_backend,
+                input_fp4,
+                mat2_fp4,
+                mat2_fp4_trtllm,
+                input_inv_s,
+                mat2_inv_s,
+                mat2_inv_s_trtllm,
+            ),
         )
 
     tested_backends = list(outputs.keys())

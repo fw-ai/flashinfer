@@ -100,6 +100,7 @@ from .page import append_paged_mla_kv_cache as append_paged_mla_kv_cache
 from .page import get_batch_indices_positions as get_batch_indices_positions
 from .page import get_seq_lens as get_seq_lens
 from .pod import PODWithPagedKVCacheWrapper as PODWithPagedKVCacheWrapper
+from .pod import BatchPODWithPagedKVCacheWrapper as BatchPODWithPagedKVCacheWrapper
 from .prefill import (
     BatchPrefillWithPagedKVCacheWrapper as BatchPrefillWithPagedKVCacheWrapper,
 )
@@ -140,6 +141,8 @@ from .sampling import (
 from .sampling import top_k_top_p_sampling_from_probs as top_k_top_p_sampling_from_probs
 from .sampling import top_p_renorm_probs as top_p_renorm_probs
 from .sampling import top_p_sampling_from_probs as top_p_sampling_from_probs
+from . import topk as topk
+from .topk import top_k as top_k
 from .sparse import BlockSparseAttentionWrapper as BlockSparseAttentionWrapper
 from .sparse import (
     VariableBlockSparseAttentionWrapper as VariableBlockSparseAttentionWrapper,

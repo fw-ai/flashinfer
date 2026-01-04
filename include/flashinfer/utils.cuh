@@ -21,6 +21,7 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+#include <atomic>
 #include <cstdint>
 #include <iostream>
 #include <type_traits>
@@ -201,6 +202,52 @@
     }                                                  \
   }
 
+// convert interleave to compile-time constant
+#define DISPATCH_INTERLEAVE(interleave, INTERLEAVE, ...) \
+  if (interleave) {                                      \
+    constexpr bool INTERLEAVE = true;                    \
+    __VA_ARGS__                                          \
+  } else {                                               \
+    constexpr bool INTERLEAVE = false;                   \
+    __VA_ARGS__                                          \
+  }
+
+#define DISPATCH_ROPE_DIM(rope_dim, ROPE_DIM, ...)           \
+  switch (rope_dim) {                                        \
+    case 16: {                                               \
+      constexpr uint32_t ROPE_DIM = 16;                      \
+      __VA_ARGS__                                            \
+      break;                                                 \
+    }                                                        \
+    case 32: {                                               \
+      constexpr uint32_t ROPE_DIM = 32;                      \
+      __VA_ARGS__                                            \
+      break;                                                 \
+    }                                                        \
+    case 64: {                                               \
+      constexpr uint32_t ROPE_DIM = 64;                      \
+      __VA_ARGS__                                            \
+      break;                                                 \
+    }                                                        \
+    case 128: {                                              \
+      constexpr uint32_t ROPE_DIM = 128;                     \
+      __VA_ARGS__                                            \
+      break;                                                 \
+    }                                                        \
+    case 256: {                                              \
+      constexpr uint32_t ROPE_DIM = 256;                     \
+      __VA_ARGS__                                            \
+      break;                                                 \
+    }                                                        \
+    default: {                                               \
+      std::ostringstream err_msg;                            \
+      err_msg << "Unsupported ROPE_DIM: " << rope_dim;       \
+      err_msg << ". Supported values: 16, 32, 64, 128, 256"; \
+      err_msg << " in DISPATCH_ROPE_DIM";                    \
+      FLASHINFER_ERROR(err_msg.str());                       \
+    }                                                        \
+  }
+
 #define DISPATCH_POS_ENCODING_MODE(pos_encoding_mode, POS_ENCODING_MODE, ...)    \
   switch (pos_encoding_mode) {                                                   \
     case PosEncodingMode::kNone: {                                               \
@@ -271,13 +318,18 @@
 namespace flashinfer {
 
 template <typename T1, typename T2>
-__forceinline__ __device__ __host__ T1 ceil_div(const T1 x, const T2 y) {
+__forceinline__ __device__ __host__ constexpr T1 ceil_div(const T1 x, const T2 y) noexcept {
   return (x + y - 1) / y;
 }
 
 template <typename T1, typename T2>
-__forceinline__ __device__ __host__ T1 round_up(const T1 x, const T2 y) {
+__forceinline__ __device__ __host__ constexpr T1 round_up(const T1 x, const T2 y) noexcept {
   return ceil_div(x, y) * y;
+}
+
+template <typename T1, typename T2>
+__forceinline__ __device__ __host__ constexpr T1 round_down(const T1 x, const T2 y) noexcept {
+  return (x / y) * y;
 }
 
 inline std::pair<int, int> GetCudaComputeCapability() {
@@ -287,6 +339,22 @@ inline std::pair<int, int> GetCudaComputeCapability() {
   cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device_id);
   cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device_id);
   return std::make_pair(major, minor);
+}
+
+// This function is thread-safe and cached the sm_count.
+// But it will only check the current CUDA device, thus assuming each process handles single GPU.
+inline int GetCudaMultiProcessorCount() {
+  static std::atomic<int> sm_count{0};
+  int cached = sm_count.load(std::memory_order_relaxed);
+  if (cached == 0) {
+    int device_id;
+    cudaGetDevice(&device_id);
+    cudaDeviceProp device_prop;
+    cudaGetDeviceProperties(&device_prop, device_id);
+    cached = device_prop.multiProcessorCount;
+    sm_count.store(cached, std::memory_order_relaxed);
+  }
+  return cached;
 }
 
 template <typename T>
