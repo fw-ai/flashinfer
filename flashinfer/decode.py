@@ -1040,20 +1040,14 @@ class BatchDecodeWithPagedKVCacheWrapper:
                 self._cached_module = self._jit_module
             else:
                 if self._backend == "auto":
-                    if {
-                        torch.float8_e4m3fn,
-                        torch.float8_e5m2,
-                    } & {q_data_type, kv_data_type}:
-                        self._backend = determine_attention_backend(
-                            self.device,
-                            PosEncodingMode[pos_encoding_mode].value,
-                            False,  # use_fp16_qk_reductions
-                            False,  # use_custom_mask
-                            q_data_type,
-                            kv_data_type,
-                        )
-                    else:
-                        self._backend = "fa2"
+                    self._backend = determine_attention_backend(
+                        self.device,
+                        PosEncodingMode[pos_encoding_mode].value,
+                        False,  # use_fp16_qk_reduction
+                        False,  # use_custom_mask
+                        q_data_type,
+                        kv_data_type,
+                    )
                 self._cached_module = get_batch_prefill_module(
                     self._backend,
                     q_data_type,
@@ -1085,9 +1079,13 @@ class BatchDecodeWithPagedKVCacheWrapper:
                 head_dim,
                 False,  # causal
                 window_left,
-                fixed_split_size,
-                disable_split_kv,
-                0,  # num_colocated_ctas
+            ]
+            if self._backend == "fa2":
+                args.append(fixed_split_size)
+                args.append(disable_split_kv)
+                args.append(0)  # num_colocated_ctas
+            self._plan_info = self._cached_module.plan(
+                *args,
             )
         else:
             if self._jit_module is not None:
@@ -2687,8 +2685,8 @@ def fast_decode_plan(
             kv_lens_arr_host = get_seq_lens(indptr_host, last_page_len_host, page_size)
 
             try:
-                # Make sure we pass exactly 16 arguments for tensor core version
-                self._plan_info = self._cached_module.plan(
+                # Make sure we pass exactly 19 arguments for fa2 backend and 16 arguments for fa3 backend
+                args = [
                     self._float_workspace_buffer,
                     self._int_workspace_buffer,
                     self._pin_memory_int_workspace_buffer,
@@ -2705,9 +2703,13 @@ def fast_decode_plan(
                     head_dim,
                     False,  # causal
                     window_left,
-                    fixed_split_size,
-                    disable_split_kv,
-                    0,  # num_colocated_ctas
+                ]
+                if self._backend == "fa2":
+                    args.append(fixed_split_size)
+                    args.append(disable_split_kv)
+                    args.append(0)  # num_colocated_ctas
+                self._plan_info = self._cached_module.plan(
+                    *args,
                 )
             except Exception as e:
                 raise RuntimeError(f"Error in standard plan: {e}") from e

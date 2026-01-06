@@ -1719,7 +1719,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
             The data type of the key/value tensor. If None, will be set to :attr:`q_data_type`.
         o_data_type : Optional[Union[str, torch.dtype]]
             The data type of the output tensor. If None, will be set to :attr:`q_data_type`.
-            For FP8 inputs, this should typically be set to torch.float16.
+            For FP8 inputs, this should typically be set to torch.float16 or torch.bfloat16.
         non_blocking : bool
             Whether to copy the input tensors to the device asynchronously, defaults to ``True``.
         prefix_len_ptr :Optional[torch.Tensor]
@@ -2696,7 +2696,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             The data type of the key/value tensor. If None, will be set to :attr:`q_data_type`.
         o_data_type : Optional[Union[str, torch.dtype]]
             The data type of the output tensor. If None, will be set to :attr:`q_data_type`.
-            For FP8 inputs, this should typically be set to torch.float16.
+            For FP8 inputs, this should typically be set to torch.float16 or torch.bfloat16.
         non_blocking : bool
             Whether to copy the input tensors to the device asynchronously, defaults to ``True``.
         prefix_len_ptr :Optional[torch.Tensor]
