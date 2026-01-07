@@ -92,25 +92,51 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
       decltype(ScaleConfig::deduce_layoutSFA());  // Layout type for SFA matrix operand
   using LayoutSFB =
       decltype(ScaleConfig::deduce_layoutSFB());  // Layout type for SFB matrix operand
+//   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+//       cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp,
+//       /*TileShapeMNK=*/MmaTileShape_MNK, /*ClusterShape=*/ClusterShape_MNK,
+//       /*EpilogueTileType=*/cutlass::epilogue::collective::EpilogueTileAuto,
+//       ElementAccumulator, ElementCompute,
+//       ElementC,/*GemmLayoutTagC=*/LayoutC, AlignmentC,
+//       ElementD, /*GemmLayoutTagD=*/LayoutC, AlignmentD,
+//       /*EpilogueScheduleType=*/cutlass::epilogue::collective::EpilogueScheduleAuto
+//     >::CollectiveOp;
   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-      cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp,
-      /*TileShapeMNK=*/MmaTileShape_MNK, /*ClusterShape=*/ClusterShape_MNK,
-      /*EpilogueTileType=*/cutlass::epilogue::collective::EpilogueTileAuto,
-      ElementAccumulator, ElementCompute,
-      ElementC,/*GemmLayoutTagC=*/LayoutC, AlignmentC,
-      ElementD, /*GemmLayoutTagD=*/LayoutC, AlignmentD,
-      /*EpilogueScheduleType=*/cutlass::epilogue::collective::EpilogueScheduleAuto
+    cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp,
+    cute::Shape<cute::_64, cute::_8, cute::_128>,
+    cute::Shape<int, int, cute::_1>,
+    cutlass::epilogue::collective::EpilogueTileAuto,
+    float, float,
+    ElementC, cutlass::layout::RowMajor, 8,
+    ElementD, cutlass::layout::RowMajor, 8,
+    cutlass::epilogue::TmaWarpSpecialized1Sm,
+    cutlass::epilogue::fusion::LinearCombination<
+        ElementD,
+        float,
+        ElementD,
+        float
+    >
     >::CollectiveOp;
 
+//   using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
+//       /*ArchTag=*/cutlass::arch::Sm100, /*OpClass=*/cutlass::arch::OpClassTensorOp,
+//       ElementA,/*GemmLayoutA=*/cute::tuple<LayoutA, LayoutSFA>, AlignmentA,
+//       ElementB, /*GemmLayoutB=*/cute::tuple<LayoutB, LayoutSFB>, AlignmentB,
+//       ElementAccumulator,
+//       /*TileShapeMNK=*/MmaTileShape_MNK, ClusterShape_MNK,
+//       /*StageCountType=*/cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+//           sizeof(typename CollectiveEpilogue::SharedStorage))>,
+//       /*KernelScheduleType=*/cutlass::gemm::KernelScheduleSm100Blockwise
+//     >::CollectiveOp;
   using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-      /*ArchTag=*/cutlass::arch::Sm100, /*OpClass=*/cutlass::arch::OpClassTensorOp,
-      ElementA,/*GemmLayoutA=*/cute::tuple<LayoutA, LayoutSFA>, AlignmentA,
-      ElementB, /*GemmLayoutB=*/cute::tuple<LayoutB, LayoutSFB>, AlignmentB,
-      ElementAccumulator,
-      /*TileShapeMNK=*/MmaTileShape_MNK, ClusterShape_MNK,
-      /*StageCountType=*/cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-          sizeof(typename CollectiveEpilogue::SharedStorage))>,
-      /*KernelScheduleType=*/cutlass::gemm::KernelScheduleSm100Blockwise
+        cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp,
+        ElementA, cutlass::layout::RowMajor, 16,
+        ElementB, cutlass::layout::ColumnMajor, 16,
+        float,
+        cute::Shape<cute::_64, cute::_8, cute::_128>,
+        cute::Shape<int, int, cute::_1>,
+        cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+        cutlass::gemm::KernelTmaWarpSpecialized1SmSm100
     >::CollectiveOp;
 
   using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
@@ -146,10 +172,10 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
                                          stride_A,
                                          B_ptr,
                                          stride_B,
-                                         SFA_ptr,
-                                         layout_SFA,
-                                         SFB_ptr,
-                                         layout_SFB,
+                                        //  SFA_ptr,
+                                        //  layout_SFA,
+                                        //  SFB_ptr,
+                                        //  layout_SFB,
                                      },
                                      {
                                          {},  // epilogue.thread
@@ -169,6 +195,7 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
   auto workspace_ptr = float_allocator.aligned_alloc<void>(workspace_size, 16,
                                                            "sm100_groupwise_gemm_float_workspace");
 
+  // printf("testing...\n");
   CUTLASS_CHECK(gemm.can_implement(arguments));
   CUTLASS_CHECK(gemm.initialize(arguments, workspace_ptr));
   CUTLASS_CHECK(gemm.run(stream));
