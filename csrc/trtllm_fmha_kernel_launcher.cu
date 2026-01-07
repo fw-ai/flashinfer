@@ -261,7 +261,7 @@ void trtllm_paged_attention_decode(
   // Assume NHD layout: [..., H, N, D]
   int page_size = key_cache.size(-2);
   int num_kv_heads = key_cache.size(-3);
-  kv_stride_keys_values = key_cache.stride(-2);  // key/values
+  int kv_stride_keys_values = key_cache.stride(-2);  // key/values
   int kv_stride_heads = key_cache.stride(-3);    // head
   int kv_stride_batch = key_cache.stride(0);     // batch
 
@@ -334,8 +334,8 @@ void trtllm_paged_attention_decode(
       page_size, q_stride_tokens, q_stride_heads, kv_stride_keys_values, kv_stride_heads,
       kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
       bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left,
-      sum_seq_q, sparse_mla_top_k, lse_ptr, lse_stride_tokens, lse_stride_heads, sm_count,
-      enable_pdl, workspace_size, stream);
+      sum_seq_q, sparse_mla_top_k, sm_count, enable_pdl, workspace_size, lse_ptr, lse_stride_tokens,
+      lse_stride_heads, stream);
 }
 
 void trtllm_paged_attention_context(
@@ -371,7 +371,7 @@ void trtllm_paged_attention_context(
   // Assume NHD layout: [..., H, N, D]
   int page_size = key_cache.size(-2);
   int num_kv_heads = key_cache.size(-3);
-  kv_stride_keys_values = key_cache.stride(-2);  // key/values
+  int kv_stride_keys_values = key_cache.stride(-2);  // key/values
   int kv_stride_heads = key_cache.stride(-3);    // head
   int kv_stride_batch = key_cache.stride(0);     // batch
 
@@ -446,8 +446,8 @@ void trtllm_paged_attention_context(
       q_stride_heads, kv_stride_keys_values, kv_stride_heads, kv_stride_batch,
       max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value, bmm1_scale_log2_ptr,
       bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left, sum_seq_q,
-      /*sparse_mla_top_k=*/0, lse_ptr, lse_stride_tokens, lse_stride_heads, sm_count, enable_pdl,
-      workspace_size, stream);
+      /*sparse_mla_top_k=*/0, sm_count, enable_pdl, workspace_size, lse_ptr, lse_stride_tokens,
+      lse_stride_heads, stream);
 }
 
 void trtllm_ragged_attention_launcher(
