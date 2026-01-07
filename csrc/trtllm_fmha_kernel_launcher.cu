@@ -286,7 +286,7 @@ void trtllm_paged_attention_decode(TensorView out, Optional<TensorView> out_scal
   int num_kv_heads = key_cache.size(-3);
   int kv_stride_keys_values = key_cache.stride(-2);  // key/values
   int kv_stride_heads = key_cache.stride(-3);        // head
-  int kv_stride_batch = key_cache.stride(0);  // batch
+  int kv_stride_batch = key_cache.stride(0);         // batch
 
   if (is_4bit(kv_data_type)) {
     kv_stride_keys_values *= 2;
