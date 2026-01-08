@@ -364,6 +364,7 @@ def get_trtllm_comm_module():
         eps: float,
         shared_expert_output: Optional[torch.Tensor],
         expert_scale_factor: Optional[torch.Tensor],
+        routing_scaling_factor: Optional[float],
     ) -> None:
         module.trtllm_moe_finalize_allreduce_fusion(
             allreduce_in,
@@ -379,6 +380,7 @@ def get_trtllm_comm_module():
             eps,
             shared_expert_output,
             expert_scale_factor,
+            routing_scaling_factor,
         )
 
     return SimpleNamespace(
@@ -1098,6 +1100,7 @@ def trtllm_moe_finalize_allreduce_fusion(
     eps: float,
     shared_expert_output: Optional[torch.Tensor],
     expert_scale_factor: Optional[torch.Tensor],
+    routing_scaling_factor: Optional[float] = None,
 ) -> None:
     """
     Parameters:
@@ -1114,6 +1117,7 @@ def trtllm_moe_finalize_allreduce_fusion(
     - eps: the epsilon value.
     - shared_expert_output: the shared expert output tensor. [token_num, hidden_dim]
     - expert_scale_factor: the expert scale factor tensor. [token_num, top_k]
+    - routing_scaling_factor: optional scalar multiplier applied to routing scores.
     """
 
     required_lamport_comm_size = allreduce_in.numel() * 2 * world_size
@@ -1138,4 +1142,5 @@ def trtllm_moe_finalize_allreduce_fusion(
         eps=eps,
         shared_expert_output=shared_expert_output,
         expert_scale_factor=expert_scale_factor,
+        routing_scaling_factor=routing_scaling_factor,
     )
