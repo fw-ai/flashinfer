@@ -183,7 +183,19 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
                                          stride_C,
                                          C_ptr,
                                          stride_C,
-                                     }};
+                                     },
+                                     // KernelHardwareInfo
+                                     []() {
+                                       auto hw_info = cutlass::KernelHardwareInfo::make_kernel_hardware_info<GemmKernel>();
+                                       hw_info.cluster_shape = {2, 2, 1};
+                                       hw_info.cluster_shape_fallback = {1, 1, 1};
+                                       return hw_info;
+                                     }(),
+                                     {
+                                      .max_swizzle_size = 1,
+                                      .raster_order = cutlass::gemm::kernel::detail::RasterOrderOptions::AlongN,
+                                     }
+                                    };
   auto& fusion_args = arguments.epilogue.thread;
   fusion_args.alpha = 1.0f;
   fusion_args.beta = 0.0f;
