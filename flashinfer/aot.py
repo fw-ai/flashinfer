@@ -41,8 +41,10 @@ from .jit.fp4_quantization import (
     gen_fp4_quantization_sm121_module,
 )
 from .jit.fp8_quantization import gen_mxfp8_quantization_sm100_module
+from .jit.gdn import gen_gdn_prefill_sm90_module
 from .jit.fused_moe import (
     gen_cutlass_fused_moe_sm120_module,
+    gen_cutlass_fused_moe_sm103_module,
     gen_cutlass_fused_moe_sm100_module,
     gen_cutlass_fused_moe_sm90_module,
     gen_trtllm_gen_fused_moe_sm100_module,
@@ -66,6 +68,7 @@ from .jit.page import gen_page_module
 from .jit.quantization import gen_quantization_module
 from .jit.rope import gen_rope_module
 from .jit.sampling import gen_sampling_module
+from .jit.topk import gen_topk_module
 from .jit.tllm_utils import gen_trtllm_utils_module
 from .jit.xqa import gen_xqa_module, gen_xqa_module_mla
 from .jit.attention import (
@@ -495,6 +498,7 @@ def gen_all_modules(
             jit_specs.append(gen_tgv_gemm_sm10x_module(torch.float16, use_sm_100f=True))
         if has_sm103:
             jit_specs.append(gen_fp4_quantization_sm103_module())
+            jit_specs.append(gen_cutlass_fused_moe_sm103_module())
         if has_sm110:
             jit_specs.append(gen_fp4_quantization_sm110_module())
         if has_sm120:
@@ -510,12 +514,14 @@ def gen_all_modules(
         from .jit.comm import gen_nvshmem_module
         from .jit.comm import gen_comm_alltoall_module
         from .jit.comm import gen_trtllm_mnnvl_comm_module
+        from .jit.comm import gen_moe_alltoall_module
 
         jit_specs.append(gen_nvshmem_module())
         jit_specs.append(gen_comm_alltoall_module())
         if has_sm100:
             jit_specs.append(gen_trtllm_comm_module())
             jit_specs.append(gen_trtllm_mnnvl_comm_module())
+            jit_specs.append(gen_moe_alltoall_module())
         jit_specs.append(gen_vllm_comm_module())
 
     if add_misc:
@@ -526,9 +532,11 @@ def gen_all_modules(
             gen_quantization_module(),
             gen_rope_module(),
             gen_sampling_module(),
+            gen_topk_module(),
         ]
         if has_sm90:
             jit_specs.append(gen_trtllm_utils_module())
+            jit_specs.append(gen_gdn_prefill_sm90_module())
 
     if (
         add_xqa and get_cuda_version() > Version("12.8")
@@ -740,9 +748,9 @@ def detect_sm_capabilities():
         "sm100": has_sm("compute_100", "12.8"),
         "sm100f": has_sm("compute_100", "12.9"),
         "sm103": has_sm("compute_103", "12.9"),
-        "sm110": has_sm("compute_110", "12.9"),
-        "sm120": has_sm("compute_120", "13.0"),
-        "sm121": has_sm("compute_121", "13.0"),
+        "sm110": has_sm("compute_110", "13.0"),
+        "sm120": has_sm("compute_120", "12.8"),
+        "sm121": has_sm("compute_121", "12.9"),
     }
 
 
