@@ -32,6 +32,12 @@ from flashinfer.gemm.kernels.grouped_gemm_masked_blackwell import (
     MaskedSchedulerParams,
     MaskedScheduler,
 )
+from cutlass._mlir.dialects import llvm
+from flashinfer.utils import get_compute_capability
+from flashinfer.api_logging import flashinfer_api
+from cutlass.utils.static_persistent_tile_scheduler import WorkTileInfo
+from .utils import get_cutlass_dtype, cutlass_to_torch_dtype, get_num_sm, make_ptr
+from typing import Callable, List
 
 
 sizeof_i32 = 4
@@ -2916,6 +2922,7 @@ def get_cute_dsl_compiled_masked_gemm_kernel(
     return tensor_api
 
 
+@flashinfer_api
 def grouped_gemm_nt_masked(
     lhs: Tuple[torch.Tensor, torch.Tensor],
     rhs: Tuple[torch.Tensor, torch.Tensor],
