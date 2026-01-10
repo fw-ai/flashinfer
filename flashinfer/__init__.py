@@ -90,6 +90,7 @@ from .gemm import SegmentGEMMWrapper as SegmentGEMMWrapper
 from .gemm import bmm_bf16 as bmm_bf16
 from .gemm import bmm_fp8 as bmm_fp8
 from .gemm import bmm_mxfp8 as bmm_mxfp8
+from .gemm import mm_bf16 as mm_bf16
 from .gemm import mm_fp4 as mm_fp4
 from .gemm import mm_fp8 as mm_fp8
 from .gemm import mm_mxfp8 as mm_mxfp8
