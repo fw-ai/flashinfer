@@ -48,16 +48,16 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
   using LayoutA = cutlass::layout::RowMajor;  // Layout type for A matrix operand
   constexpr int AlignmentA =
       128 / cutlass::sizeof_bits<ElementA>::value;  // Memory access granularity/alignment of A
-                                                    // matrix in units of elements (up to 16 bytes)
+  //                                                   // matrix in units of elements (up to 16 bytes)
 
-  // B matrix configuration
+  // // B matrix configuration
   using ElementB = DTypeIn;                      // Element type for B matrix operand
   using LayoutB = cutlass::layout::ColumnMajor;  // Layout type for B matrix operand
   constexpr int AlignmentB =
       128 / cutlass::sizeof_bits<ElementB>::value;  // Memory access granularity/alignment of A
                                                     // matrix in units of elements (up to 16 bytes)
 
-  // C/D matrix configuration
+  // // C/D matrix configuration
   using ElementC = DTypeOut;                  // Element type for C and D matrix operands
   using LayoutC = cutlass::layout::RowMajor;  // Layout type for C and D matrix operands
   constexpr int AlignmentC =
@@ -69,29 +69,29 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
   constexpr int AlignmentD = AlignmentC;
 
   // MMA type
-  using ElementAccumulator = float;  // Element Accumulator will also be our scale factor type
-  using ElementCompute = float;
+  // using ElementAccumulator = float;  // Element Accumulator will also be our scale factor type
+  // using ElementCompute = float;
 
-  using MmaTileShape_MNK = Shape<cute::Int<128>, _128, _128>;
-  using ClusterShape_MNK = Shape<cute::Int<1>, _1, _1>;
+  // using MmaTileShape_MNK = Shape<cute::Int<128>, _128, _128>;
+  // using ClusterShape_MNK = Shape<cute::Int<1>, _1, _1>;
   
   // NOTE(Zihao):: UMMA::Major::MN, UMMA::Major::MN is the fastest configuration.
   
-  using ScaleConfig = std::conditional_t<
-      ScaleMajorK,
-      cutlass::detail::Sm100BlockwiseScaleConfig<ScaleGranularityM, ScaleGranularityN,
-                                                 ScaleGranularityK, UMMA::Major::K, UMMA::Major::K>,
-      cutlass::detail::Sm100BlockwiseScaleConfig<ScaleGranularityM, ScaleGranularityN,
-                                                 ScaleGranularityK, UMMA::Major::MN,
-                                                 UMMA::Major::MN>>;
+  // using ScaleConfig = std::conditional_t<
+  //     ScaleMajorK,
+  //     cutlass::detail::Sm100BlockwiseScaleConfig<ScaleGranularityM, ScaleGranularityN,
+  //                                                ScaleGranularityK, UMMA::Major::K, UMMA::Major::K>,
+  //     cutlass::detail::Sm100BlockwiseScaleConfig<ScaleGranularityM, ScaleGranularityN,
+  //                                                ScaleGranularityK, UMMA::Major::MN,
+  //                                                UMMA::Major::MN>>;
 
 //   printf("ScaleGranularityM: %d, ScaleGranularityN: %d, ScaleGranularityK: %d\n", ScaleGranularityM, ScaleGranularityN, ScaleGranularityK);
 //   printf("UMMA::Major::K: %d, UMMA::Major::MN: %d\n", static_cast<int>(UMMA::Major::K), static_cast<int>(UMMA::Major::MN));
 //   printf("ScaleMajorK: %d\n", ScaleMajorK);
-  using LayoutSFA =
-      decltype(ScaleConfig::deduce_layoutSFA());  // Layout type for SFA matrix operand
-  using LayoutSFB =
-      decltype(ScaleConfig::deduce_layoutSFB());  // Layout type for SFB matrix operand
+  // using LayoutSFA =
+  //     decltype(ScaleConfig::deduce_layoutSFA());  // Layout type for SFA matrix operand
+  // using LayoutSFB =
+  //     decltype(ScaleConfig::deduce_layoutSFB());  // Layout type for SFB matrix operand
 //   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
 //       cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp,
 //       /*TileShapeMNK=*/MmaTileShape_MNK, /*ClusterShape=*/ClusterShape_MNK,
@@ -107,13 +107,13 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
     cute::Shape<int, int, cute::_1>,
     cutlass::epilogue::collective::EpilogueTileAuto,
     float, float,
-    ElementC, cutlass::layout::RowMajor, 8,
-    ElementD, cutlass::layout::RowMajor, 8,
+    void, cutlass::layout::ColumnMajor, 0,
+    ElementD, cutlass::layout::ColumnMajor, 8,
     cutlass::epilogue::TmaWarpSpecialized1Sm,
     cutlass::epilogue::fusion::LinearCombination<
         ElementD,
         float,
-        ElementD,
+        void,
         float
     >
     >::CollectiveOp;
@@ -143,7 +143,7 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
       /*ProblemShapeOrThreadblockMma_=*/Shape<int, int, int, int>,
       CollectiveMainloop,
       CollectiveEpilogue,
-      /*TileScheduler_=*/void>;  // Default to ClusterLaunchControl (CLC) based tile scheduler
+      /*TileScheduler_=*/cutlass::gemm::StreamKScheduler>;  // Default to ClusterLaunchControl (CLC) based tile scheduler
 
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
@@ -152,26 +152,32 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
   using StrideC = typename Gemm::GemmKernel::StrideC;
   using StrideD = typename Gemm::GemmKernel::StrideD;
 
-  auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(m, k, l));
-  auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(n, k, l));
-  auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(m, n, l));
-  auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(m, n, l));
+  auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(n, k, l));
+  auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(m, k, l));
+  auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(n, m, l));
+  auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(n, m, l));
 
 //   printf("stride_A type: %s\n", typeid(decltype(stride_A)).name());
 //   printf("stride_B type: %s\n", typeid(decltype(stride_B)).name());
 //   printf("stride_C type: %s\n", typeid(decltype(stride_C)).name());
 //   printf("stride_D type: %s\n", typeid(decltype(stride_D)).name());
 
-  auto layout_SFA = ScaleConfig::tile_atom_to_shape_SFA(make_shape(m, n, k, l));
-  auto layout_SFB = ScaleConfig::tile_atom_to_shape_SFB(make_shape(m, n, k, l));
+  // auto layout_SFA = ScaleConfig::tile_atom_to_shape_SFA(make_shape(m, n, k, l));
+  // auto layout_SFB = ScaleConfig::tile_atom_to_shape_SFB(make_shape(m, n, k, l));
+
+  using TileSchedulerArguments = typename Gemm::GemmKernel::TileSchedulerArguments;
+  TileSchedulerArguments scheduler_args{};
+  scheduler_args.max_swizzle_size = 1;
+  scheduler_args.raster_order =
+      cutlass::gemm::kernel::detail::RasterOrderOptions::Heuristic;
 
   typename Gemm::Arguments arguments{cutlass::gemm::GemmUniversalMode::kGemm,
-                                     {m, n, k, l},
+                                     {n, m, k, l},
                                      {
+                                       B_ptr,
+                                       stride_B,
                                          A_ptr,
                                          stride_A,
-                                         B_ptr,
-                                         stride_B,
                                         //  SFA_ptr,
                                         //  layout_SFA,
                                         //  SFB_ptr,
@@ -179,7 +185,7 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
                                      },
                                      {
                                          {},  // epilogue.thread
-                                         C_ptr,
+                                         nullptr,
                                          stride_C,
                                          C_ptr,
                                          stride_C,
@@ -187,14 +193,11 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
                                      // KernelHardwareInfo
                                      []() {
                                        auto hw_info = cutlass::KernelHardwareInfo::make_kernel_hardware_info<GemmKernel>();
-                                       hw_info.cluster_shape = {2, 2, 1};
+                                       hw_info.cluster_shape = {1, 1, 1};
                                        hw_info.cluster_shape_fallback = {1, 1, 1};
                                        return hw_info;
                                      }(),
-                                     {
-                                      .max_swizzle_size = 1,
-                                      .raster_order = cutlass::gemm::kernel::detail::RasterOrderOptions::AlongN,
-                                     }
+                                     scheduler_args
                                     };
   auto& fusion_args = arguments.epilogue.thread;
   fusion_args.alpha = 1.0f;
