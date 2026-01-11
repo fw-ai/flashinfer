@@ -143,7 +143,8 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
       /*ProblemShapeOrThreadblockMma_=*/Shape<int, int, int, int>,
       CollectiveMainloop,
       CollectiveEpilogue,
-      /*TileScheduler_=*/cutlass::gemm::StreamKScheduler>;  // Default to ClusterLaunchControl (CLC) based tile scheduler
+      void>;
+      // /*TileScheduler_=*/cutlass::gemm::StreamKScheduler>;  // Default to ClusterLaunchControl (CLC) based tile scheduler
 
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
@@ -199,6 +200,11 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
                                      }(),
                                      scheduler_args
                                     };
+  // using DecompositionMode = cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90StreamKParams::DecompositionMode;
+  // using ReductionMode = cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90StreamKParams::ReductionMode;
+  // arguments.scheduler.splits = 2;
+  // arguments.scheduler.decomposition_mode = DecompositionMode::StreamK;
+  // arguments.scheduler.reduction_mode = ReductionMode::Deterministic;
   auto& fusion_args = arguments.epilogue.thread;
   fusion_args.alpha = 1.0f;
   fusion_args.beta = 0.0f;
