@@ -143,7 +143,7 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
       /*ProblemShapeOrThreadblockMma_=*/Shape<int, int, int, int>,
       CollectiveMainloop,
       CollectiveEpilogue,
-      /*TileScheduler_=*/void>;  // Default to ClusterLaunchControl (CLC) based tile scheduler
+      /*TileScheduler_=*/cutlass::gemm::StreamKScheduler>;  // Default to ClusterLaunchControl (CLC) based tile scheduler
 
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
@@ -164,6 +164,12 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
 
   auto layout_SFA = ScaleConfig::tile_atom_to_shape_SFA(make_shape(m, n, k, l));
   auto layout_SFB = ScaleConfig::tile_atom_to_shape_SFB(make_shape(m, n, k, l));
+
+  using TileSchedulerArguments = typename Gemm::GemmKernel::TileSchedulerArguments;
+  TileSchedulerArguments scheduler_args{};
+  scheduler_args.max_swizzle_size = 1;
+  scheduler_args.raster_order =
+      cutlass::gemm::kernel::detail::RasterOrderOptions::Heuristic;
 
   typename Gemm::Arguments arguments{cutlass::gemm::GemmUniversalMode::kGemm,
                                      {m, n, k, l},
@@ -191,11 +197,14 @@ cudaError_t CutlassGroupwiseScaledGEMMSM100(void* float_buffer, size_t float_buf
                                        hw_info.cluster_shape_fallback = {1, 1, 1};
                                        return hw_info;
                                      }(),
-                                     {
-                                      .max_swizzle_size = 1,
-                                      .raster_order = cutlass::gemm::kernel::detail::RasterOrderOptions::AlongN,
-                                     }
+                                     scheduler_args
                                     };
+
+  // using DecompositionMode = cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90StreamKParams::DecompositionMode;
+  // using ReductionMode = cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90StreamKParams::ReductionMode;
+  // arguments.scheduler.decomposition_mode = DecompositionMode::SplitK;
+  // arguments.scheduler.reduction_mode = ReductionMode::Nondeterministic;
+  // arguments.scheduler.splits = 2;
   auto& fusion_args = arguments.epilogue.thread;
   fusion_args.alpha = 1.0f;
   fusion_args.beta = 0.0f;
