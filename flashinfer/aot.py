@@ -66,6 +66,10 @@ from .jit.gemm import (
 )
 from .jit.spdlog import gen_spdlog_module
 from .jit.mla import gen_mla_module
+from .jit.mamba import (
+    gen_selective_state_update_module,
+    gen_selective_state_update_sm90_module,
+)
 from .jit.norm import gen_norm_module
 from .jit.page import gen_page_module
 from .jit.quantization import gen_quantization_module
@@ -582,40 +586,10 @@ def gen_all_modules(
             gen_rope_module(),
             gen_sampling_module(),
             gen_topk_module(),
+            gen_selective_state_update_module(),
         ]
-        # selective_state_update: one module per dtype combo per GPU arch
-        _ssu_dtype_combos = [
-            # (state,        input,          weight,         matrixA,      stateIndex)
-            (
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.float32,
-                torch.int64,
-            ),
-            (torch.float32, torch.bfloat16, torch.bfloat16, torch.float32, torch.int64),
-        ]
-        _ssu_dims = [64]
-        _ssu_dstates = [128]
-        _ssu_ntokens = [1, 4, 6, 8]
-        for dtype_combo, dim, dstate, ntokens in product(
-            _ssu_dtype_combos, _ssu_dims, _ssu_dstates, _ssu_ntokens
-        ):
-            jit_specs.append(
-                # false positive: mypy can't resolve the signature because flashinfer.jit deps (filelock etc.)
-                # are absent in mypy's isolated env, causing it to infer an incorrect function signature
-                gen_selective_state_update_module(*dtype_combo, dim, dstate, ntokens)  # type: ignore[call-arg]
-            )
-        if has_sm90 or has_sm100:
-            for dtype_combo, dim, dstate, ntokens in product(
-                _ssu_dtype_combos, _ssu_dims, _ssu_dstates, _ssu_ntokens
-            ):
-                jit_specs.append(
-                    # same false positive as above
-                    gen_selective_state_update_sm90_module(  # type: ignore[call-arg]
-                        *dtype_combo, dim, dstate, ntokens
-                    )
-                )
+        if has_sm90:
+            jit_specs.append(gen_selective_state_update_sm90_module())
             jit_specs.append(gen_trtllm_utils_module())
             jit_specs.append(gen_gdn_prefill_sm90_module())
 
