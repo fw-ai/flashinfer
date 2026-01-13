@@ -132,6 +132,8 @@ void trtllm_paged_attention_launcher(
   // outputScale. if they are not nullptr, then scaleSoftmaxLog2 and outputScale will be ignored
   runner_params.outputScale = bmm2_scale;
   runner_params.outputScalePtr = bmm2_scale_ptr;
+  runner_params.mScaleSfKv = 1.0f;  // which should be fused into bmm1_scale(k)/bmm2_scale(v/o)
+  runner_params.kvSfScalePtr = nullptr;
   runner_params.scaleSoftmaxLog2 = bmm1_scale * M_LOG2E;
   runner_params.scaleSoftmaxLog2Ptr = bmm1_scale_log2_ptr;
   runner_params.oSfPtr = out_scale_factor;
@@ -272,17 +274,31 @@ void trtllm_paged_attention_decode(
   int max_num_blocks_per_seq = block_tables.size(-1);
   bool is_shared_kv = key_cache.data_ptr() == value_cache.data_ptr();
   int num_pages_in_mem_pool = is_shared_kv ? key_cache.size(0) : key_cache.size(0) * 2;
+  bool is_fp4_kv = is_4bit(kv_data_type);
+  int stride_idx_factor = is_fp4_kv ? 2 : 1;
 
-  // Assume NHD layout: [..., H, N, D]
+  // Assume HND layout: [..., H, N, D]
   int page_size = key_cache.size(-2);
   int num_kv_heads = key_cache.size(-3);
-  int kv_stride_keys_values = key_cache.stride(-2);  // key/values
-  int kv_stride_heads = key_cache.stride(-3);        // head
-  int kv_stride_batch = key_cache.stride(0);         // batch
+  int kv_stride_keys_values = key_cache.stride(-2) * stride_idx_factor;  // key/values
+  int kv_stride_heads = key_cache.stride(-3) * stride_idx_factor;        // head
+  int kv_stride_batch = key_cache.stride(0) * stride_idx_factor;         // batch
 
   // Query stride: [num_tokens, num_heads, head_dim]
   int q_stride_tokens = query.stride(0);  // stride between tokens
   int q_stride_heads = query.stride(1);   // stride between heads
+
+  // kv block scales
+  if (is_fp4_kv) {
+    TVM_FFI_ICHECK(k_cache_scales.has_value())
+        << "k_cache_scales must be provided for FP4 kv cache";
+    TVM_FFI_ICHECK(v_cache_scales.has_value())
+        << "v_cache_scales must be provided for FP4 kv cache";
+  }
+  const void* k_cache_scales_ptr =
+      k_cache_scales.has_value() ? k_cache_scales.value().data_ptr() : nullptr;
+  const void* v_cache_scales_ptr =
+      v_cache_scales.has_value() ? v_cache_scales.value().data_ptr() : nullptr;
 
   const auto stream = get_stream(query.device());
   void* output_sf_ptr =

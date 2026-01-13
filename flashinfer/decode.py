@@ -2153,7 +2153,9 @@ def trtllm_batch_decode_with_kv_cache(
     max_q_len: Optional[int] = None,
     cum_seq_lens_q: Optional[torch.Tensor] = None,
     skip_softmax_threshold_scale_factor: Optional[float] = None,
-    kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    kv_cache_scales: Optional[
+        Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
+    ] = None,
     return_lse: bool = False,
     lse: Optional[torch.Tensor] = None,
 ) -> Union[
@@ -2280,6 +2282,33 @@ def trtllm_batch_decode_with_kv_cache(
             # it doesn't change underlying storage
             k_cache, v_cache = kv_cache.unbind(dim=1)
 
+    is_nvfp4_kvcache = (
+        k_cache.dtype == torch.uint8
+        and v_cache.dtype == torch.uint8
+        and kv_cache_scales is not None
+    )
+
+    k_cache_scale = None
+    v_cache_scale = None
+    if is_nvfp4_kvcache:
+        if isinstance(kv_cache_scales, tuple):
+            k_cache_scale, v_cache_scale = kv_cache_scales
+        else:
+            if kv_cache_scales.shape[1] == 1:
+                k_cache_scale, v_cache_scale = kv_cache_scales, kv_cache_scales
+            else:
+                assert kv_cache_scales.shape[1] == 2, (
+                    "When kv_cache_scales is a single tensor, the second dimension must be 1 or 2"
+                )
+                # NOTE(Zihao): unbind transforms [num_pages, 2, ...] to ([num_pages, ...], [num_pages, ...])
+                # it doesn't change underlying storage
+                k_cache_scale, v_cache_scale = kv_cache_scales.unbind(dim=1)
+
+        assert (
+            k_cache_scale.dtype == torch.float8_e4m3fn
+            and v_cache_scale.dtype == torch.float8_e4m3fn
+        ), "k/v_cache_scales should be float8 dtype."
+
     if backend == "auto":
         backend = (
             "trtllm-gen" if get_compute_capability(query.device)[0] == 10 else "xqa"
@@ -2325,6 +2354,9 @@ def trtllm_batch_decode_with_kv_cache(
             # For NHD: [..., N, H, D] -> HND: [..., H, N, D]
             k_cache = k_cache.transpose(-3, -2)
             v_cache = v_cache.transpose(-3, -2)
+            if is_nvfp4_kvcache:
+                k_cache_scale = k_cache_scale.transpose(-3, -2)
+                v_cache_scale = v_cache_scale.transpose(-3, -2)
 
         run_func = get_trtllm_gen_fmha_module().trtllm_paged_attention_decode
         sm_count = get_device_sm_count(query.device)
@@ -2416,8 +2448,6 @@ def trtllm_batch_decode_with_kv_cache(
             assert max_q_len is not None
             batch_size = cum_seq_lens_q.size(0) - 1
 
-        k_cache_scale = kv_cache_scales[0] if kv_cache_scales is not None else None
-        v_cache_scale = kv_cache_scales[1] if kv_cache_scales is not None else None
         expected_lse_shape = [query.shape[0], query.shape[1]]
 
         if return_lse and lse is None:
