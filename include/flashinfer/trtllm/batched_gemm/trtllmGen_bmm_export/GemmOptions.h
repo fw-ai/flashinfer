@@ -489,9 +489,8 @@ inline std::string dumpOptions(GemmOptions const& options, bool dumpRuntimeParam
      << "," << std::endl;
   ss << "mDtypeMmaB=" << "trtllm::gen::Dtype(" << static_cast<int32_t>(options.mDtypeMmaB) << ")"
      << "," << std::endl;
-  ss << "mEltwiseActType="
-     << "gemm::EltwiseActType(" << static_cast<int32_t>(options.mEltwiseActType) << ")"
-     << "," << std::endl;
+  ss << "mEltwiseActType=" << "gemm::EltwiseActType("
+     << static_cast<int32_t>(options.mEltwiseActType) << ")" << "," << std::endl;
   ss << "mEnablesEarlyExit=" << options.mEnablesEarlyExit << "," << std::endl;
   ss << "mEnablesDelayedEarlyExit=" << options.mEnablesDelayedEarlyExit << "," << std::endl;
   ss << "mEnablesGlobalPtxKnobs=" << options.mEnablesGlobalPtxKnobs << "," << std::endl;
@@ -544,9 +543,11 @@ inline std::string dumpOptions(GemmOptions const& options, bool dumpRuntimeParam
   ss << "mNumStagesWorkId=" << options.mNumStagesWorkId << "," << std::endl;
   ss << "mOutputDebugTensors=" << options.mOutputDebugTensors << "," << std::endl;
   ss << "mPatchF2fp=" << options.mPatchF2fp << "," << std::endl;
-  ss << "mSfBlockSizeA=" << options.mSfBlockSizeA << "," << std::endl;
-  ss << "mSfBlockSizeB=" << options.mSfBlockSizeB << "," << std::endl;
-  ss << "mSfBlockSizeC=" << options.mSfBlockSizeC << "," << std::endl;
+  if (options.mSfBlockSizeA.has_value()) {
+    ss << "mSfBlockSizeA=" << options.mSfBlockSizeA.value() << "," << std::endl;
+  } else {
+    ss << "mSfBlockSizeA=" << "std::nullopt" << ", " << std::endl;
+  }
   ss << "mSfLayoutA=" << "trtllm::gen::SfLayout(" << static_cast<int32_t>(options.mSfLayoutA) << ")"
      << "," << std::endl;
   ss << "mSfLayoutB=" << "trtllm::gen::SfLayout(" << static_cast<int32_t>(options.mSfLayoutB) << ")"
@@ -555,8 +556,6 @@ inline std::string dumpOptions(GemmOptions const& options, bool dumpRuntimeParam
      << "," << std::endl;
   ss << "mSfReshapeFactor=" << options.mSfReshapeFactor << "," << std::endl;
   ss << "mSliceK=" << options.mSliceK << "," << std::endl;
-  ss << "mSparsityA=" << "trtllm::gen::Sparsity(" << static_cast<int32_t>(options.mSparsityA) << ")"
-     << "," << std::endl;
   ss << "mSplitK=" << "gemm::SplitK(" << static_cast<int32_t>(options.mSplitK) << ")" << ","
      << std::endl;
   ss << "mTileK=" << options.mTileK << "," << std::endl;
@@ -817,55 +816,13 @@ inline bool checkAndUpdateGemmOptions(GemmOptions& options, tg::CudaArch cudaArc
     }
   }
 
-  // Check that the sparsity mode of A is supported, and compatible with the MMA kind.
-  // Note: trtllm-gen currently does not support sparsity with tf32, fp16, bf16.
-  switch (options.mSparsityA) {
-    case tg::Sparsity::Dense:
-      // Always supported.
-      break;
-    case tg::Sparsity::Any_1_2:
-      TLLM_LOG_ERROR("1:2 sparsity is not supported.");
-      break;
-    case tg::Sparsity::Any_2_4: {
-      bool isSupported_2_4 = (options.mMmaKind == tg::MmaKind::Fp8Fp6Fp4 ||
-                              options.mMmaKind == tg::MmaKind::MxFp8Fp6Fp4);
-      TLLM_CHECK_ERROR(isSupported_2_4, "2:4 sparsity is not supported for MMA kind ",
-                       tg::mmaKindToString(options.mMmaKind), " on target ",
-                       tg::cudaArchToString(cudaArch));
-      break;
-    }
-    case tg::Sparsity::Pairwise_4_8:
-      TLLM_CHECK_ERROR(options.mMmaKind == tg::MmaKind::MxFp4NvFp4,
-                       "Pairwise 4:8 sparsity is only supported for MMA kind MxFp4NvFp4.");
-      break;
-    default:
-      TLLM_CHECK_ERROR(false, "Unsupported sparsityA: ", tg::sparsityToString(options.mSparsityA));
-      break;
-  }
-
-  // Is A sparse?
-  bool const isSparseA = tg::isSparse(options.mSparsityA);
-
-  // Requirements specific to sparsity, and compatibility with other features.
-  if (isSparseA) {
-    TLLM_CHECK_ERROR(isBlackwell, "Sparsity is only supported on Blackwell");
-    // The following requirement is for TMA load: the box width must be a multiple of 16B.
-    TLLM_CHECK_ERROR(
-        tg::getNumBytesSparsityInfo(options.mSparsityA, options.mTileK) % 16 == 0,
-        "The sparsity information for one tile row must be a multiple of 16B. Use larger tileK.");
-    TLLM_CHECK_ERROR(options.mDtypeA == options.mDtypeMmaA,
-                     "Sparsity is not supported with on-the-fly upcasting.");
-    TLLM_CHECK_ERROR(!options.mUseDeepSeekFp8, "Sparsity is not supported with DeepSeek Fp8.");
-    TLLM_CHECK_ERROR(!options.mSliceK, "Sparsity is not supported with slice-k.");
-  }
-
   if (options.mMmaKind == tg::MmaKind::Fp8Fp6Fp4) {
-    int mmaK = isSparseA ? 64 : 32;
+    int mmaK = 32;
 
     if (options.mMmaK != mmaK) {
-      TLLM_LOG_WARNING(
-          "Unsupported MmaK (", options.mMmaK, ") for MmaKind=", gemm::toString(options.mMmaKind),
-          " and sparsity=", tg::sparsityToString(options.mSparsityA), ". Setting MmaK to ", mmaK);
+      TLLM_LOG_WARNING("Unsupported MmaK (", options.mMmaK,
+                       ") for MmaKind=", gemm::toString(options.mMmaKind), ". Setting MmaK to ",
+                       mmaK);
       if (updateOptions) {
         options.mMmaK = mmaK;
         options.mTileK = std::max(options.mMmaK, options.mTileK);
@@ -929,8 +886,8 @@ inline bool checkAndUpdateGemmOptions(GemmOptions& options, tg::CudaArch cudaArc
 
     int mmaK = isSparseA ? 64 : 32;
     if (options.mMmaKind == tg::MmaKind::MxFp4NvFp4) {
-      mmaK = isSparseA ? 128 : 64;
-      if (options.mMmaK == 96 && !isSparseA) {
+      mmaK = 64;
+      if (options.mMmaK == 96) {
         mmaK = 96;
         TLLM_CHECK_ERROR(options.mTileK == 768, "When mmaK == 96, only tileK == 768 is supported");
         TLLM_CHECK_ERROR(options.mTileN <= 128, "When mmaK == 96, only tileN <= 128 is supported");

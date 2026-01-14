@@ -328,10 +328,9 @@ template <class GemmOptions_>
 static KernelParams setKernelParams(
     GemmOptions_ const& options, bool const batchM, void const* ptrA, void const* ptrB, void* ptrC,
     void const* dSfA, void const* dSfB, void const* ptrPerTokenSfA, void const* ptrPerTokenSfB,
-    [[maybe_unused]] void const* ptrSparsityInfoA, void const* ptrBias, void* dSfC,
-    float const* ptrScaleC, float const* ptrScaleAct, float const* ptrScaleGate,
-    float const* ptrClampLimit, float const* ptrGatedActAlpha, float const* ptrGatedActBeta,
-    int32_t const* routeMap, float* rowMax, uint32_t* rowMaxBars,
+    void const* ptrBias, void* dSfC, float const* ptrScaleC, float const* ptrScaleAct,
+    float const* ptrScaleGate, float const* ptrClampLimit, float const* ptrGatedActAlpha,
+    float const* ptrGatedActBeta, int32_t const* routeMap, float* rowMax, uint32_t* rowMaxBars,
     int32_t const* ptrNumNonExitingCtas = nullptr, int32_t const* ptrTotalNumPaddedTokens = nullptr,
     int32_t const* ptrCtaIdxXyToBatchIdx = nullptr, int32_t const* ptrCtaIdxXyToMnLimit = nullptr,
     int32_t const maxNumCtas = KernelParams::MaxNumCtas) {
@@ -399,7 +398,7 @@ static KernelParams setKernelParams(
     params.totalNumOutputPaddedTokens = params.totalNumPaddedTokens;
   } else if (options.mIsStaticBatch && options.mIsUniformNumTokensPerBatch) {
     auto numTokens = batchM ? options.mBatchedM[0] : options.mBatchedN[0];
-    auto tileTokensDim = batchM ? options.mTileM * options.mClusterDimX : options.mTileN;
+    auto tileTokensDim = batchM ? options.mTileM : options.mTileN;
     params.batchStrideInCtas = (options.mBatchStrideInTokens + tileTokensDim - 1) / tileTokensDim;
     params.ctasInTokenDimPerBatch = (numTokens + tileTokensDim - 1) / tileTokensDim;
     params.totalNumOutputPaddedTokens =
@@ -431,9 +430,13 @@ static KernelParams setKernelParams(
   params.ptrSfB = dSfB;
   params.ptrSfC = dSfC;
 
-  // Do we pad A or B?
-  bool doPadA = tg::dtypeNeedsPadding(options.mDtypeA, options.mMmaKind, options.mMmaK, isSparseA);
-  bool doPadB = tg::dtypeNeedsPadding(options.mDtypeB, options.mMmaKind, options.mMmaK, isSparseA);
+  // Do we pad A?
+  bool doPadA =
+      options.mMmaKind == tg::MmaKind::MxFp8Fp6Fp4 && options.mDtypeA == tg::Dtype::MxE2m1;
+
+  // Do we pad B?
+  bool doPadB =
+      options.mMmaKind == tg::MmaKind::MxFp8Fp6Fp4 && options.mDtypeB == tg::Dtype::MxE2m1;
 
   if (!batchM) {
     // A is the expert
@@ -525,9 +528,10 @@ static KernelParams setKernelParams(
             options, options.mM, options.mNumTokens, numSfsInK, options.mTileM, 1 /* tileN */,
             options.mTileK / numEltsPerSf, MatrixType::MatrixB, options.mValidM, options.mNumTokens,
             numSfsInValidK);
-        params.tmaSfB[0] = gemm::buildNdTmaDescriptor(
-            dTypeSf, options.mMmaKind, shapeSfB, strideSfB, tileShapesSfB, const_cast<void*>(dSfB),
-            /*doSwizzle*/ true);
+        params.tmaSfB[0] = gemm::buildNdTmaDescriptor(dTypeSf, shapeSfB, strideSfB, tileShapesSfB,
+                                                      const_cast<void*>(dSfB),
+                                                      /*doPad=*/false,
+                                                      /*doSwizzle=*/true);
       } else if (batchedGemm::doesRouteImplUseNoRoute(options.mRouteSfsImpl.value())) {
         // The input is padded:
         // [act0, padding, padding, ... TileN size .., act1, padding, padding, ...]
@@ -554,8 +558,9 @@ static KernelParams setKernelParams(
           options, options.mM, ctaOffset * options.mTileN, options.mK, options.mTileM,
           options.mTileN, options.mTileK, MatrixType::MatrixC);
       // Build tma descriptor for C.
-      params.tmaC[0] = gemm::buildNdTmaDescriptor(options.mDtypeC, tg::MmaKind::Auto, shapeC,
-                                                  strideC, tileShapeC, ptrC);
+      params.tmaC[0] =
+          gemm::buildNdTmaDescriptor(options.mDtypeC, shapeC, strideC, tileShapeC, ptrC,
+                                     /*doPad=*/false);
 
     } else {
       params.ptrC = ptrC;

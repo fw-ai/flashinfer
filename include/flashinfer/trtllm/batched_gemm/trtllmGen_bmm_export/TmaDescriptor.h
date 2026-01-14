@@ -56,7 +56,7 @@ inline CUtensorMap buildNdTmaDescriptor(tg::Dtype dtype, std::vector<uint64_t> c
   } else if (dtype == tg::Dtype::E2m1) {
     tmaDataFormat = CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B;
   } else if (dtype == tg::Dtype::MxE2m1 || dtype == tg::Dtype::MxInt4) {
-    if (mmaKind == tg::MmaKind::MxFp8Fp6Fp4) {
+    if (doPad) {
       padMultiplier = 2;
       tmaDataFormat = CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B;
     } else {

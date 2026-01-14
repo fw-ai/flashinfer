@@ -112,10 +112,9 @@ struct BatchedGemmOptions : public gemmGatedAct::GemmGatedActOptions {
       std::vector<int> batchedM, std::vector<int> batchedN, BatchMode batchMode,
       int32_t batchStrideInTokens, bool fusedAct, bool gridWaitForPrimaryRouting,
       bool isStaticBatch, bool isUniformNumTokensPerBatch, int numBatches,
-      int numRegsPerThreadLoadA, int numRegsPerThreadLoadB, int numRegsPerThreadLoadSfA,
-      int numRegsPerThreadLoadSfB, int numTokens, int numWarpsLoadA, int numWarpsLoadB,
-      int numWarpsLoadSfA, int numWarpsLoadSfB, RouteImpl routeImpl,
-      std::optional<RouteImpl> routeSfsImpl, bool useTmaOobOpt)
+      int numRegsPerThreadLoadB, int numRegsPerThreadLoadSfB, int numTokens, int numWarpsLoadB,
+      int numWarpsLoadSfB, RouteImpl routeImpl, std::optional<RouteImpl> routeSfsImpl,
+      bool useTmaOobOpt)
       : gemmGatedAct::GemmGatedActOptions(
             gemm::GemmOptions(
                 allReduceAlgo, biasType, blockK, clusterDimX, clusterDimY, clusterDimZ,
@@ -385,11 +384,6 @@ inline bool checkAndUpdateBatchedGemmOptions(BatchedGemmOptions& options, tg::Cu
        doesRouteImplUseLdgPlusSts(options.mRouteSfsImpl.value()))) {
     TLLM_CHECK_ERROR(options.mK % options.mTileK == 0,
                      "K must be a multiple of tileK when using Ldg based SF routing");
-  }
-
-  if (options.mClusterDimX > 1 && batchM && options.mRouteSfsImpl.has_value()) {
-    TLLM_CHECK_ERROR(options.mRouteSfsImpl.value() != RouteImpl::Tma,
-                     "2CTA BatchedGemm does not support routing Sf along M dimension with TMA.");
   }
 
   // Check if all elements in mBatchedM or mBatchedN are the same (uniform tokens per batch) and

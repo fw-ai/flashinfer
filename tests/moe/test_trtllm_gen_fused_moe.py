@@ -2572,8 +2572,6 @@ def run_moe_test(
     activation_type,
     cache_permute_indices,
     zero_hidden_states=False,
-    gemm1_bias=None,
-    gemm2_bias=None,
 ):
     """Common test logic for all routing methods."""
     skip_checks(
