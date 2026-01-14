@@ -19,10 +19,11 @@ from flashinfer.fused_moe import (
     trtllm_fp8_block_scale_moe,
     trtllm_fp8_per_tensor_scale_moe,
     cutlass_fused_moe,
+    convert_to_block_layout,
     fused_topk_deepseek,
 )
 from flashinfer.fused_moe.core import RoutingMethodType
-from flashinfer import fp4_quantize, mxfp8_quantize
+from flashinfer import fp4_quantize, shuffle_matrix_a
 from flashinfer.testing.utils import (
     bench_gpu_time,
 )
@@ -374,6 +375,111 @@ def _compute_routing_for_method(
     routed_scaling_factor: Optional[float] = None,
 ) -> torch.Tensor:
     """
+    Calculate TFLOPS for MOE operation.
+
+    MOE computation involves:
+    1. First GEMM: [num_tokens, hidden_size] x [num_experts, hidden_size, 2*intermediate_size]
+    2. Activation function (SwiGLU gate)
+    3. Second GEMM: [num_tokens, intermediate_size] x [num_experts, intermediate_size, hidden_size]
+
+    For each token, we only compute for top_k experts.
+
+    """
+    # FLOPS per token per expert (base calculation)
+    flops_per_token_per_expert = (
+        2 * hidden_size * 2 * intermediate_size  # First GEMM
+        + 2 * intermediate_size * hidden_size  # Second GEMM
+    )
+
+    total_flops = num_tokens * top_k * flops_per_token_per_expert
+    tflops = total_flops / (time_ms * 1e-3) / 1e12  # Convert to TFLOPS
+    return tflops
+
+
+def calculate_moe_bandwidth(
+    num_tokens: int,
+    hidden_size: int,
+    intermediate_size: int,
+    num_experts: int,
+    top_k: int,
+    time_ms: float,
+    input_dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+    input_format: Optional[str] = None,
+    weight_format: Optional[str] = None,
+    routing_logits_dtype: Optional[torch.dtype] = torch.float32,
+    active_experts: Optional[int] = None,
+    verbose: int = 0,
+) -> float:
+    """
+    Calculate memory bandwidth for MOE operation in TB/sec.
+
+    Args:
+        input_format: Override for input representation; None uses dtype.itemsize
+        weight_format: Override for weight representation; None uses dtype.itemsize
+        routing_logits_dtype: Dtype for routing logits memory accounting (default float32)
+    """
+    num_tokens = routing_logits.shape[0]
+    device = routing_logits.device
+
+    # Get effective byte sizes
+    def get_effective_bytes(dtype: torch.dtype, fmt: Optional[str]) -> float:
+        if fmt == "nvfp4":
+            return 0.5 + 1 / 16
+        elif fmt == "mxfp4":
+            return 0.5 + 1 / 32
+        elif fmt == "fp8":
+            return 1.0
+        return dtype.itemsize
+
+        # Allocate output tensors
+        topk_values = torch.empty(num_tokens, top_k, device=device, dtype=torch.float32)
+        topk_indices = torch.empty(num_tokens, top_k, device=device, dtype=torch.int32)
+
+        fused_topk_deepseek(
+            scores=routing_logits.float(),
+            bias=routing_bias.float(),
+            n_group=n_group,
+            topk_group=topk_group,
+            topk=top_k,
+            routed_scaling_factor=routed_scaling_factor,
+            topk_values=topk_values,
+            topk_indices=topk_indices,
+        )
+        return topk_indices
+    else:
+        num_active_experts = min(num_experts, top_k * num_tokens)
+    if verbose >= 2:
+        print(f"[VVERBOSE] num_active_experts = {num_active_experts}")
+
+    weight_bytes = num_active_experts * weight_bytes_per_expert
+
+    # Output memory (typically full precision)
+    output_bytes = num_tokens * hidden_size * input_dtype.itemsize
+
+    total_bytes = input_bytes + weight_bytes + output_bytes
+    tb_per_sec = total_bytes / (time_ms * 1e-3) / 1e12  # Convert to TB/sec
+    return tb_per_sec
+
+
+def _compute_routing(router_logits: torch.Tensor, top_k: int):
+    routing_weights = torch.softmax(router_logits, dim=1, dtype=torch.float)
+    routing_weights, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
+    routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+    routing_weights = routing_weights.float()
+    return routing_weights, selected_experts
+
+
+def _compute_routing_for_method(
+    routing_logits: torch.Tensor,
+    routing_bias: Optional[torch.Tensor],
+    top_k: int,
+    routing_method_type: int,
+    n_group: Optional[int] = None,
+    topk_group: Optional[int] = None,
+    routed_scaling_factor: Optional[float] = None,
+) -> torch.Tensor:
+    """
     Compute selected experts based on routing method type.
     Returns only the selected expert indices tensor.
 
@@ -422,8 +528,17 @@ def _compute_routing_for_method(
         # For other routing methods, use simple top-k as approximation
         # This is accurate for Default, Renormalize, RenormalizeNaive, TopK
         # and approximate for Llama4
-        _, selected_experts = compute_routing(routing_logits.float(), top_k)
+        _, selected_experts = _compute_routing(routing_logits.float(), top_k)
         return selected_experts
+
+
+def _dynamic_per_tensor_fp8_quant(x: torch.Tensor):
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    x_max = x.abs().max().float().clamp(min=1e-6)
+    scale = x_max / fp8_max
+    inv_scale = 1.0 / scale
+    out = (x.float() * inv_scale).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
+    return out, scale.view((1,))
 
 
 def testTrtllmFp4BlockScaleMoe(args):
@@ -526,6 +641,9 @@ def testTrtllmFp4BlockScaleMoe(args):
         topk_group=topk_group,
         routed_scaling_factor=routed_scaling_factor,
     )
+
+    # For FP4, we need to properly quantize weights and create scales
+    use_ue8m0 = False
 
     # Determine FP4 quantization mode
     fp4_mode = getattr(args, "fp4_mode", "nvfp4")
@@ -734,8 +852,8 @@ def testTrtllmFp4BlockScaleMoe(args):
         median_time,
         input_dtype,
         weight_dtype,
-        input_format=input_format_str,
-        weight_format=weight_format_str,
+        input_format="nvfp4",
+        weight_format="nvfp4",
         routing_logits_dtype=routing_logits.dtype,
         active_experts=int(selected_experts.unique().numel()),
         verbose=args.verbose,
