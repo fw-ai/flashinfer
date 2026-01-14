@@ -223,6 +223,7 @@ def get_trtllm_gen_prefill_module():
         window_left: int = -1,
         out: Optional[torch.Tensor] = None,
         sinks: Optional[torch.Tensor] = None,
+        kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         sm_count = get_device_sm_count(query.device)
         if out is None:
@@ -232,6 +233,12 @@ def get_trtllm_gen_prefill_module():
             bmm1_scale = bmm1_scale * log2e
         if isinstance(bmm2_scale, torch.Tensor):
             assert bmm2_scale.dtype == torch.float32
+
+        k_cache_scale = None
+        v_cache_scale = None
+        if kv_cache_scales is not None:
+            k_cache_scale, v_cache_scale = kv_cache_scales
+
         op.trtllm_paged_attention_context(
             out,
             None,  # fp4 output not supported in wrapper api yet.
@@ -256,6 +263,9 @@ def get_trtllm_gen_prefill_module():
             enable_pdl,
             workspace_size,
             sinks,
+            k_cache_scale,
+            v_cache_scale,
+            None,  # lse
         )
         return out
 
@@ -641,7 +651,10 @@ def get_batch_prefill_module(backend, *args):
                 q.contiguous(),  # NOTE(Siyuan): without contiguous, the result is incorrect
                 paged_k_cache,
                 paged_v_cache,
-                int_workspace_buffer,
+                # NOTE: `workspace_size` is expressed in bytes, and must match the actual storage
+                # backing `workspace_buffer`. For trtllm-gen we use the user-provided
+                # `float_workspace_buffer` as a raw byte buffer for all temporary storage.
+                float_workspace_buffer,
                 block_tables,
                 kv_lens_buffer,
                 max_q_len,
@@ -3556,7 +3569,10 @@ def trtllm_batch_context_with_kv_cache(
     kv_layout: str = "HND",
     enable_pdl: Optional[bool] = None,
     sinks: Optional[List[torch.Tensor]] = None,
-) -> Union[torch.Tensor, FP4Tensor]:
+    kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
+) -> Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]:
     """
     Parameters
     ----------
@@ -3608,11 +3624,20 @@ def trtllm_batch_context_with_kv_cache(
         Layout of kv-cache, can be "HND" or "NHD", default is "HND".
     sinks : Optional[List[torch.Tensor]] = None
         additional value per head in the denominator of the softmax.
-
+    kv_cache_scales : Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        scales for kv cache, a tuple of two tensors with shape [num_pages, num_kv_heads]
+    return_lse: bool = False
+        Whether to return the logsumexp of attention output
+    lse: Optional[torch.Tensor] = None
+        The logsumexp of attention output, if not provided, will be allocated internally.
     Returns
     -------
-    out: Union[torch.Tensor, FP4Tensor]
-        output torch.Tensor or FP4Tensor.
+    Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]
+        If :attr:`return_lse` is ``False``, the attention output, shape: ``[batch_size, num_qo_heads, head_dim]``.
+        If :attr:`return_lse` is ``True``, a tuple of two tensors:
+
+        * The attention output, shape: ``[batch_size, num_qo_heads, head_dim]``.
+        * The logsumexp of attention output, shape: ``[batch_size, num_qo_heads]``.
     """
 
     if enable_pdl is None:
@@ -3717,6 +3742,20 @@ def trtllm_batch_context_with_kv_cache(
         bmm1_scale = bmm1_scale * log2e
     if isinstance(bmm2_scale, torch.Tensor):
         assert bmm2_scale.dtype == torch.float32
+
+    k_cache_scale = None
+    v_cache_scale = None
+    if kv_cache_scales is not None:
+        k_cache_scale, v_cache_scale = kv_cache_scales
+
+    if return_lse and lse is None:
+        lse = torch.empty(
+            query.shape[0],
+            query.shape[1],
+            device=query.device,
+            dtype=torch.float32,
+        )
+
     workspace_size = workspace_buffer.numel() * workspace_buffer.element_size()
     run_func(
         out,
@@ -3742,12 +3781,19 @@ def trtllm_batch_context_with_kv_cache(
         enable_pdl,
         workspace_size,
         sinks,
+        k_cache_scale,
+        v_cache_scale,
+        lse,
     )
-    return (
+    out = (
         out
         if out_dtype != "nvfp4"
         else FP4Tensor(out, out_scale_factor, o_sf_start_index, query.shape)
     )
+    if return_lse:
+        return out, lse
+    else:
+        return out
 
 
 @flashinfer_api

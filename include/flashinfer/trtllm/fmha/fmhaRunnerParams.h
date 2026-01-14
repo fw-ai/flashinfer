@@ -224,6 +224,8 @@ struct TllmGenFmhaRunnerParams {
   float2* softmaxStatsPtr;
   // The LSE buffer.
   float* lsePtr;
+  int lseStrideTokens;
+  int lseStrideHeads;
 
   // Attention sink
   float const* ptrAttentionSinks{nullptr};
