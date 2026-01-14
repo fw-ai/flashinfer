@@ -306,8 +306,9 @@ class TllmGenFmhaKernel {
 
       if (params.lsePtr != nullptr) {
         flashinfer::ComputeLSEFromMD(params.softmaxStatsPtr, params.lsePtr,
-                                     params.mSumOfSeqLensQ * params.mNumHeadsQ, params.enable_pdl,
-                                     params.stream);
+                                     params.mSumOfSeqLensQ, params.mNumHeadsQ,
+                                     params.lseStrideTokens, params.lseStrideHeads,
+                                     params.enable_pdl, params.stream);
       }
       // Break the while op.
       break;

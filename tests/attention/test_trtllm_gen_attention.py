@@ -265,6 +265,28 @@ def create_workspace_buffers(device):
     return global_trtllm_gen_fmha_workspace_buffer, global_workspace_buffer
 
 
+def _as_float(x):
+    return float(x.item()) if isinstance(x, torch.Tensor) else float(x)
+
+
+def _make_kv_cache_scales(num_pages, num_kv_heads, k_scale, v_scale, device):
+    """Build per-(page, head) KV cache scales expected by trtllm-gen APIs."""
+    return (
+        torch.full(
+            (num_pages, num_kv_heads),
+            _as_float(k_scale),
+            device=device,
+            dtype=torch.float32,
+        ),
+        torch.full(
+            (num_pages, num_kv_heads),
+            _as_float(v_scale),
+            device=device,
+            dtype=torch.float32,
+        ),
+    )
+
+
 def create_output(q, o_dtype, create_out_tensor, create_out_dtype):
     if o_dtype == "fp8":
         o_scale = torch.rand(1).item() * 0.5 + 0.5  # Scale range: 0.5 ~ 1.0
@@ -493,7 +515,7 @@ def _test_trtllm_batch_prefill(
             workspace_buffer_ref, kv_layout
         )
         wrapper_ref.plan(**plan_params)
-        output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
+        output_ref, lse_ref = wrapper_ref.run(ref_q, ref_kv_cache, return_lse=True)
     else:
         # Construct flat K/V via helper
         k_flat, v_flat, kv_indptr_tokens = flatten_paged_kv(
@@ -518,6 +540,15 @@ def _test_trtllm_batch_prefill(
             qo_indptr=q_indptr,
             kv_indptr=kv_indptr_tokens,
         )
+        lse_ref = None
+
+    kv_cache_scales = None
+    if kv_dtype == "fp8":
+        # Pass (page, head) KV cache scales to exercise the API. For this test, the scales
+        # are constant across pages/heads (equivalent to per-tensor scaling).
+        kv_cache_scales = _make_kv_cache_scales(
+            kv_cache.shape[0], num_kv_heads, k_scale, v_scale, GPU_DEVICE
+        )
 
     # Run trtllm-gen function call
     bmm1_scale = q_scale * k_scale * sm_scale
@@ -537,7 +568,14 @@ def _test_trtllm_batch_prefill(
     else:
         q_input = q.contiguous()
 
-    output = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
+    lse_trtllm = torch.empty(
+        q_input.shape[0],
+        q_input.shape[1],
+        device=GPU_DEVICE,
+        dtype=torch.float32,
+    )
+
+    output, lse = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
         q_input,
         kv_cache,
         workspace_buffer,
@@ -558,7 +596,14 @@ def _test_trtllm_batch_prefill(
         kv_layout=kv_layout,
         enable_pdl=enable_pdl,
         sinks=(sink if enable_sink else None),
+        kv_cache_scales=kv_cache_scales,
+        return_lse=True,
+        lse=lse_trtllm,
     )
+    assert lse is lse_trtllm
+    assert lse.dtype == torch.float32
+    assert lse.shape == (q_input.shape[0], q_input.shape[1])
+    assert torch.isfinite(lse).all()
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
     assert (workspace_buffer[: 8192 * 256 * 4].cpu().numpy() == 0).all()
@@ -590,6 +635,18 @@ def _test_trtllm_batch_prefill(
         atol=atol,
         max_mismatched_elements=max_mismatched_elements,
     )
+
+    # Compare LSE against reference when sinks are disabled (reference sinks path doesn't expose
+    # LSE today).
+    if lse_ref is not None:
+        lse_rtol, lse_atol = (1e-2, 1e-2)
+        if q_dtype == "fp8" or kv_dtype == "fp8":
+            lse_rtol, lse_atol = (1e-1, 1e-1)
+        # NOTE: FlashInfer FA2/FA3 wrappers return LSE in log2 space, while trtllm-gen returns
+        # natural-log LSE. Convert reference to natural log before comparison.
+        torch.testing.assert_close(
+            lse, lse_ref * math.log(2), rtol=lse_rtol, atol=lse_atol
+        )
 
     if o_dtype != "nvfp4":  # wrapper api does not support fp4 output yet.
         # test wrapper with trtllm-gen backend
@@ -863,7 +920,11 @@ def _test_trtllm_batch_decode(
                 workspace_buffer_ref, kv_layout, use_tensor_cores=True
             )
             wrapper_ref.plan(**plan_params)
-            output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
+            if backend == "trtllm-gen":
+                output_ref, lse_ref = wrapper_ref.run(ref_q, ref_kv_cache, return_lse=True)
+            else:
+                output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
+                lse_ref = None
 
         else:
             # speculative decoding test
@@ -883,7 +944,11 @@ def _test_trtllm_batch_decode(
                 }
             )
             wrapper_ref.plan(**plan_params_prefill)
-            output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
+            if backend == "trtllm-gen":
+                output_ref, lse_ref = wrapper_ref.run(ref_q, ref_kv_cache, return_lse=True)
+            else:
+                output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
+                lse_ref = None
     else:
         # Construct flat K/V via helper
         k_flat, v_flat, kv_indptr_tokens = flatten_paged_kv(
@@ -908,6 +973,7 @@ def _test_trtllm_batch_decode(
             qo_indptr=q_indptr,
             kv_indptr=kv_indptr_tokens,
         )
+        lse_ref = None
 
     if q_len_per_req and q_len_per_req > 1:
         # only used for xqa speculative decoding
@@ -933,30 +999,75 @@ def _test_trtllm_batch_decode(
     else:
         q_input = q.contiguous()
 
-    output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
-        q_input,
-        kv_cache,
-        workspace_buffer,
-        page_table,
-        seq_lens.to(GPU_DEVICE),
-        torch.max(seq_lens).item(),
-        bmm1_scale,
-        bmm2_scale,
-        window_left,  # window_left
-        out=out,
-        out_dtype=out_dtype,
-        o_sf_scale=o_sf_scale,
-        o_sf_vec_size=o_sf_vec_size,
-        sinks=(sink if enable_sink else None),
-        kv_layout=kv_layout,
-        enable_pdl=enable_pdl,
-        backend=backend,
-        q_len_per_req=q_len_per_req,
-        o_scale=o_scale,
-        mask=mask,
-        max_q_len=max_q_len if max_q_len is not None else None,
-        cum_seq_lens_q=q_indptr if max_q_len is not None else None,
-    )
+    if backend == "trtllm-gen":
+        kv_cache_scales = None
+        if kv_dtype == "fp8":
+            kv_cache_scales = _make_kv_cache_scales(
+                kv_cache.shape[0], num_kv_heads, k_scale, v_scale, GPU_DEVICE
+            )
+        lse_trtllm = torch.empty(
+            q_input.shape[0],
+            q_input.shape[1],
+            device=GPU_DEVICE,
+            dtype=torch.float32,
+        )
+        output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+            q_input,
+            kv_cache,
+            workspace_buffer,
+            page_table,
+            seq_lens.to(GPU_DEVICE),
+            torch.max(seq_lens).item(),
+            bmm1_scale,
+            bmm2_scale,
+            window_left,  # window_left
+            out=out,
+            out_dtype=out_dtype,
+            o_sf_scale=o_sf_scale,
+            o_sf_vec_size=o_sf_vec_size,
+            sinks=(sink if enable_sink else None),
+            kv_layout=kv_layout,
+            enable_pdl=enable_pdl,
+            backend=backend,
+            q_len_per_req=q_len_per_req,
+            o_scale=o_scale,
+            mask=mask,
+            max_q_len=max_q_len if max_q_len is not None else None,
+            cum_seq_lens_q=q_indptr if max_q_len is not None else None,
+            kv_cache_scales=kv_cache_scales,
+            return_lse=True,
+            lse=lse_trtllm,
+        )
+        assert lse is lse_trtllm
+        assert lse.dtype == torch.float32
+        assert lse.shape == (q_input.shape[0], q_input.shape[1])
+        assert torch.isfinite(lse).all()
+    else:
+        output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+            q_input,
+            kv_cache,
+            workspace_buffer,
+            page_table,
+            seq_lens.to(GPU_DEVICE),
+            torch.max(seq_lens).item(),
+            bmm1_scale,
+            bmm2_scale,
+            window_left,  # window_left
+            out=out,
+            out_dtype=out_dtype,
+            o_sf_scale=o_sf_scale,
+            o_sf_vec_size=o_sf_vec_size,
+            sinks=(sink if enable_sink else None),
+            kv_layout=kv_layout,
+            enable_pdl=enable_pdl,
+            backend=backend,
+            q_len_per_req=q_len_per_req,
+            o_scale=o_scale,
+            mask=mask,
+            max_q_len=max_q_len if max_q_len is not None else None,
+            cum_seq_lens_q=q_indptr if max_q_len is not None else None,
+        )
+        lse = None
     if backend == "trtllm-gen":
         # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
         # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
@@ -997,6 +1108,16 @@ def _test_trtllm_batch_decode(
         atol=atol,
         max_mismatched_elements=max_mismatched_elements,
     )
+
+    if backend == "trtllm-gen" and lse_ref is not None:
+        lse_rtol, lse_atol = (1e-2, 1e-2)
+        if q_dtype == "fp8" or kv_dtype == "fp8":
+            lse_rtol, lse_atol = (1e-1, 1e-1)
+        # NOTE: FlashInfer FA2/FA3 wrappers return LSE in log2 space, while trtllm-gen returns
+        # natural-log LSE. Convert reference to natural log before comparison.
+        torch.testing.assert_close(
+            lse, lse_ref * math.log(2), rtol=lse_rtol, atol=lse_atol
+        )
 
     # Only test wrapper with trtllm-gen backend
     if (

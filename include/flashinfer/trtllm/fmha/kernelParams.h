@@ -476,7 +476,7 @@ struct KernelParams {
 
   // Prepare pointers for TMA descriptors.
   static std::tuple<void const*, void const*, void const*> getDevicePtrs(
-      TllmGenFmhaRunnerParams const& runnerParams, int32_t bytesPerElt) {
+      TllmGenFmhaRunnerParams const& runnerParams, int32_t bitsPerElt) {
     // Declare the q, k, v ptrs.
     void const *qPtr{runnerParams.qPtr}, *kPtr{runnerParams.kPtr}, *vPtr{runnerParams.vPtr};
 
@@ -484,11 +484,10 @@ struct KernelParams {
     if (isPackedQkv(runnerParams.mQkvLayout)) {
       qPtr = runnerParams.qkvPtr;
       kPtr = reinterpret_cast<void const*>(reinterpret_cast<char const*>(runnerParams.qkvPtr) +
-                                           runnerParams.mNumHeadsQ * runnerParams.mHeadDimQk *
-                                               bytesPerElt);
+                                           runnerParams.mNumHeadsQ * (runnerParams.mHeadDimQk * bitsPerElt / 8));
       vPtr = reinterpret_cast<void const*>(reinterpret_cast<char const*>(runnerParams.qkvPtr) +
                                            (runnerParams.mNumHeadsQ + runnerParams.mNumHeadsKv) *
-                                               runnerParams.mHeadDimQk * bytesPerElt);
+                                               (runnerParams.mHeadDimQk * bitsPerElt / 8));
     }
     // Set K and V pointer from pagedKv tensor.
     else if (isPagedKv(runnerParams.mQkvLayout)) {
@@ -504,7 +503,7 @@ struct KernelParams {
       int32_t const maxHeadDimKv{std::max(runnerParams.mHeadDimQk, runnerParams.mHeadDimV)};
       vPtr = reinterpret_cast<void const*>(
           reinterpret_cast<char const*>(runnerParams.kvPtr) +
-          runnerParams.mNumHeadsKv * runnerParams.mMaxSeqLenCacheKv * maxHeadDimKv * bytesPerElt);
+          runnerParams.mNumHeadsKv * runnerParams.mMaxSeqLenCacheKv * (maxHeadDimKv * bitsPerElt / 8));
     }
 
     // Return the pointers.
@@ -617,7 +616,7 @@ struct KernelParams {
     memset(&params, 0, sizeof(KernelParams));
 
     // Get the device pointers for TMA descriptors.
-    auto [qPtr, kPtr, vPtr] = getDevicePtrs(options, get_size_in_bytes(kernelMeta.mDataTypeKv));
+    auto [qPtr, kPtr, vPtr] = getDevicePtrs(options, get_size_in_bits(kernelMeta.mDataTypeKv));
 
     // The maximum headDim of K and V.
     // Note that contiguousKv or pagedKv will pad K and V to maxHeadDimKv.
