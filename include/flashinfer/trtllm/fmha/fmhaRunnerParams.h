@@ -227,9 +227,6 @@ struct TllmGenFmhaRunnerParams {
   int lseStrideTokens;
   int lseStrideHeads;
 
-  int lseStrideTokens;
-  int lseStrideHeads;
-
   // Attention sink
   float const* ptrAttentionSinks{nullptr};
   // The output buffer.
