@@ -3051,10 +3051,6 @@ def test_renormalize_routing(
                 "routing_method_type": RoutingMethodType.DeepSeekV3,
                 "compatible_moe_impls": [FP4Moe, FP8BlockScaleMoe, BF16Moe],
                 "compatible_intermediate_size": [512, 1024, 1536],
-                "compatible_activation_types": [
-                    ActivationType.Swiglu,
-                    ActivationType.Geglu,
-                ],
                 "enable_autotune": False,
             },
             id="GLM4_MoE",
