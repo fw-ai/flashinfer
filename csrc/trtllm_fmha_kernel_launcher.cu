@@ -156,6 +156,17 @@ void trtllm_paged_attention_launcher(
   runner_params.lseStrideHeads = lse_stride_heads;
 
   AlignedAllocator float_allocator(workspace_buffer, workspace_size);
+  // Reserve the first 8MB as the counter/semaphore workspace.
+  //
+  // NOTE: Some tests assume this region stays zero after *any* trtllm-gen call, because it is
+  // reused as the multi-CTA counter workspace for generation kernels.
+  // Keep all other temporary buffers (e.g. softmax stats) *after* this region.
+  size_t max_batch_size = 8192;   // todo(Yingyi): get from dlfw
+  size_t max_num_qo_heads = 256;  // todo(Yingyi): get from dlfw, in total 8MB
+  size_t num_semaphores =
+      round_up(max_batch_size * max_num_qo_heads, 8);  // max 8MB, should align to 16 bytes
+  void* reserved_counter_workspace = float_allocator.aligned_alloc<void>(
+      num_semaphores * sizeof(uint32_t), 16, "trtllm_gen_counter_workspace");
   if (mode == TllmPagedAttentionMode::Context) {
     runner_params.mMaskType = TrtllmGenAttentionMaskType::Causal;
     runner_params.mKernelType = FmhaKernelType::Context;
@@ -189,8 +200,7 @@ void trtllm_paged_attention_launcher(
 
     // semaphores be at the first 8MB of workspace buffer: counter | scratch
     // todo(Yingyi): add softmax buffer later for lse return
-    runner_params.multiCtasKvCounterPtr = float_allocator.aligned_alloc<int32_t>(
-        num_semaphores * sizeof(uint32_t), 16, "trtllm_gen_counter_workspace");
+    runner_params.multiCtasKvCounterPtr = reinterpret_cast<int32_t*>(reserved_counter_workspace);
     runner_params.softmaxStatsPtr = float_allocator.aligned_alloc<float2>(
         sizeof(float2) * num_qo_heads * runner_params.mSumOfSeqLensQ, 16,
         "trtllm_gen_softmax_workspace");
