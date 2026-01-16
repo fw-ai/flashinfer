@@ -76,18 +76,17 @@ class TllmGenFmhaRunnerCache {
 void trtllm_paged_attention_launcher(
     void* out, void* out_scale_factor, void* query, void* key_cache, void* value_cache,
     void* workspace_buffer, int* block_tables, int* seq_lens, int* cum_seq_lens_q,
-    int* cum_seq_lens_kv, float* attention_sinks, float* lse,
-    void* k_cache_scales, void* v_cache_scales,
-    Data_type q_data_type, Data_type kv_data_type,
-    Data_type o_data_type, TllmPagedAttentionMode mode, int64_t batch_size, int64_t max_q_len,
-    int64_t max_kv_len, int64_t num_pages_in_mem_pool, int64_t num_qo_heads, int64_t num_kv_heads,
-    int64_t head_dim_qk, int64_t head_dim_vo, int64_t page_size, int64_t q_stride_tokens,
-    int64_t q_stride_heads, int64_t kv_stride_keys_values, int64_t kv_stride_heads,
-    int64_t kv_stride_batch, int64_t max_num_blocks_per_seq, double bmm1_scale, double bmm2_scale,
+    int* cum_seq_lens_kv, float* attention_sinks, float* lse, void* k_cache_scales,
+    void* v_cache_scales, Data_type q_data_type, Data_type kv_data_type, Data_type o_data_type,
+    TllmPagedAttentionMode mode, int64_t batch_size, int64_t max_q_len, int64_t max_kv_len,
+    int64_t num_pages_in_mem_pool, int64_t num_qo_heads, int64_t num_kv_heads, int64_t head_dim_qk,
+    int64_t head_dim_vo, int64_t page_size, int64_t q_stride_tokens, int64_t q_stride_heads,
+    int64_t kv_stride_keys_values, int64_t kv_stride_heads, int64_t kv_stride_batch,
+    int64_t max_num_blocks_per_seq, double bmm1_scale, double bmm2_scale,
     const float* bmm1_scale_log2_ptr, const float* bmm2_scale_ptr, double o_sf_scale,
     int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t window_left, int64_t sum_seq_q,
-    int64_t sparse_mla_top_k, int64_t lse_stride_tokens, int64_t lse_stride_heads,
-    int64_t sm_count, bool enable_pdl, int64_t workspace_size, cudaStream_t stream) {
+    int64_t sparse_mla_top_k, int64_t lse_stride_tokens, int64_t lse_stride_heads, int64_t sm_count,
+    bool enable_pdl, int64_t workspace_size, cudaStream_t stream) {
   if (num_qo_heads % num_kv_heads != 0) {
     std::ostringstream err_msg;
     err_msg << "num_qo_heads must be a multiple of num_kv_heads, got num_kv_heads: " << num_kv_heads
@@ -157,9 +156,6 @@ void trtllm_paged_attention_launcher(
   runner_params.lseStrideHeads = lse_stride_heads;
 
   AlignedAllocator float_allocator(workspace_buffer, workspace_size);
-  runner_params.softmaxStatsPtr = float_allocator.aligned_alloc<float2>(
-    sizeof(float2) * num_qo_heads * runner_params.mSumOfSeqLensQ, 16,
-    "trtllm_gen_softmax_workspace");
   if (mode == TllmPagedAttentionMode::Context) {
     runner_params.mMaskType = TrtllmGenAttentionMaskType::Causal;
     runner_params.mKernelType = FmhaKernelType::Context;
@@ -168,6 +164,9 @@ void trtllm_paged_attention_launcher(
 
     runner_params.cumSeqLensQPtr = cum_seq_lens_q;
     runner_params.cumSeqLensKvPtr = cum_seq_lens_kv;
+    runner_params.softmaxStatsPtr = float_allocator.aligned_alloc<float2>(
+        sizeof(float2) * num_qo_heads * runner_params.mSumOfSeqLensQ, 16,
+        "trtllm_gen_softmax_workspace");
   } else {
     // Generation.
     // Note that kernel names are still labeled as using a dense mask even when maskType is
@@ -192,6 +191,9 @@ void trtllm_paged_attention_launcher(
     // todo(Yingyi): add softmax buffer later for lse return
     runner_params.multiCtasKvCounterPtr = float_allocator.aligned_alloc<int32_t>(
         num_semaphores * sizeof(uint32_t), 16, "trtllm_gen_counter_workspace");
+    runner_params.softmaxStatsPtr = float_allocator.aligned_alloc<float2>(
+        sizeof(float2) * num_qo_heads * runner_params.mSumOfSeqLensQ, 16,
+        "trtllm_gen_softmax_workspace");
     // scratch takes the rest of the workspace buffer
     runner_params.multiCtasKvScratchPtr =
         float_allocator.aligned_alloc<void>(0, 16, "trtllm_gen_scratch_workspace");
@@ -228,20 +230,16 @@ inline Data_type dl_dtype_to_tllm_data_type(const DLDataType dtype) {
 
 inline bool is_4bit(Data_type data_type) { return data_type == Data_type::DATA_TYPE_E2M1; }
 
-void trtllm_paged_attention_decode(TensorView out, Optional<TensorView> out_scale_factor,
-                                   TensorView query, TensorView key_cache, TensorView value_cache,
-                                   TensorView workspace_buffer, TensorView block_tables,
-                                   TensorView seq_lens, int64_t max_q_len, int64_t max_kv_len,
-                                   Variant<double, ffi::Tensor> bmm1_scale,
-                                   Variant<double, ffi::Tensor> bmm2_scale, double o_sf_scale,
-                                   int64_t o_sf_vec_size, int64_t o_sf_start_index,
-                                   int64_t batch_size, int64_t window_left,
-                                   int64_t sparse_mla_top_k, int64_t sm_count, bool enable_pdl,
-                                   int64_t workspace_size, Optional<TensorView> attention_sinks,
-                                   Optional<TensorView> cum_seq_lens_q,
-                                   Optional<TensorView> k_cache_scales,
-                                   Optional<TensorView> v_cache_scales,
-                                   Optional<TensorView> lse) {
+void trtllm_paged_attention_decode(
+    TensorView out, Optional<TensorView> out_scale_factor, TensorView query, TensorView key_cache,
+    TensorView value_cache, TensorView workspace_buffer, TensorView block_tables,
+    TensorView seq_lens, int64_t max_q_len, int64_t max_kv_len,
+    Variant<double, ffi::Tensor> bmm1_scale, Variant<double, ffi::Tensor> bmm2_scale,
+    double o_sf_scale, int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t batch_size,
+    int64_t window_left, int64_t sparse_mla_top_k, int64_t sm_count, bool enable_pdl,
+    int64_t workspace_size, Optional<TensorView> attention_sinks,
+    Optional<TensorView> cum_seq_lens_q, Optional<TensorView> k_cache_scales,
+    Optional<TensorView> v_cache_scales, Optional<TensorView> lse) {
   auto q_data_type = dl_dtype_to_tllm_data_type(query.dtype());
   auto kv_data_type = dl_dtype_to_tllm_data_type(key_cache.dtype());
   TVM_FFI_ICHECK_EQ(key_cache.ndim(), value_cache.ndim());
@@ -335,15 +333,14 @@ void trtllm_paged_attention_decode(TensorView out, Optional<TensorView> out_scal
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),
       workspace_buffer.data_ptr(), static_cast<int*>(block_tables.data_ptr()),
       static_cast<int*>(seq_lens.data_ptr()), cum_seq_lens_q_ptr,
-      /*cum_seq_lens_kv*/nullptr, attention_sinks_ptr, lse_ptr,
-      k_cache_scales_ptr, v_cache_scales_ptr,
-      q_data_type, kv_data_type, o_data_type,
-      TllmPagedAttentionMode::ForGen, batch_size, max_q_len, max_kv_len, num_pages_in_mem_pool,
-      num_qo_heads, num_kv_heads, head_dim_q, head_dim_o, page_size, q_stride_tokens,
-      q_stride_heads, kv_stride_keys_values, kv_stride_heads, kv_stride_batch,
-      max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value, bmm1_scale_log2_ptr,
-      bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left, sum_seq_q,
-      sparse_mla_top_k, lse_stride_tokens, lse_stride_heads, sm_count, enable_pdl, workspace_size, stream);
+      /*cum_seq_lens_kv*/ nullptr, attention_sinks_ptr, lse_ptr, k_cache_scales_ptr,
+      v_cache_scales_ptr, q_data_type, kv_data_type, o_data_type, TllmPagedAttentionMode::ForGen,
+      batch_size, max_q_len, max_kv_len, num_pages_in_mem_pool, num_qo_heads, num_kv_heads,
+      head_dim_q, head_dim_o, page_size, q_stride_tokens, q_stride_heads, kv_stride_keys_values,
+      kv_stride_heads, kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
+      bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left,
+      sum_seq_q, sparse_mla_top_k, lse_stride_tokens, lse_stride_heads, sm_count, enable_pdl,
+      workspace_size, stream);
 }
 
 void trtllm_paged_attention_context(
@@ -356,7 +353,6 @@ void trtllm_paged_attention_context(
     bool enable_pdl, int64_t workspace_size, Optional<TensorView> attention_sinks,
     Optional<TensorView> k_cache_scales, Optional<TensorView> v_cache_scales,
     Optional<TensorView> lse) {
-
   auto q_data_type = dl_dtype_to_tllm_data_type(query.dtype());
   auto kv_data_type = dl_dtype_to_tllm_data_type(key_cache.dtype());
   auto o_data_type = dl_dtype_to_tllm_data_type(out.dtype());
@@ -444,14 +440,14 @@ void trtllm_paged_attention_context(
       workspace_buffer.data_ptr(), static_cast<int*>(block_tables.data_ptr()),
       static_cast<int*>(seq_lens.data_ptr()),
       /*cum_seq_lens_q=*/static_cast<int*>(cum_seq_lens_q.data_ptr()),
-      /*cum_seq_lens_kv=*/static_cast<int*>(cum_seq_lens_kv.data_ptr()), attention_sinks_ptr, lse_ptr,
-      k_cache_scales_ptr, v_cache_scales_ptr,
-      q_data_type, kv_data_type, o_data_type, TllmPagedAttentionMode::Context, batch_size,
-      max_q_len, max_kv_len, num_pages_in_mem_pool, num_qo_heads, num_kv_heads, head_dim_q,
-      head_dim_o, page_size, q_stride_tokens, q_stride_heads, kv_stride_keys_values,
-      kv_stride_heads, kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
-      bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left,
-      sum_seq_q, /*sparse_mla_top_k=*/0, lse_stride_tokens, lse_stride_heads, sm_count, enable_pdl,
+      /*cum_seq_lens_kv=*/static_cast<int*>(cum_seq_lens_kv.data_ptr()), attention_sinks_ptr,
+      lse_ptr, k_cache_scales_ptr, v_cache_scales_ptr, q_data_type, kv_data_type, o_data_type,
+      TllmPagedAttentionMode::Context, batch_size, max_q_len, max_kv_len, num_pages_in_mem_pool,
+      num_qo_heads, num_kv_heads, head_dim_q, head_dim_o, page_size, q_stride_tokens,
+      q_stride_heads, kv_stride_keys_values, kv_stride_heads, kv_stride_batch,
+      max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value, bmm1_scale_log2_ptr,
+      bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left, sum_seq_q,
+      /*sparse_mla_top_k=*/0, lse_stride_tokens, lse_stride_heads, sm_count, enable_pdl,
       workspace_size, stream);
 }
 
@@ -465,8 +461,8 @@ void trtllm_ragged_attention_launcher(
     int64_t batch_size, int64_t window_left, int64_t sm_count, bool enable_pdl, bool is_causal,
     int64_t k_stride_keys_values, int64_t k_stride_heads, int64_t k_stride_batch,
     int64_t v_stride_keys_values, int64_t v_stride_heads, int64_t v_stride_batch,
-    int64_t lse_stride_tokens, int64_t lse_stride_heads,
-    int64_t workspace_size, cudaStream_t stream) {
+    int64_t lse_stride_tokens, int64_t lse_stride_heads, int64_t workspace_size,
+    cudaStream_t stream) {
   if (num_qo_heads % num_kv_heads != 0) {
     std::ostringstream err_msg;
     err_msg << "num_qo_heads must be a multiple of num_kv_heads, got num_kv_heads: " << num_kv_heads
@@ -622,7 +618,8 @@ void trtllm_ragged_attention(TensorView out, TensorView query, TensorView key, T
       num_qo_heads, num_kv_heads, head_dim_qk, head_dim_v, sum_seq_q, sum_seq_kv, bmm1_scale_value,
       bmm2_scale_value, bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, batch_size, window_left,
       sm_count, enable_pdl, is_causal, k_stride_keys_values, k_stride_heads, k_stride_batch,
-      v_stride_keys_values, v_stride_heads, v_stride_batch, lse_stride_tokens, lse_stride_heads, workspace_size, stream);
+      v_stride_keys_values, v_stride_heads, v_stride_batch, lse_stride_tokens, lse_stride_heads,
+      workspace_size, stream);
 }
 
 namespace trtllm_cubin_loader {

@@ -3572,7 +3572,9 @@ def trtllm_batch_context_with_kv_cache(
     kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     return_lse: bool = False,
     lse: Optional[torch.Tensor] = None,
-) -> Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]:
+) -> Union[
+    torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]
+]:
     """
     Parameters
     ----------
@@ -3873,3 +3875,7 @@ def fmha_v2_prefill_deepseek(
         is_e4m3,
         is_bf16_output,
     )
+    if return_lse:
+        return out, lse
+    else:
+        return out

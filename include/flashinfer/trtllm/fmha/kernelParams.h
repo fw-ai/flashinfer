@@ -484,7 +484,8 @@ struct KernelParams {
     if (isPackedQkv(runnerParams.mQkvLayout)) {
       qPtr = runnerParams.qkvPtr;
       kPtr = reinterpret_cast<void const*>(reinterpret_cast<char const*>(runnerParams.qkvPtr) +
-                                           runnerParams.mNumHeadsQ * (runnerParams.mHeadDimQk * bitsPerElt / 8));
+                                           runnerParams.mNumHeadsQ *
+                                               (runnerParams.mHeadDimQk * bitsPerElt / 8));
       vPtr = reinterpret_cast<void const*>(reinterpret_cast<char const*>(runnerParams.qkvPtr) +
                                            (runnerParams.mNumHeadsQ + runnerParams.mNumHeadsKv) *
                                                (runnerParams.mHeadDimQk * bitsPerElt / 8));
@@ -501,9 +502,10 @@ struct KernelParams {
       // The maximum headDim of K and V.
       // Note that contiguousKv or pagedKv will pad K and V to maxHeadDimKv.
       int32_t const maxHeadDimKv{std::max(runnerParams.mHeadDimQk, runnerParams.mHeadDimV)};
-      vPtr = reinterpret_cast<void const*>(
-          reinterpret_cast<char const*>(runnerParams.kvPtr) +
-          runnerParams.mNumHeadsKv * runnerParams.mMaxSeqLenCacheKv * (maxHeadDimKv * bitsPerElt / 8));
+      vPtr =
+          reinterpret_cast<void const*>(reinterpret_cast<char const*>(runnerParams.kvPtr) +
+                                        runnerParams.mNumHeadsKv * runnerParams.mMaxSeqLenCacheKv *
+                                            (maxHeadDimKv * bitsPerElt / 8));
     }
 
     // Return the pointers.
