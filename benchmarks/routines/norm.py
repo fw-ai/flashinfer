@@ -142,13 +142,6 @@ def parse_norm_args(line, parser):
         default=False,
         help="Use swizzled scale factor layout for tensor core GEMM. Default: False",
     )
-    parser.add_argument(
-        "--output_both_sf_layouts",
-        action="store_true",
-        default=False,
-        help="Output both swizzled and unswizzled scale factors. When enabled, "
-        "overrides --is_sf_swizzled_layout and returns both layouts. Default: False",
-    )
 
     args = parser.parse_args(line)
     if args.verbose >= 1:
@@ -806,13 +799,6 @@ def testRmsnormFp4quant(args):
     if run_refcheck:
         print("[WARNING] --refcheck is not supported for rmsnorm_fp4quant.")
 
-    # Warn user that output_both_sf_layouts is not supported for rmsnorm_fp4quant
-    if args.output_both_sf_layouts:
-        print(
-            "[WARNING] --output_both_sf_layouts is not supported for rmsnorm_fp4quant. "
-            "Use add_rmsnorm_fp4quant instead. Flag will be ignored."
-        )
-
     def run_backend(backend, input_tensor, weight):
         if backend == "cute-dsl":
             return flashinfer.rmsnorm_fp4quant(
@@ -887,10 +873,7 @@ def testAddRmsnormFp4quant(args):
 
     This test:
     1. Generates random input and residual tensors
-    2. Runs add_rmsnorm_fp4quant:
-       - residual is updated in-place: residual = input + residual
-       - RMSNorm is computed on the updated residual
-       - Output is FP4 quantized
+    2. Runs add_rmsnorm_fp4quant (h = input + residual, then RMSNorm with FP4 quantized output)
     3. Runs reference check
     4. Measures performance metrics (memory bandwidth)
 
@@ -926,7 +909,6 @@ def testAddRmsnormFp4quant(args):
     out_dtype = args.out_dtype
     use_global_scale = args.use_global_scale
     is_sf_swizzled_layout = args.is_sf_swizzled_layout
-    output_both_sf_layouts = args.output_both_sf_layouts
     is_cuda_graph_compatible = not args.no_cuda_graph
     run_refcheck = args.refcheck
     res = []
@@ -991,7 +973,6 @@ def testAddRmsnormFp4quant(args):
         print(f"[VVERBOSE] {block_size = }")
         print(f"[VVERBOSE] {use_global_scale = }")
         print(f"[VVERBOSE] {is_sf_swizzled_layout = }")
-        print(f"[VVERBOSE] {output_both_sf_layouts = }")
 
     # Warn user that refcheck is not supported for FP4 quantization fusion
     if run_refcheck:
@@ -1007,7 +988,6 @@ def testAddRmsnormFp4quant(args):
                 block_size=block_size,
                 global_scale=global_scale,
                 is_sf_swizzled_layout=is_sf_swizzled_layout,
-                output_both_sf_layouts=output_both_sf_layouts,
             )
         else:
             raise ValueError(f"Unsupported backend: {backend}")
@@ -1031,22 +1011,18 @@ def testAddRmsnormFp4quant(args):
 
             # Memory bandwidth calculation for Add + RMSNorm + FP4 Quant
             # Read: input tensor + residual tensor + weight tensor
-            # Write: residual tensor (in-place update with input + residual) + FP4 output + scale factors
+            # Write: FP4 output + scale factors + h tensor (residual updated)
             num_elements = np.prod(input_shape)
             num_scale_elements = num_elements // block_size
             # FP4: 2 elements per byte (4 bits each)
             fp4_output_bytes = num_elements // 2
-            # Scale factors: 1 byte each. When output_both_sf_layouts=True, write 2x scale factors
-            sf_write_multiplier = 2 if output_both_sf_layouts else 1
             problem_bytes = (
                 num_elements * input_dtype.itemsize  # input read
                 + num_elements * input_dtype.itemsize  # residual read
                 + hidden_size * input_dtype.itemsize  # weight read
-                + num_elements
-                * input_dtype.itemsize  # residual write (in-place: input + residual)
                 + fp4_output_bytes  # FP4 output write
-                + num_scale_elements
-                * sf_write_multiplier  # scale factors write (1 byte each)
+                + num_scale_elements  # scale factors write (1 byte each)
+                + num_elements * input_dtype.itemsize  # h output write
             )
             problem_flops = num_elements * 6  # rough estimate (add + rmsnorm ops)
             tflops = problem_flops / (10**9 * median_time)  # in TFLOPs/sec
@@ -1067,7 +1043,6 @@ def testAddRmsnormFp4quant(args):
                 cur_res["eps"] = eps
                 cur_res["use_global_scale"] = use_global_scale
                 cur_res["is_sf_swizzled_layout"] = is_sf_swizzled_layout
-                cur_res["output_both_sf_layouts"] = output_both_sf_layouts
                 cur_res["backend"] = backend
                 cur_res["case_tag"] = args.case_tag
                 res.append(cur_res)
