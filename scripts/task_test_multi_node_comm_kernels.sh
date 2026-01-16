@@ -7,6 +7,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source test environment setup (handles package overrides like TVM-FFI)
 source "${SCRIPT_DIR}/setup_test_env.sh"
 
+# Source test environment setup (handles package overrides like TVM-FFI)
+source "$(dirname "${BASH_SOURCE[0]}")/setup_test_env.sh"
+
 # Clean Python bytecode cache to avoid stale imports (e.g., after module refactoring)
 # echo "Cleaning Python bytecode cache..."
 # find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
