@@ -48,13 +48,19 @@ def _check_cutlass_shape(q_nope_pe, ckv_kpe_cache, kv_len, page_table):
     if H != 128:
         raise ValueError(f"Expected 128 heads for q_nope_pe, got {H}")
     if D_q != D_ckv or D_q != 576:
-        raise ValueError(f"Expected head dim 576 for q_nope_pe and ckv_kpe_cache, got {D_q} and {D_ckv}")
+        raise ValueError(
+            f"Expected head dim 576 for q_nope_pe and ckv_kpe_cache, got {D_q} and {D_ckv}"
+        )
     B_block_table, block_num = page_table.shape
     block_size = ckv_kpe_cache.shape[1]
     if B_q != B_block_table:
-        raise ValueError(f"Expected batch size {B_q} for q_nope_pe and block_table, got {B_q} and {B_block_table}")
+        raise ValueError(
+            f"Expected batch size {B_q} for q_nope_pe and block_table, got {B_q} and {B_block_table}"
+        )
     if block_num % (128 / block_size) != 0:
-        raise ValueError(f"Expected block_num % (128 / block_size) == 0, got {block_num=} and {block_size=}")
+        raise ValueError(
+            f"Expected block_num % (128 / block_size) == 0, got {block_num=} and {block_size=}"
+        )
 
 
 def _check_trtllm_gen_mla_shape(
@@ -90,19 +96,27 @@ def _check_trtllm_gen_mla_shape(
     #     raise ValueError(f"Expected 128 heads for query, got {H}")
     # todo(Yingyi): should we check num_heads == 128? Is this deepseek only?
     if D_q != D_ckv or D_q != 576:
-        raise ValueError(f"Expected head dim 576 for query and kv_cache, got {D_q} and {D_ckv}")
+        raise ValueError(
+            f"Expected head dim 576 for query and kv_cache, got {D_q} and {D_ckv}"
+        )
 
     if sparse_mla_top_k > 0:
         page_table_shape = page_table.shape
         if page_table_shape != (B_q, Q_len, sparse_mla_top_k):
-            raise ValueError(f"Expected page_table.shape == (B_q, Q_len, sparse_mla_top_k), got {page_table_shape}")
+            raise ValueError(
+                f"Expected page_table.shape == (B_q, Q_len, sparse_mla_top_k), got {page_table_shape}"
+            )
     else:
         B_block_table, block_num = page_table.shape
         block_size = page_size
         if B_q != B_block_table:
-            raise ValueError(f"Expected batch size {B_q} for query and block_table, got {B_q} and {B_block_table}")
+            raise ValueError(
+                f"Expected batch size {B_q} for query and block_table, got {B_q} and {B_block_table}"
+            )
         if block_num % (128 / block_size) != 0:
-            raise ValueError(f"Expected block_num % (128 / block_size) == 0, got {block_num=} and {block_size=}")
+            raise ValueError(
+                f"Expected block_num % (128 / block_size) == 0, got {block_num=} and {block_size=}"
+            )
 
     return kv_cache
 
@@ -243,7 +257,9 @@ class BatchMLAPagedAttentionWrapper:
             self._backend = backend
             return
 
-        self._int_workspace_buffer = torch.empty((8 * 1024 * 1024,), dtype=torch.uint8, device=self.device)
+        self._int_workspace_buffer = torch.empty(
+            (8 * 1024 * 1024,), dtype=torch.uint8, device=self.device
+        )
         self._pin_memory_int_workspace_buffer = torch.empty(
             self._int_workspace_buffer.shape,
             dtype=self._int_workspace_buffer.dtype,
@@ -429,12 +445,16 @@ class BatchMLAPagedAttentionWrapper:
             if return_lse:
                 raise ValueError("return_lse does not support cutlass backend for now.")
             if profiler_buffer is not None:
-                raise ValueError("profiler_buffer does not support cutlass backend for now.")
+                raise ValueError(
+                    "profiler_buffer does not support cutlass backend for now."
+                )
             self._cached_module = get_mla_module()
             if out is None:
                 out = torch.empty_like(q_nope)
             else:
-                check_shape_dtype_device(out, q_nope.shape, q_nope.dtype, q_nope.device, "out")
+                check_shape_dtype_device(
+                    out, q_nope.shape, q_nope.dtype, q_nope.device, "out"
+                )
             q_nope_pe = torch.cat([q_nope, q_pe], dim=-1)
             ckv_kpe_cache = torch.cat([ckv_cache, kpe_cache], dim=-1)
             _check_cutlass_shape(q_nope_pe, ckv_kpe_cache, kv_len, page_table)
@@ -452,7 +472,9 @@ class BatchMLAPagedAttentionWrapper:
 
         if profiler_buffer is None:
             if self._use_profiler:
-                raise ValueError("Profiler is enabled, profiler_buffer must be provided")
+                raise ValueError(
+                    "Profiler is enabled, profiler_buffer must be provided"
+                )
         num_heads = q_nope.shape[1]
         page_size = self._page_size
         sm_scale = self._sm_scale
@@ -462,13 +484,17 @@ class BatchMLAPagedAttentionWrapper:
         if out is None:
             out = torch.empty_like(q_nope)
         else:
-            check_shape_dtype_device(out, q_nope.shape, q_nope.dtype, q_nope.device, "out")
+            check_shape_dtype_device(
+                out, q_nope.shape, q_nope.dtype, q_nope.device, "out"
+            )
 
         if return_lse:
             if lse is None:
                 lse = torch.empty(q_nope.shape[:2], dtype=torch.float32, device=device)
             else:
-                check_shape_dtype_device(lse, q_nope.shape[:2], torch.float32, q_nope.device, "lse")
+                check_shape_dtype_device(
+                    lse, q_nope.shape[:2], torch.float32, q_nope.device, "lse"
+                )
         profiler_args = (profiler_buffer,) if self._use_profiler else ()
         self._cached_module.run(
             self._float_workspace_buffer,
@@ -558,7 +584,9 @@ def trtllm_batch_decode_with_kv_cache_mla(
     When both are provided, the dynamic scale factor tensors will be used.
     """
     if backend == "auto":
-        backend = "trtllm-gen" if get_compute_capability(query.device)[0] == 10 else "xqa"
+        backend = (
+            "trtllm-gen" if get_compute_capability(query.device)[0] == 10 else "xqa"
+        )
     if isinstance(bmm1_scale, torch.Tensor):
         assert bmm1_scale.dtype == torch.float32
         bmm1_scale = bmm1_scale * log2e
@@ -576,7 +604,9 @@ def trtllm_batch_decode_with_kv_cache_mla(
         if sinks is not None:
             raise ValueError("XQA MLA does not support sinks")
         if query.size(1) != 1:
-            raise ValueError(f"XQA MLA only supports q_len_per_request == 1, got {query.size(1)}")
+            raise ValueError(
+                f"XQA MLA only supports q_len_per_request == 1, got {query.size(1)}"
+            )
         return xqa_batch_decode_with_kv_cache_mla(
             query,
             kv_cache,
@@ -594,13 +624,17 @@ def trtllm_batch_decode_with_kv_cache_mla(
             enable_pdl,
         )
     elif backend == "trtllm-gen":
-        enable_pdl = device_support_pdl(query.device) if enable_pdl is None else enable_pdl
+        enable_pdl = (
+            device_support_pdl(query.device) if enable_pdl is None else enable_pdl
+        )
         run_func = get_trtllm_gen_fmha_module().trtllm_paged_attention_decode
         sm_count = get_device_sm_count(query.device)
 
         # Extract block_size (works for both 3D and 4D)
         block_size = kv_cache.size(-2)
-        if block_size != 32 and block_size != 64:  # todo(Yingyi): add support for more block sizes?
+        if (
+            block_size != 32 and block_size != 64
+        ):  # todo(Yingyi): add support for more block sizes?
             raise ValueError(f"Supported block_size are 32 and 64, got {block_size}")
 
         # Validate and normalize to 4D
@@ -732,9 +766,13 @@ def xqa_batch_decode_with_kv_cache_mla(
     block_size = kv_cache.size(-2)
     q_len_per_request = query.size(1)
     if q_len_per_request != 1:
-        raise ValueError(f"XQA MLA only supports q_len_per_request == 1, got {q_len_per_request}")
+        raise ValueError(
+            f"XQA MLA only supports q_len_per_request == 1, got {q_len_per_request}"
+        )
     if query.dtype != torch.float8_e4m3fn or kv_cache.dtype != torch.float8_e4m3fn:
-        raise ValueError(f"XQA MLA only supports fp8 tensor core operation, got {query.dtype} and {kv_cache.dtype}")
+        raise ValueError(
+            f"XQA MLA only supports fp8 tensor core operation, got {query.dtype} and {kv_cache.dtype}"
+        )
     if sinks is not None:
         raise ValueError("XQA MLA does not support sinks")
 

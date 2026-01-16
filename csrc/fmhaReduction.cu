@@ -111,7 +111,8 @@ __global__ void __launch_bounds__(NumThreadsPerCta, 2)
   // The O pointer.
   DtypeO* oPtr = reinterpret_cast<DtypeO*>(params.ptrO) + oOffset;
   // The attentionSinks pointer.
-  float const* attentionSinksPtr = params.ptrAttentionSinks != nullptr ? params.ptrAttentionSinks + headIdxO : nullptr;
+  float const* attentionSinksPtr =
+      params.ptrAttentionSinks != nullptr ? params.ptrAttentionSinks + headIdxO : nullptr;
 
   // Whether to store the softmax stats.
   bool const storesSoftmaxStats{params.ptrSoftmaxStats != nullptr};

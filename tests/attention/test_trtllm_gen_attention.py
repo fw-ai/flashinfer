@@ -921,7 +921,9 @@ def _test_trtllm_batch_decode(
             )
             wrapper_ref.plan(**plan_params)
             if backend == "trtllm-gen":
-                output_ref, lse_ref = wrapper_ref.run(ref_q, ref_kv_cache, return_lse=True)
+                output_ref, lse_ref = wrapper_ref.run(
+                    ref_q, ref_kv_cache, return_lse=True
+                )
             else:
                 output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
                 lse_ref = None
@@ -945,7 +947,9 @@ def _test_trtllm_batch_decode(
             )
             wrapper_ref.plan(**plan_params_prefill)
             if backend == "trtllm-gen":
-                output_ref, lse_ref = wrapper_ref.run(ref_q, ref_kv_cache, return_lse=True)
+                output_ref, lse_ref = wrapper_ref.run(
+                    ref_q, ref_kv_cache, return_lse=True
+                )
             else:
                 output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
                 lse_ref = None
