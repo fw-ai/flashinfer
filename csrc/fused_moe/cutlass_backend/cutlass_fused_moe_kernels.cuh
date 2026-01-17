@@ -20,6 +20,8 @@
 #include <math.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -71,6 +73,39 @@ using namespace tensorrt_llm::kernels;
 using namespace tensorrt_llm::common;
 
 namespace tensorrt_llm::kernels::cutlass_kernels {
+namespace {
+inline bool debug_moe_gemm1_shapes() {
+  static int enabled = []() -> int {
+    const char* v = std::getenv("FLASHINFER_DEBUG_MOE_GEMM1_SHAPES");
+    return (v && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+  }();
+  return enabled != 0;
+}
+
+inline void debug_print_moe_gemm1_shapes(const char* where, int64_t expanded_num_rows,
+                                         int64_t hidden_size, int64_t inter_size,
+                                         int64_t fc1_out_size, int num_experts_per_node,
+                                         int64_t num_rows, int64_t experts_per_token,
+                                         bool using_tma_ws_gemm1, bool use_ampere_activation_fusion,
+                                         bool is_gated_activation, bool use_fp8, bool use_fp4,
+                                         bool use_w4_groupwise, bool swap_ab,
+                                         bool has_num_valid_tokens_ptr) {
+  if (!debug_moe_gemm1_shapes()) return;
+  std::fprintf(
+      stderr,
+      "[FLASHINFER_DEBUG_MOE_GEMM1_SHAPES] %s: "
+      "A=[%lld,%lld] W1=[%d,%lld,%lld] (experts, N, K) "
+      "num_rows=%lld experts_per_token=%lld inter_size=%lld "
+      "using_tma_ws=%d ampere_act_fusion=%d gated=%d fp8=%d fp4=%d w4_groupwise=%d swap_ab=%d "
+      "num_valid_tokens_ptr=%d\n",
+      where, (long long)expanded_num_rows, (long long)hidden_size, num_experts_per_node,
+      (long long)fc1_out_size, (long long)hidden_size, (long long)num_rows,
+      (long long)experts_per_token, (long long)inter_size, using_tma_ws_gemm1 ? 1 : 0,
+      use_ampere_activation_fusion ? 1 : 0, is_gated_activation ? 1 : 0, use_fp8 ? 1 : 0,
+      use_fp4 ? 1 : 0, use_w4_groupwise ? 1 : 0, swap_ab ? 1 : 0, has_num_valid_tokens_ptr ? 1 : 0);
+  std::fflush(stderr);
+}
+}  // namespace
 /**
  * Takes the input maps and prepares the expanded maps for min latency
  * @param num_active_experts_per_node: Number of active experts on current node
@@ -2991,6 +3026,34 @@ void CutlassMoeFCRunner<T, WeightType, OutputType, InputType, BackBoneType, Enab
   size_t const fc1_out_size =
       ((!use_ampere_activation_fusion) && is_gated_activation) ? inter_size * 2 : inter_size;
 
+  // Print shapes at GEMM1 entry, regardless of which branch we take next.
+  debug_print_moe_gemm1_shapes(
+      "gemm1:entry", expanded_num_rows, hidden_size, inter_size, (int64_t)fc1_out_size,
+      num_experts_per_node, num_rows, expanded_num_rows / std::max<int64_t>(num_rows, 1),
+      using_tma_ws_gemm1, use_ampere_activation_fusion, is_gated_activation, use_fp8, use_fp4,
+      use_w4_groupwise, config.swap_ab, num_valid_tokens_ptr != nullptr);
+
+  // Debug print for GEMM1 shapes. Enable with: FLASHINFER_DEBUG_MOE_GEMM1_SHAPES=1
+  // Notes:
+  // - GEMM1 A is the (expanded/permuted) activation matrix: [expanded_num_rows, hidden_size]
+  // - GEMM1 weights are per-expert: [num_experts_per_node, fc1_out_size, hidden_size]
+  if (debug_moe_gemm1_shapes()) {
+    TLLM_LOG_TRACE(
+        "FLASHINFER_DEBUG_MOE_GEMM1_SHAPES: "
+        "A=[%lld, %lld] (expanded_num_rows, hidden_size) "
+        "W1=[%d, %lld, %lld] (num_experts_per_node, fc1_out_size, hidden_size) "
+        "num_rows=%lld experts_per_token=%lld "
+        "using_tma_ws_gemm1=%d use_ampere_activation_fusion=%d is_gated_activation=%d "
+        "use_fp8=%d use_fp4=%d use_w4_groupwise=%d swap_ab=%d",
+        static_cast<long long>(expanded_num_rows), static_cast<long long>(hidden_size),
+        num_experts_per_node, static_cast<long long>(fc1_out_size),
+        static_cast<long long>(hidden_size), static_cast<long long>(num_rows),
+        static_cast<long long>(expanded_num_rows / std::max<int64_t>(num_rows, 1)),
+        using_tma_ws_gemm1 ? 1 : 0, use_ampere_activation_fusion ? 1 : 0,
+        is_gated_activation ? 1 : 0, use_fp8 ? 1 : 0, use_fp4 ? 1 : 0, use_w4_groupwise ? 1 : 0,
+        config.swap_ab ? 1 : 0);
+  }
+
   int64_t const* total_tokens_including_expert = expert_first_token_offset + 1;
 
   if (min_latency_mode) {
@@ -3003,6 +3066,11 @@ void CutlassMoeFCRunner<T, WeightType, OutputType, InputType, BackBoneType, Enab
   }
 
   if (using_tma_ws_gemm1) {
+    debug_print_moe_gemm1_shapes(
+        "gemm1:using_tma_ws", expanded_num_rows, hidden_size, inter_size, (int64_t)fc1_out_size,
+        num_experts_per_node, num_rows, expanded_num_rows / std::max<int64_t>(num_rows, 1),
+        using_tma_ws_gemm1, use_ampere_activation_fusion, is_gated_activation, use_fp8, use_fp4,
+        use_w4_groupwise, config.swap_ab, num_valid_tokens_ptr != nullptr);
     TLLM_CHECK(config.is_tma_warp_specialized);
     TLLM_CHECK(!use_ampere_activation_fusion);
     TLLM_CHECK(!use_fp4 || fc1_fp4_act_flat);
@@ -3062,6 +3130,11 @@ void CutlassMoeFCRunner<T, WeightType, OutputType, InputType, BackBoneType, Enab
 
     sync_check_cuda_error(stream);
   } else if (use_fp8) {
+    debug_print_moe_gemm1_shapes(
+        "gemm1:non_tma_ws_fp8", expanded_num_rows, hidden_size, inter_size, (int64_t)fc1_out_size,
+        num_experts_per_node, num_rows, expanded_num_rows / std::max<int64_t>(num_rows, 1),
+        using_tma_ws_gemm1, use_ampere_activation_fusion, is_gated_activation, use_fp8, use_fp4,
+        use_w4_groupwise, config.swap_ab, num_valid_tokens_ptr != nullptr);
     TLLM_CHECK(!use_ampere_activation_fusion);
     TLLM_CHECK(!config.is_tma_warp_specialized);
     TLLM_CHECK(!use_block_scaling);
@@ -3100,6 +3173,12 @@ void CutlassMoeFCRunner<T, WeightType, OutputType, InputType, BackBoneType, Enab
 
     sync_check_cuda_error(stream);
   } else if (!is_gated_activation) {
+    debug_print_moe_gemm1_shapes("gemm1:non_tma_ws_non_gated", expanded_num_rows, hidden_size,
+                                 inter_size, (int64_t)fc1_out_size, num_experts_per_node, num_rows,
+                                 expanded_num_rows / std::max<int64_t>(num_rows, 1),
+                                 using_tma_ws_gemm1, use_ampere_activation_fusion,
+                                 is_gated_activation, use_fp8, use_fp4, use_w4_groupwise,
+                                 config.swap_ab, num_valid_tokens_ptr != nullptr);
     TLLM_CHECK(!use_ampere_activation_fusion);
     TLLM_CHECK(!config.is_tma_warp_specialized);
     TLLM_CHECK(!use_block_scaling);
@@ -3135,6 +3214,11 @@ void CutlassMoeFCRunner<T, WeightType, OutputType, InputType, BackBoneType, Enab
 
     sync_check_cuda_error(stream);
   } else {
+    debug_print_moe_gemm1_shapes(
+        "gemm1:non_tma_ws_gated", expanded_num_rows, hidden_size, inter_size, (int64_t)fc1_out_size,
+        num_experts_per_node, num_rows, expanded_num_rows / std::max<int64_t>(num_rows, 1),
+        using_tma_ws_gemm1, use_ampere_activation_fusion, is_gated_activation, use_fp8, use_fp4,
+        use_w4_groupwise, config.swap_ab, num_valid_tokens_ptr != nullptr);
     TLLM_CHECK(!config.is_tma_warp_specialized);
     TLLM_CHECK(is_gated_activation);
     TLLM_CHECK_WITH_INFO(!use_ampere_activation_fusion || input != output,
@@ -3694,6 +3778,19 @@ void CutlassMoeFCRunner<T, WeightType, OutputType, InputType, BackBoneType, Enab
       needs_num_valid ? expert_first_token_offset_ + num_experts_per_node : nullptr;
 
   auto expanded_num_rows = num_rows * experts_per_token;
+
+  // Print once per runMoe() right before GEMM1 setup/launch (so we know if we ever reach GEMM1).
+  // Note: flags like use_fp8/use_fp4 are compile-time constexprs in this TU, so we can print them.
+  if (debug_moe_gemm1_shapes()) {
+    std::fprintf(stderr,
+                 "[FLASHINFER_DEBUG_MOE_GEMM1_SHAPES] runMoe:pre_gemm1: "
+                 "num_rows=%lld expanded_num_rows=%lld hidden_size=%lld inter_size=%lld "
+                 "experts_per_token=%d num_experts_per_node=%d ep_size=%d ep_rank=%d\n",
+                 (long long)num_rows, (long long)expanded_num_rows, (long long)hidden_size,
+                 (long long)inter_size, experts_per_token, num_experts_per_node,
+                 parallelism_config.ep_size, parallelism_config.ep_rank);
+    std::fflush(stderr);
+  }
 
   if (min_latency_mode) {
     TLLM_CHECK(use_lora == false);
