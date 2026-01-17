@@ -20,6 +20,7 @@
 #include <math.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -71,6 +72,15 @@ using namespace tensorrt_llm::kernels;
 using namespace tensorrt_llm::common;
 
 namespace tensorrt_llm::kernels::cutlass_kernels {
+namespace {
+inline bool debug_moe_gemm1_shapes() {
+  static int enabled = []() -> int {
+    const char* v = std::getenv("FLASHINFER_DEBUG_MOE_GEMM1_SHAPES");
+    return (v && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+  }();
+  return enabled != 0;
+}
+}  // namespace
 /**
  * Takes the input maps and prepares the expanded maps for min latency
  * @param num_active_experts_per_node: Number of active experts on current node
@@ -2990,6 +3000,27 @@ void CutlassMoeFCRunner<T, WeightType, OutputType, InputType, BackBoneType, Enab
       config, fc1_activation_type.activation_type, inter_size, hidden_size);
   size_t const fc1_out_size =
       ((!use_ampere_activation_fusion) && is_gated_activation) ? inter_size * 2 : inter_size;
+
+  // Debug print for GEMM1 shapes. Enable with: FLASHINFER_DEBUG_MOE_GEMM1_SHAPES=1
+  // Notes:
+  // - GEMM1 A is the (expanded/permuted) activation matrix: [expanded_num_rows, hidden_size]
+  // - GEMM1 weights are per-expert: [num_experts_per_node, fc1_out_size, hidden_size]
+  if (debug_moe_gemm1_shapes()) {
+    TLLM_LOG_TRACE(
+        "FLASHINFER_DEBUG_MOE_GEMM1_SHAPES: "
+        "A=[%lld, %lld] (expanded_num_rows, hidden_size) "
+        "W1=[%d, %lld, %lld] (num_experts_per_node, fc1_out_size, hidden_size) "
+        "num_rows=%lld experts_per_token=%lld "
+        "using_tma_ws_gemm1=%d use_ampere_activation_fusion=%d is_gated_activation=%d "
+        "use_fp8=%d use_fp4=%d use_w4_groupwise=%d swap_ab=%d",
+        static_cast<long long>(expanded_num_rows), static_cast<long long>(hidden_size),
+        num_experts_per_node, static_cast<long long>(fc1_out_size),
+        static_cast<long long>(hidden_size), static_cast<long long>(num_rows),
+        static_cast<long long>(expanded_num_rows / std::max<int64_t>(num_rows, 1)),
+        using_tma_ws_gemm1 ? 1 : 0, use_ampere_activation_fusion ? 1 : 0,
+        is_gated_activation ? 1 : 0, use_fp8 ? 1 : 0, use_fp4 ? 1 : 0, use_w4_groupwise ? 1 : 0,
+        config.swap_ab ? 1 : 0);
+  }
 
   int64_t const* total_tokens_including_expert = expert_first_token_offset + 1;
 
