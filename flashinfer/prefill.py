@@ -2501,7 +2501,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             will be used in attention computation.
 
         backend : str
-            The implementation backend, could be ``auto``/``fa2``/``fa3`` or ``cutlass``.
+            The implementation backend, could be ``auto``/``fa2``/``fa3``/``cudnn`` or ``cutlass``.
             Defaults to ``auto``.
             If set to ``auto``, the wrapper will automatically choose the backend based on the
             device architecture and kernel availability.
@@ -3103,6 +3103,35 @@ class BatchPrefillWithRaggedKVCacheWrapper:
                 batch_size = self._seq_lens_q.shape[0]
             if self._seq_lens_q is not None and self._seq_lens_q.dim() == 1:
                 self._seq_lens_q = self._seq_lens_q.reshape(batch_size, 1, 1, 1)
+
+            if self._seq_lens_kv is not None and self._seq_lens_kv.dim() == 1:
+                self._seq_lens_kv = self._seq_lens_kv.reshape(batch_size, 1, 1, 1)
+
+            cudnn_batch_prefill_with_kv_cache(
+                q,
+                k,
+                v,
+                sm_scale,
+                self._float_workspace_buffer,
+                max_token_per_sequence=self._max_token_per_sequence,
+                max_sequence_kv=self._max_sequence_kv,
+                actual_seq_lens_q=self._seq_lens_q,
+                actual_seq_lens_kv=self._seq_lens_kv,
+                return_lse=return_lse,
+                causal=self._causal,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
+                batch_offsets_q=self._qo_indptr_buf,
+                batch_offsets_k=self._kv_indptr_buf,
+                batch_offsets_v=self._v_indptr_buf,
+                batch_offsets_o=self._o_indptr_buf,
+                is_cuda_graph_compatible=self._use_cuda_graph,
+                out=out,
+                lse=lse,
+            )
+
+            return (out, lse) if return_lse else out
 
         # Skip FP8->FP16 conversion for FA3 backend with FP8 support
         # The JIT module will handle FP8 natively

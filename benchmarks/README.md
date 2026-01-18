@@ -321,8 +321,9 @@ Backend Legend:
 - fa2: FlashAttention2
 - fa2_tc: FlashAttention2 (with Tensor Cores for `BatchDecodeWithPagedKVCacheWrapper`)
 - fa3: FlashAttention-3
-- cudnn: cuDNN
 - cublas: cuBLAS
+- cudnn: cuDNN (via wrapper API)
+- cudnn-native: cuDNN (direct API call)
 - cutlass: CUTLASS
 - tgv: TGV
 - trtllm: TensorRT-LLM
