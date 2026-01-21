@@ -8,11 +8,6 @@ from routines.flashinfer_benchmark_utils import (
     full_output_columns,
     output_column_dict,
 )
-from routines.gemm import parse_gemm_args, run_gemm_test
-from routines.moe import parse_moe_args, run_moe_test
-from routines.moe_comm import parse_moe_comm_args, run_moe_comm_test
-from routines.norm import parse_norm_args, run_norm_test
-from routines.quantization import parse_quantization_args, run_quantization_test
 
 
 def run_test(args):
@@ -38,10 +33,16 @@ def run_test(args):
 
         res = run_moe_test(args)
     elif args.routine in benchmark_apis["moe_comm"]:
+        from routines.moe_comm import run_moe_comm_test
+
         res = run_moe_comm_test(args)
     elif args.routine in benchmark_apis["norm"]:
+        from routines.norm import run_norm_test
+
         res = run_norm_test(args)
     elif args.routine in benchmark_apis["quantization"]:
+        from routines.quantization import run_quantization_test
+
         res = run_quantization_test(args)
     else:
         raise ValueError(f"Unsupported routine: {args.routine}")
@@ -187,10 +188,16 @@ def parse_args(line=sys.argv[1:]):
 
         args = parse_moe_args(line, parser)
     elif args.routine in benchmark_apis["moe_comm"]:
+        from routines.moe_comm import parse_moe_comm_args
+
         args = parse_moe_comm_args(line, parser)
     elif args.routine in benchmark_apis["norm"]:
+        from routines.norm import parse_norm_args
+
         args = parse_norm_args(line, parser)
     elif args.routine in benchmark_apis["quantization"]:
+        from routines.quantization import parse_quantization_args
+
         args = parse_quantization_args(line, parser)
     else:
         raise ValueError(f"Unsupported routine: {args.routine}")
