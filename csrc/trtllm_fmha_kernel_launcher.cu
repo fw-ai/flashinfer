@@ -462,7 +462,7 @@ void trtllm_paged_attention_context(
       head_dim_o, page_size, q_stride_tokens, q_stride_heads, kv_stride_keys_values,
       kv_stride_heads, kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
       bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left,
-      sum_seq_q, /*sparse_mla_top_k=*/0, lse_stride_tokens, lse_stride_heads,sm_count, sm_count,
+      sum_seq_q, /*sparse_mla_top_k=*/0, lse_stride_tokens, lse_stride_heads, sm_count,
       enable_pdl, workspace_size, stream);
 }
 
