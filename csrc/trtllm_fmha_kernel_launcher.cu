@@ -165,7 +165,7 @@ void trtllm_paged_attention_launcher(
 
     runner_params.cumSeqLensQPtr = cum_seq_lens_q;
     runner_params.cumSeqLensKvPtr = cum_seq_lens_kv;
-    
+
     runner_params.softmaxStatsPtr = float_allocator.aligned_alloc<float2>(
       sizeof(float2) * num_qo_heads * runner_params.mSumOfSeqLensQ, 16,
       "trtllm_gen_softmax_workspace");
@@ -238,10 +238,10 @@ void trtllm_paged_attention_decode(TensorView out, Optional<TensorView> out_scal
                                    int64_t batch_size, int64_t window_left,
                                    int64_t sparse_mla_top_k, int64_t sm_count, bool enable_pdl,
                                    int64_t workspace_size, Optional<TensorView> attention_sinks,
-                                   Optional<TensorView> cum_seq_lens_q
-				   Optional<TensorView> k_cache_scales,
-				   Optional<TensorView> v_cache_scales,
-				   Optional<TensorView> lse) {
+                                   Optional<TensorView> cum_seq_lens_q,
+				                           Optional<TensorView> k_cache_scales,
+				                           Optional<TensorView> v_cache_scales,
+				                           Optional<TensorView> lse) {
   auto q_data_type = dl_dtype_to_tllm_data_type(query.dtype());
   auto kv_data_type = dl_dtype_to_tllm_data_type(key_cache.dtype());
   TVM_FFI_ICHECK_EQ(key_cache.ndim(), value_cache.ndim());
@@ -276,7 +276,6 @@ void trtllm_paged_attention_decode(TensorView out, Optional<TensorView> out_scal
   int kv_stride_keys_values = key_cache.stride(-2);  // key/values
   int kv_stride_heads = key_cache.stride(-3);        // head
   int kv_stride_batch = key_cache.stride(0);         // batch
-  int kv_stride_batch = key_cache.stride(0);  // batch
   if (is_4bit(kv_data_type)) {
     kv_stride_keys_values *= 2;
     kv_stride_heads *= 2;
@@ -327,14 +326,10 @@ void trtllm_paged_attention_decode(TensorView out, Optional<TensorView> out_scal
     lse_stride_heads = lse.value().stride(2);
   }
 
-  void* k_cache_scales_ptr = nullptr;
-  void* v_cache_scales_ptr = nullptr;
-  if (k_cache_scales.has_value()) {
-    k_cache_scales_ptr = k_cache_scales.value().data_ptr();
-  }
-  if (v_cache_scales.has_value()) {
-    v_cache_scales_ptr = v_cache_scales.value().data_ptr();
-  }
+  void* k_cache_scales_ptr = k_cache_scales.has_value() ? k_cache_scales.value().data_ptr()
+                                                        : nullptr;
+  void* v_cache_scales_ptr = v_cache_scales.has_value() ? v_cache_scales.value().data_ptr()
+                                                        : nullptr;
 
   trtllm_paged_attention_launcher(
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),
@@ -439,14 +434,10 @@ void trtllm_paged_attention_context(
     lse_stride_heads = lse.value().stride(1);
   }
 
-  void* k_cache_scales_ptr = nullptr;
-  void* v_cache_scales_ptr = nullptr;
-  if (k_cache_scales.has_value()) {
-    k_cache_scales_ptr = k_cache_scales.value().data_ptr();
-  }
-  if (v_cache_scales.has_value()) {
-    v_cache_scales_ptr = v_cache_scales.value().data_ptr();
-  }
+  void* k_cache_scales_ptr = k_cache_scales.has_value() ? k_cache_scales.value().data_ptr()
+                                                        : nullptr;
+  void* v_cache_scales_ptr = v_cache_scales.has_value() ? v_cache_scales.value().data_ptr()
+                                                        : nullptr;
 
   trtllm_paged_attention_launcher(
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),
