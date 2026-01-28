@@ -3684,7 +3684,7 @@ def trtllm_batch_context_with_kv_cache(
         sinks,
         k_cache_scale,
         v_cache_scale,
-        lse
+        lse,
     )
     out = (
         out
@@ -3774,3 +3774,8 @@ def fmha_v2_prefill_deepseek(
         is_e4m3,
         is_bf16_output,
     )
+
+    if return_lse:
+        return out, lse
+    else:
+        return out
