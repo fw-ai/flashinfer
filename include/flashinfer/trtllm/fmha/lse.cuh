@@ -23,7 +23,9 @@ limitations under the License.
 
 namespace flashinfer {
 
-__global__ void ComputeLSEFromMDKernel(float2* __restrict__ md, float* __restrict__ lse, int num_tokens, int num_heads, int lse_stride_tokens, int lse_stride_heads) {
+__global__ void ComputeLSEFromMDKernel(float2* __restrict__ md, float* __restrict__ lse,
+                                       int num_tokens, int num_heads, int lse_stride_tokens,
+                                       int lse_stride_heads) {
   int elem_idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (elem_idx >= num_tokens * num_heads) return;
 #if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
@@ -33,7 +35,7 @@ __global__ void ComputeLSEFromMDKernel(float2* __restrict__ md, float* __restric
   float m = md_elem.x;
   float d = md_elem.y;
   int token_idx = elem_idx / num_heads;
-  int head_idx  = elem_idx % num_heads;
+  int head_idx = elem_idx % num_heads;
   int elem_idx_lse = token_idx * lse_stride_tokens + head_idx * lse_stride_heads;
   lse[elem_idx_lse] = m + math::loge2 * math::ptx_log2(d);
 #if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
@@ -41,7 +43,8 @@ __global__ void ComputeLSEFromMDKernel(float2* __restrict__ md, float* __restric
 #endif
 }
 
-inline cudaError_t ComputeLSEFromMD(float2* md, float* lse, int num_tokens, int num_heads, int lse_stride_tokens, int lse_stride_heads, 
+inline cudaError_t ComputeLSEFromMD(float2* md, float* lse, int num_tokens, int num_heads,
+                                    int lse_stride_tokens, int lse_stride_heads,
                                     bool launch_with_pdl, cudaStream_t stream) {
   int n = num_tokens * num_heads;
   int num_threads = std::min(1024, UpPowerOfTwo(n));
@@ -57,7 +60,8 @@ inline cudaError_t ComputeLSEFromMD(float2* md, float* lse, int num_tokens, int 
   config.numAttrs = 1;
   config.attrs = attrs;
 
-  FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, ComputeLSEFromMDKernel, md, lse, num_tokens, num_heads, lse_stride_tokens, lse_stride_heads));
+  FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, ComputeLSEFromMDKernel, md, lse, num_tokens,
+                                          num_heads, lse_stride_tokens, lse_stride_heads));
   return cudaSuccess;
 }
 
