@@ -55,6 +55,7 @@ from cutlass.cutlass_dsl import (
 )
 from cutlass._mlir.dialects import llvm
 from flashinfer.utils import get_compute_capability
+from flashinfer.api_logging import flashinfer_api
 from cutlass.utils.static_persistent_tile_scheduler import WorkTileInfo
 from .utils import get_cutlass_dtype, cutlass_to_torch_dtype, get_num_sm, make_ptr
 from typing import Callable, List
@@ -529,8 +530,9 @@ class Sm100BlockScaledPersistentDenseGemmKernel:
         :param cluster_shape_mn: Tuple (ClusterM, ClusterN) shape of the cluster.
         :type cluster_shape_mn: Tuple[int, int]
         """
-        assert sm_version == "sm_100", (
-            "sm_100 is the only supported SM version for cute-dsl backend."
+        supported_sm_versions = ["sm_100", "sm_103"]
+        assert sm_version in supported_sm_versions, (
+            f"{supported_sm_versions} are the only supported SM versions for cute-dsl backend, but encountered {sm_version}"
         )
 
         self.acc_dtype = cutlass.Float32
@@ -2941,6 +2943,7 @@ def get_cute_dsl_compiled_masked_gemm_kernel(
     return tensor_api
 
 
+@flashinfer_api
 def grouped_gemm_nt_masked(
     lhs: Tuple[torch.Tensor, torch.Tensor],
     rhs: Tuple[torch.Tensor, torch.Tensor],

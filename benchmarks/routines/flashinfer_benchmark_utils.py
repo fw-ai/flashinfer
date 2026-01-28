@@ -15,7 +15,6 @@ output_column_dict = {
     ],
     "attention": [
         "page_size",
-        "batch_size",
         "s_qo",
         "s_kv",
         "num_qo_heads",
@@ -37,14 +36,12 @@ output_column_dict = {
         "group_size",
         "tile_size",
         "scale_major_mode",
-        "out_dtype",
         "mma_sm",
         "use_128x4_sf_layout",
         "use_nvfp4",
     ],
     "moe": [
         "num_tokens",
-        "hidden_size",
         "intermediate_size",
         "num_experts",
         "top_k",
@@ -53,13 +50,11 @@ output_column_dict = {
         "routed_scaling_factor",
         "local_expert_offset",
         "local_num_experts",
-        "tile_tokens_dim",
         "routing_method",
         "use_shuffled_weight",
         "weight_layout",
         "use_routing_bias",
         "use_routing_scales_on_input",
-        "input_dtype",
         "weight_dtype",
         "gated_act",
         # CUTLASS fused MoE specific
@@ -70,7 +65,40 @@ output_column_dict = {
         "ep_size",
         "ep_rank",
     ],
+    "moe_comm": [
+        "num_tokens",
+        "hidden_size",
+        "num_experts",
+        "top_k",
+        "ep_size",
+        "input_dtype",
+        "quant_dtype",
+        "max_num_tokens",
+    ],
+    "norm": [
+        "num_heads",
+        "scale",
+        "eps",
+        "enable_pdl",
+        "use_global_scale",
+        "is_sf_swizzled_layout",
+    ],
+    "quantization": [
+        "m",
+        "k",
+        "is_sf_swizzled_layout",
+        "alignment",
+        "enable_pdl",
+        "global_scale",
+        "sf_layout",
+        "do_shuffle",
+        "sf_vec_size",
+    ],
     "general": [
+        "batch_size",
+        "hidden_size",
+        "input_dtype",
+        "out_dtype",
         "refcheck",
         "no_cuda_graph",
         "use_cupti",
@@ -87,6 +115,9 @@ full_output_columns = (
     + output_column_dict["attention"]
     + output_column_dict["gemm"]
     + output_column_dict["moe"]
+    + output_column_dict["moe_comm"]
+    + output_column_dict["norm"]
+    + output_column_dict["quantization"]
     + output_column_dict["general"]
 )
 
@@ -101,6 +132,7 @@ benchmark_apis = {
         "gemm_fp8_nt_groupwise",
         "group_gemm_fp8_nt_groupwise",
         "bmm_fp8",
+        "bmm_mxfp8",
         "mm_fp4",
     ],
     "moe": [
@@ -108,6 +140,22 @@ benchmark_apis = {
         "trtllm_fp8_block_scale_moe",
         "trtllm_fp8_per_tensor_scale_moe",
         "cutlass_fused_moe",
+    ],
+    "moe_comm": [
+        "moe_a2a_dispatch_combine",
+    ],
+    "norm": [
+        "rmsnorm",
+        "rmsnorm_quant",
+        "fused_add_rmsnorm_quant",
+        "rmsnorm_fp4quant",
+        "add_rmsnorm_fp4quant",
+    ],
+    "quantization": [
+        "mxfp8_quantize",
+        "mxfp4_quantize",
+        "nvfp4_quantize",
+        "nvfp4_batched_quantize",
     ],
 }
 
@@ -174,25 +222,27 @@ routine_cc_to_supported_backends = {
     },
     "BatchPrefillWithPagedKVCacheWrapper": {
         # NOTE: trtllm-native calls trtllm_batch_context_with_kv_cache
+        # NOTE: cudnn-native calls cudnn_batch_prefill_with_kv_cache
         "7.5": [],
-        "8.0": ["fa2", "cudnn"],
-        "8.6": ["fa2", "cudnn"],
-        "8.9": ["fa2", "cudnn"],
-        "9.0": ["fa2", "fa3", "cudnn"],
-        "10.0": ["fa2", "cudnn", "trtllm-gen", "trtllm-native"],
-        "10.3": ["fa2", "cudnn", "trtllm-gen", "trtllm-native"],
-        "12.0": ["fa2", "cudnn"],
+        "8.0": ["fa2", "cudnn", "cudnn-native"],
+        "8.6": ["fa2", "cudnn", "cudnn-native"],
+        "8.9": ["fa2", "cudnn", "cudnn-native"],
+        "9.0": ["fa2", "fa3", "cudnn", "cudnn-native"],
+        "10.0": ["fa2", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
+        "10.3": ["fa2", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
+        "12.0": ["fa2", "cudnn", "cudnn-native"],
     },
     "BatchPrefillWithRaggedKVCacheWrapper": {
         # NOTE: trtllm-native calls trtllm_ragged_attention_deepseek
+        # NOTE: cudnn-native calls cudnn_batch_prefill_with_kv_cache
         "7.5": [],
-        "8.0": ["fa2", "cudnn"],
-        "8.6": ["fa2", "cudnn"],
-        "8.9": ["fa2", "cudnn"],
-        "9.0": ["fa2", "fa3", "cudnn"],
-        "10.0": ["fa2", "cudnn", "cutlass", "trtllm-native"],
-        "10.3": ["fa2", "cudnn", "cutlass", "trtllm-native"],
-        "12.0": ["fa2", "cudnn"],
+        "8.0": ["fa2", "cudnn", "cudnn-native"],
+        "8.6": ["fa2", "cudnn", "cudnn-native"],
+        "8.9": ["fa2", "cudnn", "cudnn-native"],
+        "9.0": ["fa2", "fa3", "cudnn", "cudnn-native"],
+        "10.0": ["fa2", "cudnn", "cudnn-native", "cutlass", "trtllm-native"],
+        "10.3": ["fa2", "cudnn", "cudnn-native", "cutlass", "trtllm-native"],
+        "12.0": ["fa2", "cudnn", "cudnn-native"],
     },
     "BatchMLAPagedAttentionWrapper": {
         # NOTE: trtllm-native calls trtllm_batch_decode_with_kv_cache_mla
@@ -236,17 +286,17 @@ routine_cc_to_supported_backends = {
         "10.3": ["cudnn", "cublas", "cutlass"],
         "12.0": ["cudnn", "cublas"],
     },
-    "mm_fp4": {
+    "bmm_mxfp8": {
         "7.5": [],
         "8.0": [],
         "8.6": [],
         "8.9": [],
         "9.0": [],
-        "10.0": ["cudnn", "trtllm", "cutlass"],
-        "10.3": ["cudnn", "trtllm", "cutlass"],
-        "12.0": ["cudnn", "cutlass"],
-        "12.1": ["cudnn", "cutlass"],
+        "10.0": ["cudnn"],
+        "10.3": ["cudnn"],
+        "12.0": [],
     },
+    # Note: mm_fp4 uses support checkers to filter backends, so it is not listed here
     # MOE
     "trtllm_fp4_block_scale_moe": {
         "7.5": [],
@@ -287,6 +337,99 @@ routine_cc_to_supported_backends = {
         "10.0": ["cutlass"],
         "10.3": ["cutlass"],
         "12.0": [],
+    },
+    # NORM
+    "rmsnorm": {
+        "7.5": ["cuda"],
+        "8.0": ["cuda"],
+        "8.6": ["cuda"],
+        "8.9": ["cuda"],
+        "9.0": ["cuda"],
+        "10.0": ["cuda"],
+        "10.3": ["cuda"],
+        "12.0": ["cuda"],
+    },
+    "rmsnorm_quant": {
+        "7.5": ["cuda"],
+        "8.0": ["cuda"],
+        "8.6": ["cuda"],
+        "8.9": ["cuda"],
+        "9.0": ["cuda"],
+        "10.0": ["cuda"],
+        "10.3": ["cuda"],
+        "12.0": ["cuda"],
+    },
+    "fused_add_rmsnorm_quant": {
+        "7.5": ["cuda"],
+        "8.0": ["cuda"],
+        "8.6": ["cuda"],
+        "8.9": ["cuda"],
+        "9.0": ["cuda"],
+        "10.0": ["cuda"],
+        "10.3": ["cuda"],
+        "12.0": ["cuda"],
+    },
+    # NORM - FP4 Quantization (Blackwell SM100+ only, CuTe-DSL kernels)
+    "rmsnorm_fp4quant": {
+        "7.5": [],
+        "8.0": [],
+        "8.6": [],
+        "8.9": [],
+        "9.0": [],
+        "10.0": ["cute-dsl"],
+        "10.3": ["cute-dsl"],
+        "12.0": ["cute-dsl"],
+    },
+    "add_rmsnorm_fp4quant": {
+        "7.5": [],
+        "8.0": [],
+        "8.6": [],
+        "8.9": [],
+        "9.0": [],
+        "10.0": ["cute-dsl"],
+        "10.3": ["cute-dsl"],
+        "12.0": ["cute-dsl"],
+    },
+    # QUANTIZATION
+    "mxfp8_quantize": {
+        "7.5": [],
+        "8.0": [],
+        "8.6": [],
+        "8.9": [],
+        "9.0": [],
+        "10.0": ["cuda"],
+        "10.3": ["cuda"],
+        "12.0": ["cuda"],
+    },
+    "mxfp4_quantize": {
+        "7.5": [],
+        "8.0": [],
+        "8.6": [],
+        "8.9": [],
+        "9.0": [],
+        "10.0": ["cuda"],
+        "10.3": ["cuda"],
+        "12.0": ["cuda"],
+    },
+    "nvfp4_quantize": {
+        "7.5": [],
+        "8.0": [],
+        "8.6": [],
+        "8.9": [],
+        "9.0": [],
+        "10.0": ["cuda"],
+        "10.3": ["cuda"],
+        "12.0": ["cuda"],
+    },
+    "nvfp4_batched_quantize": {
+        "7.5": [],
+        "8.0": [],
+        "8.6": [],
+        "8.9": [],
+        "9.0": [],
+        "10.0": ["cuda"],
+        "10.3": ["cuda"],
+        "12.0": ["cuda"],
     },
 }
 

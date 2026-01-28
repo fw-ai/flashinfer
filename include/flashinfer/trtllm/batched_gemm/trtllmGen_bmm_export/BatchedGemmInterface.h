@@ -16,8 +16,10 @@
  */
 #pragma once
 
+#include <functional>
 #include <numeric>
 #include <optional>
+#include <unordered_map>
 
 #include "BatchedGemmOptions.h"
 #include "KernelParams.h"
@@ -95,7 +97,7 @@ struct BatchedGemmData {
     // The matrix A. The data type is controlled by options.mDtypeA.
     //
     // If (routeAct == true && batchM), the shape is [M, K]
-    // Else
+    // Elseif (batchStrideInTokens > 0)
     //   If batchM:
     //      Logical shape is [sum(divUpMul(M[bi], tileM) for bi in B), K].
     //      Logical strides are [K, 1].
@@ -111,6 +113,14 @@ struct BatchedGemmData {
     //         Logical shape is [B, K / blockK, divUpMul(M, tileM), blockK].
     //         Logical strides are [K * divUpMul(M, tileM), divUpMul(M, tileM) * blockK, blockK, 1].
     //         where blockK is 128B.
+    // Else // batchStrideInTokens == 0
+    //   If batchM:
+    //      Logical shape is [M, K].
+    //      Logical strides are [K, 1].
+    //
+    //   If batchN:
+    //      Logical shape is [B, divUpMul(M, tileM), K].
+    //      Logical strides are [divUpMul(M, tileM) * K, K, 1].
     void const* mPtrA{nullptr};
 
     // The block scaling factors to dequantize A.
@@ -122,7 +132,7 @@ struct BatchedGemmData {
     //      Otherwise, shape is [M / 128, K / 128].
     //    The rightmost dimension is contiguous in memory.
     //
-    //   If DeepSeek FP8 recipe is not used, but for MxFp{4,8} and NvFp4 formats:
+    //   If DeepSeek FP8 recipe is not used, but for MxFp{4,8}, MxInt4 and NvFp4 formats:
     //      The layout of scaling factors for A is always R128c4
     //      M must be a multiple of 128.
     //      K must be a multiple of 64.
@@ -132,7 +142,8 @@ struct BatchedGemmData {
     //  Where paddedM is M if (routeAct == true && batchM), or
     //  sum(divUpMul(M[bi], tileM) for bi in B) if batchM,
     //  otherwise divUpMul(M, tileM) * B.
-    //  Dtype is Dtype::Fp32 if DeepSeek FP8 recipe is used, otherwise Dtype::E4m3.
+    //  Dtype is Dtype::Fp32 if DeepSeek FP8 recipe is used, otherwise Dtype is Dtype::E4m3 for
+    //  NvFp4, Dtype::UE8m0 for MxFp{4,8} formats, Dtype::Bfloat16 for MxInt4.
     //
     // Otherwise should be set to nullptr.
     void const* mPtrSfA{nullptr};
@@ -157,7 +168,7 @@ struct BatchedGemmData {
     //
     // If (routeAct == true && batchN), the shape is [N, K]
     //
-    // Else
+    // Else if (batchStrideInTokens > 0)
     //   If batchN:
     //      Logical shape is [sum(divUpMul(N[bi], tileN) for bi in B), K].
     //      Logical strides are [K, 1].
@@ -173,6 +184,15 @@ struct BatchedGemmData {
     //         Logical shape is [B, K / blockK, divUpMul(N, tileN), blockK].
     //         Logical strides are [K * divUpMul(N, tileN), divUpMul(N, tileN) * blockK, blockK, 1].
     //         where blockK is 128B.
+    //
+    // Else // batchStrideInTokens == 0
+    //   If batchN:
+    //      Logical shape is [N, K].
+    //      Logical strides are [K, 1].
+    //
+    //   If batchM:
+    //      Logical shape is [B, divUpMul(N, tileN), K].
+    //      Logical strides are [divUpMul(N, tileN) * K, K, 1].
     void const* mPtrB{nullptr};
 
     // The scaling factors to dequantize B.
@@ -252,6 +272,13 @@ struct BatchedGemmData {
     //    otherwise it is 1.
     // Shape is [B].
     float const* mPtrScaleC{nullptr};
+
+    // The pre-activation scaling factor (typically dequantA * dequantB) for non-gated non-linear
+    // activation.
+    // Only used when non-linear activation is applied (e.g., GELU, Relu2).
+    // When used, scaleC should be quantScaleC only, and this scale is applied before the
+    // activation. Shape is [B].
+    float const* mPtrScaleAct{nullptr};
 
     // The output gate scale for Fp8 (not DeepSeek FP8) and NvFp4 quantization.
     // TensorRT-LLM API requires a scaling factor on the device.
@@ -476,9 +503,6 @@ class BatchedGemmInterface {
               BatchedGemmData const& batchedGemmData, void* cudaStream,
               int32_t /*multiProcessorCount*/, bool usePdl = true,
               std::optional<std::reference_wrapper<ModuleCache>> moduleCache = std::nullopt) {
-    // Might be used.
-    (void)usePdl;
-    (void)moduleCache;
     // Get options from config and data.
     auto options = getOptionsFromConfigAndData(config, batchedGemmData);
 
@@ -510,7 +534,8 @@ class BatchedGemmInterface {
         batchedGemmData.mInputBuffers.mPtrSfB, batchedGemmData.mInputBuffers.mPtrPerTokenSfA,
         batchedGemmData.mInputBuffers.mPtrPerTokenSfB, batchedGemmData.mInputBuffers.mPtrBias,
         batchedGemmData.mOutputBuffers.mPtrSfC, batchedGemmData.mInputBuffers.mPtrScaleC,
-        batchedGemmData.mInputBuffers.mPtrScaleGate, batchedGemmData.mInputBuffers.mPtrClampLimit,
+        batchedGemmData.mInputBuffers.mPtrScaleAct, batchedGemmData.mInputBuffers.mPtrScaleGate,
+        batchedGemmData.mInputBuffers.mPtrClampLimit,
         batchedGemmData.mInputBuffers.mPtrGatedActAlpha,
         batchedGemmData.mInputBuffers.mPtrGatedActBeta, batchedGemmData.mInputBuffers.mPtrRouteMap,
         dPtrRowMax, dPtrRowMaxBars, batchedGemmData.mInputBuffers.mPtrNumNonExitingCtas,
@@ -579,15 +604,18 @@ class BatchedGemmInterface {
                   static_cast<uint32_t>(options.mClusterDimY),
                   static_cast<uint32_t>(options.mClusterDimZ)};
 
+    // Whether PDL can safely be enabled
+    const bool pdlSafe = batchedGemmConfig.mOptions.mGridWaitForPrimaryRouting ||
+                         batchedGemmConfig.mOptions.mGridWaitForPrimaryEarlyExit ||
+                         batchedGemmConfig.mOptions.mGridWaitForPrimaryA ||
+                         batchedGemmConfig.mOptions.mGridWaitForPrimaryB;
+
     // Run the kernel.
-    auto result = trtllm::gen::launchKernel(
-        (void*)&kernelParams, cudaStream, batchedGemmConfig.mSharedMemSize, cuFunction, block3,
-        grid3, cluster3,
-        usePdl && (batchedGemmConfig.mOptions.mGridWaitForPrimaryEarlyExit |
-                   batchedGemmConfig.mOptions.mGridWaitForPrimaryA |
-                   batchedGemmConfig.mOptions.mGridWaitForPrimaryB));
+    auto result = trtllm::gen::launchKernel((void*)&kernelParams, cudaStream,
+                                            batchedGemmConfig.mSharedMemSize, cuFunction, block3,
+                                            grid3, cluster3, usePdl && pdlSafe);
     if (result != CUDA_SUCCESS) {
-      return -1;
+      return result;
     }
     // If a module cache has not been given, unload the module to avoid leaking
     if (!moduleCache.has_value()) {
@@ -719,11 +747,8 @@ class BatchedGemmInterface {
     // Get options from config and data.
     auto options = getOptionsFromConfigAndData(config, data);
 
-    // Is Blackwell?
-    bool isBlackwell = gemm::isSmVersionBlackwell(config.mSm);
-
     // Check options without modifications.
-    return checkAndUpdateBatchedGemmOptions(options, isBlackwell,
+    return checkAndUpdateBatchedGemmOptions(options, config.mSm,
                                             /* updateOptions */ false);
   }
 

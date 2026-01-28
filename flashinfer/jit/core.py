@@ -122,7 +122,10 @@ sm89_nvcc_flags = [
     "-gencode=arch=compute_89,code=sm_89",
     "-DFLASHINFER_ENABLE_FP8_E8M0",
 ]
-sm90a_nvcc_flags = ["-gencode=arch=compute_90a,code=sm_90a"] + common_nvcc_flags
+sm90a_nvcc_flags = [
+    "-gencode=arch=compute_90a,code=sm_90a",
+    "-DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED",
+] + common_nvcc_flags
 sm100a_nvcc_flags = ["-gencode=arch=compute_100a,code=sm_100a"] + common_nvcc_flags
 sm103a_nvcc_flags = ["-gencode=arch=compute_103a,code=sm_103a"] + common_nvcc_flags
 sm100f_nvcc_flags = ["-gencode=arch=compute_100f,code=sm_100f"] + common_nvcc_flags
@@ -225,6 +228,10 @@ class JitSpec:
         return jit_env.FLASHINFER_JIT_DIR / self.name / "build.ninja"
 
     @property
+    def build_dir(self) -> Path:
+        return jit_env.FLASHINFER_JIT_DIR / self.name
+
+    @property
     def jit_library_path(self) -> Path:
         return jit_env.FLASHINFER_JIT_DIR / self.name / f"{self.name}.so"
 
@@ -235,7 +242,7 @@ class JitSpec:
 
     def get_object_paths(self) -> List[Path]:
         object_paths = []
-        jit_dir = self.jit_library_path.parent
+        jit_dir = self.build_dir
         for source in self.sources:
             is_cuda = source.suffix == ".cu"
             object_suffix = ".cuda.o" if is_cuda else ".o"
@@ -261,7 +268,7 @@ class JitSpec:
 
     def write_ninja(self) -> None:
         ninja_path = self.ninja_path
-        ninja_path.parent.mkdir(parents=True, exist_ok=True)
+        self.build_dir.mkdir(parents=True, exist_ok=True)
         content = generate_ninja_build_for_op(
             name=self.name,
             sources=self.sources,
@@ -292,7 +299,7 @@ class JitSpec:
             # Write ninja file if it doesn't exist (deferred case)
             if not self.is_ninja_generated:
                 self.write_ninja()
-            run_ninja(jit_env.FLASHINFER_JIT_DIR, self.ninja_path, verbose)
+            run_ninja(self.build_dir, self.ninja_path, verbose)
 
     def load(self, so_path: Path):
         return tvm_ffi.load_module(str(so_path))
@@ -310,6 +317,88 @@ class JitSpec:
             result = self.load(so_path)
 
         return result
+
+    def get_compile_commands(self) -> List[dict]:
+        """
+        Generate compile_commands.json entries for this JitSpec.
+
+        Returns:
+            A list of dictionaries, each representing a compile command entry
+            for a source file in this JitSpec.
+        """
+        from .cpp_ext import (
+            get_cuda_path,
+            build_common_cflags,
+            build_cflags,
+            build_cuda_cflags,
+        )
+
+        cuda_home = get_cuda_path()
+
+        # Build flags
+        common_cflags = build_common_cflags(cuda_home, self.extra_include_dirs)
+        cflags = build_cflags(common_cflags, self.extra_cflags)
+        cuda_cflags = build_cuda_cflags(common_cflags, self.extra_cuda_cflags)
+
+        # Replace $common_cflags and $cuda_home placeholders
+        def expand_flags(
+            flags: List[str], common_cflags_expanded: List[str]
+        ) -> List[str]:
+            expanded = []
+            for flag in flags:
+                if flag == "$common_cflags":
+                    expanded.extend(common_cflags_expanded)
+                elif "$cuda_home" in flag:
+                    expanded.append(flag.replace("$cuda_home", cuda_home))
+                else:
+                    expanded.append(flag)
+            return expanded
+
+        # Expand common_cflags first (it has $cuda_home placeholders)
+        common_cflags_expanded = [
+            flag.replace("$cuda_home", cuda_home) for flag in common_cflags
+        ]
+        cflags_expanded = expand_flags(cflags, common_cflags_expanded)
+        cuda_cflags_expanded = expand_flags(cuda_cflags, common_cflags_expanded)
+
+        # Get compilers
+        cxx = os.environ.get("CXX", "c++")
+        nvcc = os.environ.get("FLASHINFER_NVCC", f"{cuda_home}/bin/nvcc")
+
+        # Build directory
+        build_dir = str(self.build_dir.resolve())
+
+        # Generate entries for each source file
+        compile_commands = []
+        for source in self.sources:
+            is_cuda = source.suffix == ".cu"
+
+            if is_cuda:
+                compiler = nvcc
+                flags = cuda_cflags_expanded
+                object_suffix = ".cuda.o"
+            else:
+                compiler = cxx
+                flags = cflags_expanded
+                object_suffix = ".o"
+
+            obj_name = source.with_suffix(object_suffix).name
+            output_file = os.path.join(build_dir, obj_name)
+
+            # Build the command string
+            command_parts = [compiler, "-c", str(source.resolve())]
+            command_parts += flags
+            command_parts += ["-o", output_file]
+
+            compile_commands.append(
+                {
+                    "directory": build_dir,
+                    "command": " ".join(command_parts),
+                    "file": str(source.resolve()),
+                }
+            )
+
+        return compile_commands
 
 
 def gen_jit_spec(
