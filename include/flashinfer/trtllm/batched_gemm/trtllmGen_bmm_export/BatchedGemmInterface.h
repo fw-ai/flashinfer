@@ -113,17 +113,17 @@ struct BatchedGemmData {
     //         Logical shape is [B, K, divUpMul(M, tileM)].
     //         Logical strides are [K * divUpMul(M, tileM), divUpMul(M, tileM), 1].
     //      If layoutA is MatrixLayout::BlockMajorK
-    //         Logical shape is [B, K / blockK, divUpMul(M, tileM), blockK].
-    //         Logical strides are [K * divUpMul(M, tileM), divUpMul(M, tileM) * blockK, blockK, 1].
-    //         where blockK is 128B.
+    //         Logical shape is [B, K / S / blockK, divUpMul(M, tileM), blockK].
+    //         Logical strides are [K / S * divUpMul(M, tileM), divUpMul(M, tileM) * blockK, blockK,
+    //         1]. where blockK is 128B.
     // Else // batchStrideInTokens == 0
-    //   If batchM:
+    //   If batchM: (sparsity not supported)
     //      Logical shape is [M, K].
     //      Logical strides are [K, 1].
     //
     //   If batchN:
-    //      Logical shape is [B, divUpMul(M, tileM), K].
-    //      Logical strides are [divUpMul(M, tileM) * K, K, 1].
+    //      Logical shape is [B, divUpMul(M, tileM), K / S].
+    //      Logical strides are [divUpMul(M, tileM) * K / S, K / S, 1].
     void const* mPtrA{nullptr};
 
     // The block scaling factors to dequantize A.
@@ -551,11 +551,13 @@ class BatchedGemmInterface {
 
     auto [numCtaBatch, numCtaTile, numCtaInner] =
         getGridDim(options, batchedGemmData.mProblemDimensions.mMaxNumCtasInTokenDim);
+
     auto kernelParams = KernelParamsSetup::setKernelParams(
         options, batchM, batchedGemmData.mInputBuffers.mPtrA, batchedGemmData.mInputBuffers.mPtrB,
         batchedGemmData.mOutputBuffers.mPtrC, batchedGemmData.mInputBuffers.mPtrSfA,
         batchedGemmData.mInputBuffers.mPtrSfB, batchedGemmData.mInputBuffers.mPtrPerTokenSfA,
-        batchedGemmData.mInputBuffers.mPtrPerTokenSfB, batchedGemmData.mInputBuffers.mPtrBias,
+        batchedGemmData.mInputBuffers.mPtrPerTokenSfB,
+        batchedGemmData.mInputBuffers.mPtrSparsityInfoA, batchedGemmData.mInputBuffers.mPtrBias,
         batchedGemmData.mOutputBuffers.mPtrSfC, batchedGemmData.mInputBuffers.mPtrScaleC,
         batchedGemmData.mInputBuffers.mPtrScaleAct, batchedGemmData.mInputBuffers.mPtrScaleGate,
         batchedGemmData.mInputBuffers.mPtrClampLimit,
@@ -567,8 +569,7 @@ class BatchedGemmInterface {
         batchedGemmData.mInputBuffers.mPtrCtaIdxXyToMnLimit, numCtaBatch);
 
     // The size of the grid.
-    std::vector<int32_t> grid = batchM ? std::vector<int32_t>{numCtaBatch, numCtaTile, numCtaInner}
-                                       : std::vector<int32_t>{numCtaTile, numCtaBatch, numCtaInner};
+    auto grid = getLaunchGrid(options, batchedGemmData.mProblemDimensions.mMaxNumCtasInTokenDim);
 
     BatchedGemmConfig batchedGemmConfig = config;
 #ifndef TLLM_GEN_EXPORT_INTERFACE

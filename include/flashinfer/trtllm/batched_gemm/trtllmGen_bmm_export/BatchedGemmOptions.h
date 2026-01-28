@@ -94,7 +94,7 @@ struct BatchedGemmOptions : public gemmGatedAct::GemmGatedActOptions {
       bool hoistMmaTaskTryWaits, int k, gemm::KernelTraits kernelTraits, gemm::MatrixLayout layoutA,
       gemm::MatrixLayout layoutB, int m, int mmaK, tg::MmaKind mmaKind, int mmaM, int mmaN,
       bool mockAllReduce, int n, int numEpilogueWarps, int numRegsCastAWarps,
-      int numRegsCopySfLdsSttm, int numRegsPerThreadEpilogueWarp,
+      int numRegsCopySfLdsSttm, int numRegsCopySparsityInfo, int numRegsPerThreadEpilogueWarp,
       int numRegsPerThreadNonEpilogueWarp, int numSlicesForSplitK, int numSlicesForSliceK,
       int numStages, int numStagesMma, int numStagesMmaWithinWorkTile,
       int numStagesMmaAcrossWorkTile, int numStagesWorkId, bool outputDebugTensors, bool patchF2fp,
@@ -112,9 +112,10 @@ struct BatchedGemmOptions : public gemmGatedAct::GemmGatedActOptions {
       std::vector<int> batchedM, std::vector<int> batchedN, BatchMode batchMode,
       int32_t batchStrideInTokens, bool fusedAct, bool gridWaitForPrimaryRouting,
       bool isStaticBatch, bool isUniformNumTokensPerBatch, int numBatches,
-      int numRegsPerThreadLoadB, int numRegsPerThreadLoadSfB, int numTokens, int numWarpsLoadB,
-      int numWarpsLoadSfB, RouteImpl routeImpl, std::optional<RouteImpl> routeSfsImpl,
-      bool useTmaOobOpt)
+      int numRegsPerThreadLoadA, int numRegsPerThreadLoadB, int numRegsPerThreadLoadSfA,
+      int numRegsPerThreadLoadSfB, int numTokens, int numWarpsLoadA, int numWarpsLoadB,
+      int numWarpsLoadSfA, int numWarpsLoadSfB, RouteImpl routeImpl,
+      std::optional<RouteImpl> routeSfsImpl, bool useTmaOobOpt)
       : gemmGatedAct::GemmGatedActOptions(
             gemm::GemmOptions(
                 allReduceAlgo, biasType, blockK, clusterDimX, clusterDimY, clusterDimZ,
@@ -125,15 +126,16 @@ struct BatchedGemmOptions : public gemmGatedAct::GemmGatedActOptions {
                 gridWaitForPrimaryEarlyExit, gridWaitForPrimaryA, gridWaitForPrimaryB,
                 hoistLoadTaskInit, hoistMmaTaskTryWaits, k, kernelTraits, layoutA, layoutB, m, mmaK,
                 mmaKind, mmaM, mmaN, mockAllReduce, n, numEpilogueWarps, numRegsCastAWarps,
-                numRegsCopySfLdsSttm, numRegsPerThreadEpilogueWarp, numRegsPerThreadNonEpilogueWarp,
-                numSlicesForSplitK, numSlicesForSliceK, numStages, numStagesMma,
-                numStagesMmaWithinWorkTile, numStagesMmaAcrossWorkTile, numStagesWorkId,
-                outputDebugTensors, patchF2fp, sfBlockSizeA, sfLayoutA, sfLayoutB, sfLayoutC,
-                sfReshapeFactor, sliceK, splitK, tileK, tileM, tileN, tileScheduler,
-                transposeMmaOutput, useCustomMmaSchedule, useDeepSeekFp8,
-                useHoistTryWaitForCustomMmaSchedule, useMaxTmemOverlap, usePerTokenSfA,
-                usePerTokenSfB, useShuffledMatrixA, useTmaStore, useTwoTmaLoadWarps, useTwoMmaWarps,
-                useUnrollLoop2xForMma, validM, validN, validK, worldSize),
+                numRegsCopySfLdsSttm, numRegsCopySparsityInfo, numRegsPerThreadEpilogueWarp,
+                numRegsPerThreadNonEpilogueWarp, numSlicesForSplitK, numSlicesForSliceK, numStages,
+                numStagesMma, numStagesMmaWithinWorkTile, numStagesMmaAcrossWorkTile,
+                numStagesWorkId, outputDebugTensors, patchF2fp, sfBlockSizeA, sfBlockSizeB,
+                sfBlockSizeC, sfLayoutA, sfLayoutB, sfLayoutC, sfReshapeFactor, sliceK, sparsityA,
+                splitK, tileK, tileM, tileN, tileScheduler, transposeMmaOutput,
+                useCustomMmaSchedule, useDeepSeekFp8, useHoistTryWaitForCustomMmaSchedule,
+                useMaxTmemOverlap, usePerTokenSfA, usePerTokenSfB, useShuffledMatrix, useTmaStore,
+                useTwoTmaLoadWarps, useTwoMmaWarps, useUnrollLoop2xForMma, validM, validN, validK,
+                worldSize),
             actType, clampBeforeAct),
         mBatchedM(batchedM),
         mBatchedN(batchedN),
@@ -379,11 +381,9 @@ inline bool checkAndUpdateBatchedGemmOptions(BatchedGemmOptions& options, tg::Cu
                      "K must be a multiple of tileK when using Ldg based SF routing");
   }
 
-  if (options.mRouteSfsImpl.has_value() &&
-      (doesRouteImplUseLdgsts(options.mRouteSfsImpl.value()) ||
-       doesRouteImplUseLdgPlusSts(options.mRouteSfsImpl.value()))) {
-    TLLM_CHECK_ERROR(options.mK % options.mTileK == 0,
-                     "K must be a multiple of tileK when using Ldg based SF routing");
+  if (options.mClusterDimX > 1 && batchM && options.mRouteSfsImpl.has_value()) {
+    TLLM_CHECK_ERROR(options.mRouteSfsImpl.value() != RouteImpl::Tma,
+                     "2CTA BatchedGemm does not support routing Sf along M dimension with TMA.");
   }
 
   // Check if all elements in mBatchedM or mBatchedN are the same (uniform tokens per batch) and

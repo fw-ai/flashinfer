@@ -123,6 +123,15 @@ struct GemmGatedActOptions : public gemm::GemmOptions {
 // Check if the options are valid or not.
 inline bool checkAndUpdateGemmGatedActOptions(gemmGatedAct::GemmGatedActOptions& options,
                                               tg::CudaArch cudaArch, bool updateOptions = true) {
+  auto isValid = gemm::checkAndUpdateGemmOptions(options, cudaArch,
+                                                 /* tpGrpSize */ 1, updateOptions);
+  if (!isValid) {
+    return false;
+  }
+
+  if (options.mActType == gemmGatedAct::ActType::None) {
+    TLLM_CHECK_ERROR(false, "ActType None is not supported");
+  }
   // tmpOut is already transposed at this stage
   auto const hiddenSizeStr = options.mTransposeMmaOutput ? "M" : "N";
   auto const hiddenSize = options.mTransposeMmaOutput ? options.mM : options.mN;
@@ -145,13 +154,6 @@ inline bool checkAndUpdateGemmGatedActOptions(gemmGatedAct::GemmGatedActOptions&
     int const hiddenGranularity = 4 * options.mSfBlockSizeC;
     TLLM_CHECK_ERROR(outHiddenSize % hiddenGranularity == 0, "Output hidden size (", outHiddenSize,
                      ") must be a multiple of ", hiddenGranularity, " for block-scaled outputs.");
-  }
-
-  auto isValid = gemm::checkAndUpdateGemmOptions(options, cudaArch,
-                                                 /* tpGrpSize */ 1, updateOptions);
-
-  if (!isValid) {
-    return false;
   }
 
   auto const validHiddenSize = options.mTransposeMmaOutput ? options.mValidM : options.mValidN;
