@@ -745,20 +745,12 @@ class Fp8BlockScaleLauncher : public FusedMoeLauncher {
  public:
   static constexpr std::array<int32_t, 5> mBaseSupportedTileNums = {8, 16, 32, 64, 128};
 
-  static std::vector<int32_t> getSupportedTileNums(Fp8QuantizationType quantization_type) {
-    std::vector<int32_t> tiles(mBaseSupportedTileNums.begin(), mBaseSupportedTileNums.end());
-    if (quantization_type == Fp8QuantizationType::MxFp8) {
-      tiles.push_back(256);
-    }
-    return tiles;
-  }
-
   Fp8BlockScaleLauncher(Optional<TensorView> const& routing_logits,
                         Optional<TensorView> const& routing_bias, TensorView const& hidden_states,
                         TensorView const& hidden_states_scale, TensorView const& gemm1_weights,
                         TensorView const& gemm1_weights_scale, TensorView const& gemm2_weights,
                         TensorView const& gemm2_weights_scale, TensorView const& expert_indices,
-                        TensorView const& expert_weights, Fp8QuantizationType quantization_type)
+                        TensorView const& expert_weights)
       : FusedMoeLauncher(routing_logits, routing_bias, hidden_states, gemm1_weights,
                          Optional<TensorView>(), Optional<TensorView>(), gemm2_weights,
                          Optional<TensorView>()),
@@ -766,8 +758,7 @@ class Fp8BlockScaleLauncher : public FusedMoeLauncher {
         gemm1_weights_scale(gemm1_weights_scale),
         gemm2_weights_scale(gemm2_weights_scale),
         expert_indices(expert_indices),
-        expert_weights(expert_weights),
-        quantization_type(quantization_type) {}
+        expert_weights(expert_weights) {}
 
   void init(std::unique_ptr<tensorrt_llm::kernels::trtllmgen_moe::MoE::MoERunnerArgs>&& args,
             int64_t tile_tokens_dim, int64_t routing_method_type, bool use_shuffled_weight,
@@ -867,7 +858,7 @@ class Fp8BlockScaleLauncher : public FusedMoeLauncher {
       TVM_FFI_LOG_AND_THROW(NotImplementedError) << "Unsupported input dtype for MoE.";
     }
 
-    args->mUseDeepSeekFp8 = quantization_type == Fp8QuantizationType::DeepSeekFp8;
+    args->mUseDeepSeekFp8 = true;
     // Check ndim==2 and size>0 because empty placeholder tensors may have non-null data_ptr
     bool has_precomputed_indices = expert_indices.ndim() == 2 && expert_indices.size(0) > 0;
     if (has_precomputed_indices) {
@@ -1035,7 +1026,6 @@ class Fp8BlockScaleLauncher : public FusedMoeLauncher {
   Tensor activation_output_scale;
   TensorView expert_indices;
   TensorView expert_weights;
-  Fp8QuantizationType quantization_type;
 
  public:
   // Override to handle pre-computed routing
@@ -1078,7 +1068,7 @@ class Fp8BlockScaleLauncher : public FusedMoeLauncher {
     if (args->do_finalize) {
       return {output};
     }
-    return {gemm2_output, FusedMoeLauncher::expert_weights, expanded_idx_to_permuted_idx};
+    return {gemm2_output, expanded_idx_to_permuted_idx};
   }
 
   static Array<Array<int64_t>> getValidConfigs(int64_t top_k, int64_t hidden_size,
@@ -1740,15 +1730,15 @@ Array<Tensor> trtllm_fp8_per_tensor_scale_moe(
   return selected_launcher->run(config, enable_pdl, use_routing_scales_on_input);
 }
 
-Array<Tensor> trtllm_fp8_block_scale_moe(
+Tensor trtllm_fp8_block_scale_moe(
     Optional<TensorView> routing_logits, TensorView expert_indices, TensorView expert_weights,
     Optional<TensorView> routing_bias, TensorView hidden_states, TensorView hidden_states_scale,
     TensorView gemm1_weights, TensorView gemm1_weights_scale, TensorView gemm2_weights,
     TensorView gemm2_weights_scale, TensorView output, int64_t num_experts, int64_t top_k,
     Optional<int64_t> n_group, Optional<int64_t> topk_group, int64_t intermediate_size,
     int64_t local_expert_offset, int64_t local_num_experts, Optional<double> routed_scaling_factor,
-    int64_t routing_method_type, bool use_shuffled_weight, int64_t weight_layout, bool do_finalize,
-    bool enable_pdl, Array<int64_t> config_index, Fp8QuantizationType quantization_type) {
+    int64_t routing_method_type, bool use_shuffled_weight, int64_t weight_layout, bool enable_pdl,
+    Array<int64_t> config_index) {
   // Basic type validation
   auto dtype = hidden_states.dtype();
 
@@ -1837,7 +1827,7 @@ Array<Tensor> trtllm_fp8_block_scale_moe(
     // Create and initialize launcher for this tile size
     auto launcher = std::make_unique<Fp8BlockScaleLauncher>(
         routing_logits, routing_bias, hidden_states, hidden_states_scale, gemm1_weights,
-        gemm1_weights_scale, gemm2_weights, gemm2_weights_scale);
+        gemm1_weights_scale, gemm2_weights, gemm2_weights_scale, expert_indices, expert_weights);
     launcher->init(std::move(args), curr_tile_N, routing_method_type, use_shuffled_weight,
                    weight_layout);
 
