@@ -8,8 +8,7 @@ import torch
 import torch.distributed as dist
 
 import flashinfer.comm as comm
-
-# todo(Yingyi): add benchmark and quant test
+from tests.test_helpers.utils_fp4 import cast_from_fp4
 
 # Usage: test var
 kOneShotMaxTokenNum = 128
@@ -227,7 +226,7 @@ def _run_correctness_worker(
 
                     # bfloat16 with multiple ranks accumulates more rounding errors
                     # due to order-of-operations differences vs PyTorch reference
-                    tol = 0.2 if dtype == torch.float16 else 0.5
+                    tol = 0.2  if dtype == torch.float16 else 0.5
                     torch.testing.assert_close(
                         residual_out.to(torch.float32),
                         torch_residual.to(torch.float32),
@@ -240,6 +239,79 @@ def _run_correctness_worker(
                         rtol=tol,
                         atol=tol,
                     )
+
+                    # == Validate quant_out and scale_out ==
+                    # FP4 quantization requires Blackwell (SM100+)
+                    cc_major, cc_minor = torch.cuda.get_device_capability(device)
+                    if cc_major >= 10:
+                        # The kernel quantizes norm_out to FP4 with block-wise scaling
+                        # Dequantize and verify against reference norm output
+
+                        # Reshape quant_out: stored as packed FP4 values (2 FP4 per byte)
+                        # quant_out has shape [seq_len * hidden_size // 4] with dtype,
+                        # which gives seq_len * hidden_size // 2 bytes of FP4 data
+                        quant_out_bytes = quant_out.view(torch.uint8).reshape(
+                            seq_len, hidden_size // 2
+                        )
+
+                        # Dequantize FP4 to float32 using cast_from_fp4
+                        # Output shape: [seq_len, hidden_size]
+                        quant_out_dequant = cast_from_fp4(quant_out_bytes)
+
+                        # Reshape scale_out: one scale per SF_VEC_SIZE (16) elements
+                        # scale_out has shape [seq_len * hidden_size // SF_VEC_SIZE]
+                        scale_out_reshaped = scale_out.reshape(
+                            seq_len, hidden_size // SF_VEC_SIZE
+                        ).to(torch.float32)
+
+                        # Apply scale factors: each scale covers SF_VEC_SIZE elements
+                        # Expand scales to match the hidden dimension
+                        scale_expanded = scale_out_reshaped.unsqueeze(-1).expand(
+                            seq_len, hidden_size // SF_VEC_SIZE, SF_VEC_SIZE
+                        )
+                        scale_expanded = scale_expanded.reshape(seq_len, hidden_size)
+
+                        # Dequantized value = FP4_value * scale / global_scale
+                        # The kernel uses routed_scaling_factor as the global scale
+                        quant_out_final = (
+                            quant_out_dequant * scale_expanded / routed_scaling_factor
+                        )
+
+                        # Validate dequantized quant_out against reference norm output
+                        # FP4 quantization introduces significant noise, use looser tolerance
+                        if not torch.allclose(
+                            quant_out_final,
+                            torch_output_hidden_states.to(torch.float32),
+                            rtol=0.5,
+                            atol=1.0,
+                        ):
+                            test_passed = False
+                            diff = torch.abs(
+                                quant_out_final
+                                - torch_output_hidden_states.to(torch.float32)
+                            )
+                            print(f"Rank {rank} quant_out mismatch")
+                            print(f"max diff: {torch.max(diff)}")
+                            print(f"mean diff: {torch.mean(diff)}")
+                            print(
+                                f"% within tolerance: {(diff < 1.0).float().mean() * 100:.1f}%"
+                            )
+
+                        # Use tiered tolerance: most values should be close,
+                        # allow some outliers due to FP4 quantization noise
+                        diff = torch.abs(
+                            quant_out_final
+                            - torch_output_hidden_states.to(torch.float32)
+                        )
+                        tight_pct = (diff < 0.5).float().mean().item()
+                        assert tight_pct > 0.90, (
+                            f"Rank {rank}: Only {tight_pct * 100:.1f}% of quant_out values "
+                            f"within tight tolerance, expected >90%"
+                        )
+                        assert torch.max(diff) < 3.0, (
+                            f"Rank {rank}: Max quant_out diff {torch.max(diff):.2f} "
+                            f"exceeds loose tolerance of 3.0"
+                        )
 
                 dist.barrier(group=group)
                 if test_passed:
