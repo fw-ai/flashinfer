@@ -592,10 +592,7 @@ class CodeOwnersAnalyzer:
             # Write directory entries (computed + merged overrides)
             for module, data in results.items():
                 # Extract GitHub usernames from computed owners
-                # Use case-insensitive deduplication since the same user may appear
-                # multiple times with different email addresses
                 computed_usernames = []
-                seen_usernames_lower = set()
                 if data["owners"]:
                     # Take top N owners or those with ownership score > 0.1
                     top_owners = [
@@ -607,15 +604,11 @@ class CodeOwnersAnalyzer:
                     for owner in top_owners:
                         github_username = self.get_github_username(owner["author"])
                         if github_username:
-                            username = f"@{github_username}"
+                            computed_usernames.append(f"@{github_username}")
                         else:
                             # Fallback to email if no GitHub username found
-                            username = owner["author"].split("<")[1].rstrip(">")
-
-                        # Skip duplicates (case-insensitive)
-                        if username.lower() not in seen_usernames_lower:
-                            computed_usernames.append(username)
-                            seen_usernames_lower.add(username.lower())
+                            email = owner["author"].split("<")[1].rstrip(">")
+                            computed_usernames.append(email)
 
                 # Merge with overrides
                 final_usernames = self._merge_owners_with_overrides(
