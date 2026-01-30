@@ -48,7 +48,7 @@ from flashinfer.fused_moe.core import (
     _maybe_get_cached_w3_w1_permute_indices,
     Fp8QuantizationType,
 )
-from .utils import skip_checks, QuantMode
+from .utils import is_gated_activation, skip_checks, QuantMode
 
 
 # Max num tokens to tune for trtllm-gen fused moe
@@ -638,6 +638,10 @@ def mxint4_quantize(
 class MxInt4BlockScaleMoe(Moe):
     """MxInt4 MoE implementation with block scaling (DeepSeek style)."""
 
+    @property
+    def quant_mode(self) -> QuantMode:
+        return QuantMode.MXINT4_BF16_BF16
+
     def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
         """Quantize weights to MxInt4 with block scaling."""
         num_experts = gemm1_weights.shape[0]
@@ -841,6 +845,10 @@ class FP8BlockScaleMoe(Moe):
     @property
     def quant_mode(self) -> QuantMode:
         return self.fp8_quantization_type
+
+    @property
+    def quant_mode(self) -> QuantMode:
+        return QuantMode.FP8_BLOCK_SCALE
 
     def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
         """Quantize weights to FP8 with block scaling."""
@@ -1561,8 +1569,6 @@ class moe_args:
         permute_info,
         use_routing_scales_on_input,
         activation_type,
-        gemm1_bias=None,
-        gemm2_bias=None,
     ):
         self.num_tokens = num_tokens
         self.num_experts = num_experts
@@ -1583,8 +1589,6 @@ class moe_args:
         self.permute_info = permute_info
         self.use_routing_scales_on_input = use_routing_scales_on_input
         self.activation_type = activation_type
-        self.gemm1_bias = gemm1_bias
-        self.gemm2_bias = gemm2_bias
 
 
 class moe_args_dequant:
@@ -2274,8 +2278,6 @@ def run_moe_reference_fp4(args, quant_mode: QuantMode):
         args.permute_info,
         args.use_routing_scales_on_input,
         args.activation_type,
-        gemm1_bias=args.gemm1_bias,
-        gemm2_bias=args.gemm2_bias,
     )
 
     return run_moe_dequant(args_dequant, quant_mode), args_dequant
@@ -2378,9 +2380,7 @@ def run_moe_reference_dsfp8(args):
         gemm2_weights_dequant,
         args.permute_info,
         args.use_routing_scales_on_input,
-        args.activation_type,
-        gemm1_bias=args.gemm1_bias,
-        gemm2_bias=args.gemm2_bias,
+        args.activation_type.value,
     )
 
     return run_moe_dequant(
@@ -2419,9 +2419,7 @@ def run_moe_reference_per_tensor_scale_fp8(args):
         gemm2_weights_dequant,
         args.permute_info,
         args.use_routing_scales_on_input,
-        args.activation_type,
-        gemm1_bias=args.gemm1_bias,
-        gemm2_bias=args.gemm2_bias,
+        args.activation_type.value,
     )
 
     return run_moe_dequant(args_dequant, QuantMode.FP8_PER_TENSOR), args_dequant
@@ -2452,9 +2450,7 @@ def run_moe_reference_bf16(args):
         gemm2_weights_dequant,
         args.permute_info,
         args.use_routing_scales_on_input,
-        args.activation_type,
-        gemm1_bias=args.gemm1_bias,
-        gemm2_bias=args.gemm2_bias,
+        args.activation_type.value,
     )
 
     return run_moe_dequant(args_dequant, QuantMode.BF16), args_dequant
@@ -2505,7 +2501,7 @@ def run_moe_reference_mxint4(args):
         gemm2_weights_dequant,
         args.permute_info,
         args.use_routing_scales_on_input,
-        args.gated_act_type,
+        args.activation_type,
     )
 
     return run_moe_dequant(args_dequant, QuantMode.MXINT4_BF16_BF16), args_dequant
@@ -2721,8 +2717,6 @@ def run_moe_test(
         permute_info,
         use_routing_scales_on_input,
         activation_type,
-        gemm1_bias=gemm1_bias,
-        gemm2_bias=gemm2_bias,
     )
 
     # Compute reference output
@@ -2900,8 +2894,8 @@ def run_moe_test(
 @pytest.mark.parametrize(
     "activation_type",
     [
-        pytest.param(ActivationType.Swiglu.value, id="Swiglu"),
-        pytest.param(ActivationType.Geglu.value, id="Geglu"),
+        pytest.param(ActivationType.Swiglu, id="Swiglu"),
+        pytest.param(ActivationType.Geglu, id="Geglu"),
     ],
 )
 def test_renormalize_routing(
@@ -2932,19 +2926,12 @@ def test_renormalize_routing(
 # Test: DeepSeekV3 routing
 @pytest.mark.parametrize("num_tokens", [8, 768, 3072])
 @pytest.mark.parametrize("hidden_size", [1024])
-@pytest.mark.parametrize("intermediate_size", [2944, 2048, 1024, 768, 512, 384])
+@pytest.mark.parametrize("intermediate_size", [2688, 2048, 1024, 768, 512, 384])
 @pytest.mark.parametrize(
     "moe_impl",
     [
         pytest.param(FP8PerTensorMoe(), id="FP8_PerTensor"),
-        pytest.param(
-            FP8BlockScaleMoe(fp8_quantization_type=QuantMode.FP8_BLOCK_SCALE_DEEPSEEK),
-            id="FP8_Block_DeepSeek",
-        ),
-        pytest.param(
-            FP8BlockScaleMoe(fp8_quantization_type=QuantMode.FP8_BLOCK_SCALE_MXFP8),
-            id="FP8_Block_MxFp8",
-        ),
+        pytest.param(FP8BlockScaleMoe(), id="FP8_Block"),
         pytest.param(FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4), id="NvFP4xNvFP4"),
         pytest.param(FP4Moe(quant_mode=QuantMode.FP4_MXFP4_MXFP8), id="MxFP4xMxFP8"),
         pytest.param(FP4Moe(quant_mode=QuantMode.FP4_MXFP4_Bf16), id="MxFP4xBf16"),
@@ -2965,12 +2952,11 @@ def test_renormalize_routing(
                 "routed_scaling": 2.5,
                 "has_routing_bias": True,
                 "routing_method_type": RoutingMethodType.DeepSeekV3,
-                "compatible_moe_impls": [FP8PerTensorMoe, FP4Moe],
-                "compatible_intermediate_size": [2944],
-                "compatible_activation_types": [ActivationType.Relu2],
+                "compatible_moe_impls": [FP8PerTensorMoe, FP4Moe, BF16Moe],
+                "compatible_intermediate_size": [1024, 2688],
                 "enable_autotune": True,
             },
-            id="nemotron_3_dummy",
+            id="nemotron_3",
         ),
         pytest.param(
             {
@@ -3091,9 +3077,9 @@ def test_renormalize_routing(
 @pytest.mark.parametrize(
     "activation_type",
     [
-        pytest.param(ActivationType.Swiglu.value, id="Swiglu"),
-        pytest.param(ActivationType.Geglu.value, id="Geglu"),
-        pytest.param(ActivationType.Relu2.value, id="Relu2"),
+        pytest.param(ActivationType.Swiglu, id="Swiglu"),
+        pytest.param(ActivationType.Geglu, id="Geglu"),
+        pytest.param(ActivationType.Relu2, id="Relu2"),
     ],
 )
 def test_deepseekv3_routing(
@@ -3167,8 +3153,8 @@ def test_deepseekv3_routing(
 @pytest.mark.parametrize(
     "activation_type",
     [
-        pytest.param(ActivationType.Swiglu.value, id="Swiglu"),
-        pytest.param(ActivationType.Geglu.value, id="Geglu"),
+        pytest.param(ActivationType.Swiglu, id="Swiglu"),
+        pytest.param(ActivationType.Geglu, id="Geglu"),
     ],
 )
 def test_topk_routing(
@@ -3202,6 +3188,7 @@ def test_topk_routing(
     "moe_impl",
     [
         pytest.param(FP8PerTensorMoe(), id="FP8_Tensor"),
+        pytest.param(FP4Moe(QuantMode.FP4_NVFP4_NVFP4), id="FP4"),
     ],
 )
 @pytest.mark.parametrize(
@@ -3217,7 +3204,7 @@ def test_topk_routing(
                 "routed_scaling": 2.5,
                 "has_routing_bias": True,
                 "routing_method_type": RoutingMethodType.Llama4,
-                "compatible_moe_impls": [FP8PerTensorMoe],
+                "compatible_moe_impls": [FP8PerTensorMoe, FP4Moe],
                 "compatible_intermediate_size": [1024, 2048],
                 "enable_autotune": True,
             },
@@ -3241,7 +3228,8 @@ def test_topk_routing(
 @pytest.mark.parametrize(
     "activation_type",
     [
-        pytest.param(ActivationType.Swiglu.value, id="Swiglu"),
+        pytest.param(ActivationType.Swiglu, id="Swiglu"),
+        pytest.param(ActivationType.Relu2, id="Relu2"),
     ],
 )
 def test_llama4_routing(

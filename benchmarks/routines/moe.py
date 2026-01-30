@@ -6,13 +6,7 @@ import numpy as np
 import torch
 
 import flashinfer
-
-try:
-    from flashinfer import ActivationType
-except ImportError:
-    # ActivationType was not exported from the top-level package until 0.6.3
-    from flashinfer.fused_moe.core import ActivationType
-
+from flashinfer import ActivationType
 from flashinfer.autotuner import autotune
 from flashinfer.fused_moe import (
     trtllm_fp4_block_scale_moe,
@@ -640,6 +634,7 @@ def testTrtllmFp4BlockScaleMoe(args):
             local_num_experts=local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=routing_method_type,
+            activation_type=activation_type.value,
             do_finalize=True,
             **_activation_kwarg(trtllm_fp4_block_scale_moe, activation_type),
         )
@@ -746,7 +741,6 @@ def testTrtllmFp4BlockScaleMoe(args):
         cur_res["input_dtype"] = input_dtype
         cur_res["weight_dtype"] = weight_dtype
         cur_res["activation_type"] = args.activation_type.name
-        cur_res["fp4_mode"] = fp4_mode
         res.append(cur_res)
 
     return res
@@ -1502,6 +1496,7 @@ def testTrtllmFp8PerTensorScaleMoe(args):
         output1_scales_gate_scalar,
         gemm2_weights_fp8,
         output2_scales_scalar,
+        activation_type,
     ):
         # Note: FP8 per-tensor MOE expects int64_t for n_group/topk_group, not Optional[int64_t]
         # So we convert None to 0 to indicate "no groups" mode
@@ -1524,7 +1519,7 @@ def testTrtllmFp8PerTensorScaleMoe(args):
             routed_scaling_factor=routed_scaling_factor,
             use_routing_scales_on_input=use_routing_scales_on_input,
             routing_method_type=routing_method_type,
-            **_activation_kwarg(trtllm_fp8_per_tensor_scale_moe, activation_type),
+            activation_type=activation_type.value,
         )
 
     # Benchmark timing
@@ -1545,6 +1540,7 @@ def testTrtllmFp8PerTensorScaleMoe(args):
             output1_scales_gate_scalar,
             gemm2_weights_fp8,
             output2_scales_scalar,
+            args.activation_type,
         ),
     )
 

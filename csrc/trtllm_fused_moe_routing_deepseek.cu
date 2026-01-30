@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <algorithm>
 #include <cmath>
 
 #include "flashinfer/exception.h"
@@ -560,25 +561,16 @@ void runImpl(Data& data, void* stream) {
   FLASHINFER_CHECK(data.mNumLimitedGroups <= MaxNumTopGroups,
                    "Routing kernel expects <= %d top groups, got %d", MaxNumTopGroups,
                    data.mNumLimitedGroups);
-  // Test limits according to values passed in launch, see definition of LAUNCH_ROUTING_DEEPSEEK
-  if (data.mNumExperts <= NumKimiK2Experts) {
-    FLASHINFER_CHECK(
-        data.mTopK <= DefaultMaxNumTopExperts,
-        "When NumExperts <= NumKimiK2Experts, routing kernel expects topK experts <= %d, got %d",
-        DefaultMaxNumTopExperts, data.mTopK);
-  } else {
-    FLASHINFER_CHECK(
-        data.mTopK <= MaxSupportedTopExperts,
-        "When NumExperts > NumKimiK2Experts, routing kernel expects topK experts <= %d, got %d",
-        MaxSupportedTopExperts, data.mTopK);
-  }
+  FLASHINFER_CHECK(data.mTopK <= MaxSupportedTopExperts,
+                   "Routing kernel expects topK experts <= %d, got %d", MaxSupportedTopExperts,
+                   data.mTopK);
   FLASHINFER_CHECK(data.mTopK <= WarpSize, "Routing kernel expects top K <= warp size, got %d",
                    data.mTopK);
   FLASHINFER_CHECK(data.mTopK * data.mNumLimitedGroups <= WarpSize,
                    "Routing kernel expects top K * top groups <= warp size (for now), got %d * %d",
                    data.mTopK, data.mNumLimitedGroups);
-  FLASHINFER_CHECK(data.mTopK <= data.mNumExperts,
-                   "Routing kernel expects topK %d to be at most #experts %d", data.mTopK,
+  FLASHINFER_CHECK(data.mNumExperts >= MaxSupportedTopExperts,
+                   "Routing kernel expects %d to be at most #experts %d", MaxSupportedTopExperts,
                    data.mNumExperts);
   FLASHINFER_CHECK(data.mNumExperts <= MaxSupportedExpertCount,
                    "Routing kernel expects #experts %d  <= #threads %d", data.mNumExperts,

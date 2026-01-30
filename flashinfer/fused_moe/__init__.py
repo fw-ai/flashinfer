@@ -16,7 +16,6 @@ limitations under the License.
 
 from .core import (
     ActivationType,
-    Fp8QuantizationType,
     RoutingMethodType,
     WeightLayout,
     convert_to_block_layout,
@@ -42,7 +41,6 @@ from .fused_routing_dsv3 import (  # noqa: F401
 
 __all__ = [
     "ActivationType",
-    "Fp8QuantizationType",
     "RoutingMethodType",
     "WeightLayout",
     "convert_to_block_layout",
