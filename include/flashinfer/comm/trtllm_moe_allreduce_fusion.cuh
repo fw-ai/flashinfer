@@ -706,6 +706,7 @@ struct MoeFinalizeAllReduceFusionParams : public AllReduceFusionParams<T> {
   // [num_tokens, top_k]
   int32_t* expanded_idx_to_permuted_idx = nullptr;
   // allreduce_in [maxPermutedPaddedCount, hidden_dim]
+  float routed_scaling_factor = 1.0f;
 };
 
 template <int NRanks>
@@ -1328,20 +1329,17 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
       permuted_data.load(reinterpret_cast<T*>(params.allreduce_in) + thread_offset_across_token);
 
       // * acc += scale(data) - accumulate in float
-      // Template-specialized path eliminates runtime branch
+      // Always apply routed_scaling_factor, optionally multiply by expert scale factor
+      float block_scale = params.routed_scaling_factor;
       if constexpr (UseScaleFactor) {
         // Use __ldg for read-only scale factor lookup (texture cache)
-        float block_scale =
+        block_scale *=
             static_cast<float>(__ldg(&reinterpret_cast<ScaleType*>(params.expert_scale_factor)[expanded_idx]));
+      }
+
 #pragma unroll
-        for (int i = 0; i < VEC_SIZE; ++i) {
-          acc_f[i] += static_cast<float>(permuted_data[i]) * block_scale;
-        }
-      } else {
-#pragma unroll
-        for (int i = 0; i < VEC_SIZE; ++i) {
-          acc_f[i] += static_cast<float>(permuted_data[i]);
-        }
+      for (int i = 0; i < VEC_SIZE; ++i) {
+        acc_f[i] += static_cast<float>(permuted_data[i]) * block_scale;
       }
     }
 
