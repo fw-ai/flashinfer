@@ -1018,9 +1018,13 @@ def get_gemm_sm120_module_cutlass_fp4():
 
 def get_cutlass_fp4_gemm_module(
     sm_major: int,
+    sm_minor: int,
 ):
     if sm_major in [10, 11]:
-        return get_gemm_sm100_module_cutlass_fp4()
+        if sm_minor == 3:
+            return get_gemm_sm103_module_cutlass_fp4()
+        else:
+            return get_gemm_sm100_module_cutlass_fp4()
     elif sm_major == 12:
         return get_gemm_sm120_module_cutlass_fp4()
     else:
@@ -3098,14 +3102,16 @@ def mm_fp4(
 
     # At this point, backends contains a supported backend if specified, or all supported backends if backend='auto'.
     # Lazy initialization of runners to avoid overhead of creating a new runner that will not be used
-    major, _ = get_compute_capability(a.device)
+    major, minor = get_compute_capability(a.device)
 
     backend_to_runner_factory = {
         "cudnn": lambda: _cudnn_gemm_fp4_runner(),
         "trtllm": lambda: get_trtllm_fp4_gemm_module().trtllm_fp4_gemm_runner(
             use_8x4_sf_layout
         ),
-        "cutlass": lambda: get_cutlass_fp4_gemm_module(major).cutlass_fp4_gemm_runner(),
+        "cutlass": lambda: get_cutlass_fp4_gemm_module(
+            major, minor
+        ).cutlass_fp4_gemm_runner(),
     }
     runners = [backend_to_runner_factory[cur_backend]() for cur_backend in backends]
 
