@@ -706,6 +706,7 @@ struct MoeFinalizeAllReduceFusionParams : public AllReduceFusionParams<T> {
   // [num_tokens, top_k]
   int32_t* expanded_idx_to_permuted_idx = nullptr;
   // allreduce_in [maxPermutedPaddedCount, hidden_dim]
+  float routed_scaling_factor = 1.0f;
 };
 
 template <int NRanks>
@@ -806,12 +807,28 @@ __device__ __forceinline__ void fused_op(vec_t<T, VEC_SIZE> const& val, int acce
   if constexpr (AllReduceOut) {
     val.store(reinterpret_cast<T*>(params.moe_allreduce_out) + access_id * VEC_SIZE);
   }
+
+  // Load residual and gamma - use __ldg for read-only data (texture cache)
+  // Compute residual addition in float to reduce type conversions
+  T const* residual_ptr = reinterpret_cast<T*>(params.residual_in) + access_id * VEC_SIZE;
+  T const* gamma_ptr = reinterpret_cast<T*>(params.rms_gamma) + access_id_in_token * VEC_SIZE;
+
   vec_t<T, VEC_SIZE> residual_val;
-  residual_val.load(reinterpret_cast<T*>(params.residual_in) + access_id * VEC_SIZE);
+#pragma unroll
+  for (int i = 0; i < VEC_SIZE; ++i) {
+    // Use __ldg for read-only residual_in (texture cache optimization)
+    float res_f = static_cast<float>(__ldg(&residual_ptr[i]));
+    float val_f = static_cast<float>(val[i]);
+    residual_val[i] = static_cast<T>(val_f + res_f);
+  }
 
   vec_t<T, VEC_SIZE> gamma_val;
-  gamma_val.load(reinterpret_cast<T*>(params.rms_gamma) + access_id_in_token * VEC_SIZE);
-  residual_val = vec_add<T, VEC_SIZE>(val, residual_val);
+#pragma unroll
+  for (int i = 0; i < VEC_SIZE; ++i) {
+    // Use __ldg for read-only rms_gamma (texture cache optimization)
+    gamma_val[i] = __ldg(&gamma_ptr[i]);
+  }
+
   if constexpr (ResidualOut) {
     residual_val.store(reinterpret_cast<T*>(params.residual_out) + access_id * VEC_SIZE);
   }
@@ -1231,7 +1248,7 @@ cudaError_t moereduction_allreduce_fusion_op(MoeReductionAllReduceFusionParams<T
 /////////////////////////////////////////////////////////////////
 
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
-          typename ScaleType = T>
+          bool UseScaleFactor, bool UseSharedExpert, typename ScaleType = T>
 __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
     MoeFinalizeAllReduceFusionParams<T> params) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
@@ -1268,65 +1285,84 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
   LamportComm<NRanks> comm(params.workspace, params.rank);
   int clear_access = comm.clear_size / VEC_SIZE;
 
-  // * MoE related
+  // * MoE related - hoist frequently accessed params to registers
   int threadid_in_cluster = cluster.thread_rank();
   // Start Offset within one token's hidden_size of element
   // Current thread handle token[thread_offset_within_token : thread_offset_within_token +
   // VEC_SIZE]
   int thread_offset_within_token = threadid_in_cluster * VEC_SIZE;
 
-  int top_k = params.top_k;
-  bool use_scale_factor = params.expert_scale_factor != nullptr;
+  // Hoist frequently used params to registers to avoid repeated struct access
+  int const top_k = params.top_k;
+  int const hidden_dim = params.hidden_dim;
 
   // Persistent Kernel
   // Each cluster iterate through all token it need to handle
   for (int token_id = grid.cluster_rank(); token_id < num_token; token_id += grid.num_clusters()) {
-    if (thread_offset_within_token >= params.hidden_dim) {
+    if (thread_offset_within_token >= hidden_dim) {
       break;
     }
 
-    // * MoE finalize
-    vec_t<T, VEC_SIZE> accumulator;
-    accumulator.fill(0.f);
+    // Precompute token offset (used multiple times)
+    int const token_offset = token_id * hidden_dim + thread_offset_within_token;
 
+    // * MoE finalize - accumulate in float to reduce type conversions
+    float acc_f[VEC_SIZE];
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      acc_f[i] = 0.f;
+    }
+
+    int const token_top_k_base = token_id * top_k;
+    // Unroll hint for common top_k values (most MoE models use top_k <= 8)
+#pragma unroll 8
     for (int k = 0; k < top_k; k++) {
-      int const expanded_idx = token_id * top_k + k;
-      int32_t const permuted_idx = params.expanded_idx_to_permuted_idx[expanded_idx];
+      int const expanded_idx = token_top_k_base + k;
+      // Use __ldg for read-only index lookup (texture cache)
+      int32_t const permuted_idx = __ldg(&params.expanded_idx_to_permuted_idx[expanded_idx]);
 
       if (permuted_idx == -1) continue;
 
-      int thread_offset_across_token =
-          permuted_idx * params.hidden_dim + thread_offset_within_token;
-      float block_scale = 1.0;
-      if (use_scale_factor) {
-        block_scale =
-            static_cast<float>(static_cast<ScaleType*>(params.expert_scale_factor)[expanded_idx]);
-      }
+      int thread_offset_across_token = permuted_idx * hidden_dim + thread_offset_within_token;
 
       vec_t<T, VEC_SIZE> permuted_data;
       permuted_data.load(reinterpret_cast<T*>(params.allreduce_in) + thread_offset_across_token);
 
-      // * acc += scale(data)
+      // * acc += scale(data) - accumulate in float
+      // Always apply routed_scaling_factor, optionally multiply by expert scale factor
+      float block_scale = params.routed_scaling_factor;
+      if constexpr (UseScaleFactor) {
+        // Use __ldg for read-only scale factor lookup (texture cache)
+        block_scale *=
+            static_cast<float>(__ldg(&reinterpret_cast<ScaleType*>(params.expert_scale_factor)[expanded_idx]));
+      }
+
 #pragma unroll
       for (int i = 0; i < VEC_SIZE; ++i) {
-        // assume computation is done in ScaleType
-        accumulator[i] += static_cast<T>(static_cast<float>(permuted_data[i]) * block_scale);
+        acc_f[i] += static_cast<float>(permuted_data[i]) * block_scale;
       }
     }
 
-    // * Add shared expert output
-    if (params.shared_expert_output) {
-      // * Load shared expert output
-      int thread_offset_across_token = token_id * params.hidden_dim + thread_offset_within_token;
-      vec_t<T, VEC_SIZE> shared_expert_output;
-      shared_expert_output.load(reinterpret_cast<T*>(params.shared_expert_output) +
-                                thread_offset_across_token);
+    // * Add shared expert output in float (template-specialized to eliminate branch)
+    if constexpr (UseSharedExpert) {
+      // Vectorized load for shared expert output (single 128-bit load instead of scalar loads)
+      vec_t<T, VEC_SIZE> shared_vec;
+      shared_vec.load(reinterpret_cast<T*>(params.shared_expert_output) + token_offset);
 #pragma unroll
-      accumulator = vec_add<T, VEC_SIZE>(accumulator, shared_expert_output);
+      for (int i = 0; i < VEC_SIZE; ++i) {
+        acc_f[i] += static_cast<float>(shared_vec[i]);
+      }
+    }
+
+    // Convert accumulated float values back to T only once at the end
+    vec_t<T, VEC_SIZE> accumulator;
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      accumulator[i] = static_cast<T>(acc_f[i]);
     }
 
     // * AR Store
-    int idx = token_id * params.hidden_dim / VEC_SIZE + access_id_in_token;
+    int idx = token_id * hidden_dim / VEC_SIZE + access_id_in_token;
     remove_neg_zero<T, VEC_SIZE>(accumulator);
 
 #pragma unroll
@@ -1358,10 +1394,25 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
         done &= !has_neg_zero<T, VEC_SIZE>(vals[r]);
       }
     }
-    vec_t<T, VEC_SIZE> sum_val = vals[0];
+
+    // Accumulate in float to reduce type conversions, convert to T only at the end
+    float sum_f[VEC_SIZE];
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      sum_f[i] = static_cast<float>(vals[0][i]);
+    }
 #pragma unroll
     for (int r = 1; r < NRanks; ++r) {
-      sum_val = vec_add<T, VEC_SIZE>(sum_val, vals[r]);
+#pragma unroll
+      for (int i = 0; i < VEC_SIZE; ++i) {
+        sum_f[i] += static_cast<float>(vals[r][i]);
+      }
+    }
+
+    vec_t<T, VEC_SIZE> sum_val;
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      sum_val[i] = static_cast<T>(sum_f[i]);
     }
 
     // * Fuse: AllReduceOut is always false in finalize_moe_allreduce
@@ -1374,19 +1425,20 @@ __global__ void moefinalize_allreduce_fusion_kernel_oneshot_lamport(
 }
 
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
-          typename ScaleType = T>
+          bool UseScaleFactor, bool UseSharedExpert, typename ScaleType = T>
 cudaError_t launch_oneshot_moefinalize_lamport(MoeFinalizeAllReduceFusionParams<T> const& params,
                                                cudaLaunchConfig_t& cfg) {
   FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(
       &cfg,
       moefinalize_allreduce_fusion_kernel_oneshot_lamport<T, NRanks, ResidualOut, NormOut, QuantOut,
+                                                          UseScaleFactor, UseSharedExpert,
                                                           ScaleType>,
       params));
   return cudaSuccess;
 }
 
 template <typename T, int NRanks, bool ResidualOut, bool NormOut, bool QuantOut,
-          typename ScaleType = T>
+          bool UseScaleFactor, bool UseSharedExpert, typename ScaleType = T>
 cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
     MoeFinalizeAllReduceFusionParams<T> const& params, bool launch_with_pdl) {
   int token_num = params.size / params.hidden_dim;
@@ -1432,38 +1484,44 @@ cudaError_t moefinalize_allreduce_fusion_kernel_launcher(
   cfg.numAttrs = 2;
   if (oneshot) {
     FLASHINFER_CUDA_CALL(
-        (launch_oneshot_moefinalize_lamport<T, NRanks, ResidualOut, NormOut, QuantOut, ScaleType>(
-            params, cfg)));
+        (launch_oneshot_moefinalize_lamport<T, NRanks, ResidualOut, NormOut, QuantOut,
+                                            UseScaleFactor, UseSharedExpert, ScaleType>(params,
+                                                                                         cfg)));
   }
   return cudaSuccess;
 }
 
-#define _DISPATCH_MOEFINALIZEREDUCTION_CASE(n_ranks_val, N_RANKS_VAR, res, rms, quant, RES, RMS, \
-                                            QUANT, ...)                                          \
-  case n_ranks_val: {                                                                            \
-    constexpr int N_RANKS_VAR = n_ranks_val;                                                     \
-    return DISPATCH_BOOL_(res, RES, [&]() -> cudaError_t {                                       \
-      return DISPATCH_BOOL_(rms, RMS, [&]() -> cudaError_t {                                     \
-        return DISPATCH_BOOL_(quant, QUANT, [&]() -> cudaError_t { return __VA_ARGS__(); });     \
-      });                                                                                        \
-    });                                                                                          \
+#define _DISPATCH_MOEFINALIZEREDUCTION_CASE(n_ranks_val, N_RANKS_VAR, res, rms, quant, scale,     \
+                                            shared, RES, RMS, QUANT, SCALE, SHARED, ...)           \
+  case n_ranks_val: {                                                                              \
+    constexpr int N_RANKS_VAR = n_ranks_val;                                                       \
+    return DISPATCH_BOOL_(res, RES, [&]() -> cudaError_t {                                         \
+      return DISPATCH_BOOL_(rms, RMS, [&]() -> cudaError_t {                                       \
+        return DISPATCH_BOOL_(quant, QUANT, [&]() -> cudaError_t {                                 \
+          return DISPATCH_BOOL_(scale, SCALE, [&]() -> cudaError_t {                               \
+            return DISPATCH_BOOL_(shared, SHARED, [&]() -> cudaError_t { return __VA_ARGS__(); }); \
+          });                                                                                      \
+        });                                                                                        \
+      });                                                                                          \
+    });                                                                                            \
   }
 
-#define DISPATCH_MOEFINALIZEREDUCTION(n_ranks, res, rms, quant, N_RANKS, RES, RMS, QUANT, ...) \
-  [&]() -> cudaError_t {                                                                       \
-    switch (n_ranks) {                                                                         \
-      _DISPATCH_MOEFINALIZEREDUCTION_CASE(2, N_RANKS, res, rms, quant, RES, RMS, QUANT,        \
-                                          __VA_ARGS__)                                         \
-      _DISPATCH_MOEFINALIZEREDUCTION_CASE(4, N_RANKS, res, rms, quant, RES, RMS, QUANT,        \
-                                          __VA_ARGS__)                                         \
-      _DISPATCH_MOEFINALIZEREDUCTION_CASE(8, N_RANKS, res, rms, quant, RES, RMS, QUANT,        \
-                                          __VA_ARGS__)                                         \
-      _DISPATCH_MOEFINALIZEREDUCTION_CASE(16, N_RANKS, res, rms, quant, RES, RMS, QUANT,       \
-                                          __VA_ARGS__)                                         \
-      default:                                                                                 \
-        FLASHINFER_CHECK(false, "Unsupported n_ranks");                                        \
-        return cudaErrorNotSupported;                                                          \
-    }                                                                                          \
+#define DISPATCH_MOEFINALIZEREDUCTION(n_ranks, res, rms, quant, scale, shared, N_RANKS, RES, RMS, \
+                                      QUANT, SCALE, SHARED, ...)                                  \
+  [&]() -> cudaError_t {                                                                          \
+    switch (n_ranks) {                                                                            \
+      _DISPATCH_MOEFINALIZEREDUCTION_CASE(2, N_RANKS, res, rms, quant, scale, shared, RES, RMS,   \
+                                          QUANT, SCALE, SHARED, __VA_ARGS__)                      \
+      _DISPATCH_MOEFINALIZEREDUCTION_CASE(4, N_RANKS, res, rms, quant, scale, shared, RES, RMS,   \
+                                          QUANT, SCALE, SHARED, __VA_ARGS__)                      \
+      _DISPATCH_MOEFINALIZEREDUCTION_CASE(8, N_RANKS, res, rms, quant, scale, shared, RES, RMS,   \
+                                          QUANT, SCALE, SHARED, __VA_ARGS__)                      \
+      _DISPATCH_MOEFINALIZEREDUCTION_CASE(16, N_RANKS, res, rms, quant, scale, shared, RES, RMS,  \
+                                          QUANT, SCALE, SHARED, __VA_ARGS__)                      \
+      default:                                                                                    \
+        FLASHINFER_CHECK(false, "Unsupported n_ranks");                                           \
+        return cudaErrorNotSupported;                                                             \
+    }                                                                                             \
   }()
 
 template <typename T>
@@ -1475,9 +1533,11 @@ cudaError_t moefinalize_allreduce_fusion_op(MoeFinalizeAllReduceFusionParams<T> 
   FLASHINFER_CHECK(params.size % params.hidden_dim == 0, "size must be a multiple of hidden_dim");
   FLASHINFER_CHECK(params.hidden_dim % VEC_SIZE == 0, "hidden_dim must be a multiple of VEC_SIZE");
 
+  bool use_scale_factor = params.expert_scale_factor != nullptr;
+  bool use_shared_expert = params.shared_expert_output != nullptr;
   auto status = DISPATCH_MOEFINALIZEREDUCTION(
-      params.nranks, params.residual_out, params.rms_gamma, params.quant_out, N_RANKS, RES, RMS,
-      QUANT, [&]() -> cudaError_t {
+      params.nranks, params.residual_out, params.rms_gamma, params.quant_out, use_scale_factor,
+      use_shared_expert, N_RANKS, RES, RMS, QUANT, SCALE, SHARED, [&]() -> cudaError_t {
         if constexpr (CUDA_VERSION < 12080 && QUANT) {
           FLASHINFER_CHECK(false,
                            "cuda version should be greater equal than 12.8 with "
@@ -1485,8 +1545,8 @@ cudaError_t moefinalize_allreduce_fusion_op(MoeFinalizeAllReduceFusionParams<T> 
           return cudaErrorNotSupported;
         }
         FLASHINFER_CUDA_CALL(
-            (moefinalize_allreduce_fusion_kernel_launcher<T, N_RANKS, RES, RMS, QUANT>(
-                (params), (launch_with_pdl))));
+            (moefinalize_allreduce_fusion_kernel_launcher<T, N_RANKS, RES, RMS, QUANT, SCALE,
+                                                          SHARED>((params), (launch_with_pdl))));
       });
   return status;
 }

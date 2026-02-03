@@ -348,15 +348,17 @@ def get_trtllm_comm_module():
 
     @register_custom_op(
         "flashinfer::trtllm_moe_finalize_allreduce_fusion",
-        mutates_args=["residual_out", "norm_out"],
+        mutates_args=["residual_out", "norm_out", "quant_out", "scale_out"],
     )
     def trtllm_moe_finalize_allreduce_fusion(
         allreduce_in: torch.Tensor,
         residual_in: torch.Tensor,
         norm_weight: torch.Tensor,
         expanded_idx_to_permuted_idx: torch.Tensor,
-        norm_out: torch.Tensor,
-        residual_out: torch.Tensor,
+        norm_out: Optional[torch.Tensor],
+        residual_out: Optional[torch.Tensor],
+        quant_out: Optional[torch.Tensor],
+        scale_out: Optional[torch.Tensor],
         launch_with_pdl: bool,
         workspace: torch.Tensor,
         world_rank: int,
@@ -364,6 +366,7 @@ def get_trtllm_comm_module():
         eps: float,
         shared_expert_output: Optional[torch.Tensor],
         expert_scale_factor: Optional[torch.Tensor],
+        routed_scaling_factor: Optional[float],
     ) -> None:
         module.trtllm_moe_finalize_allreduce_fusion(
             allreduce_in,
@@ -372,6 +375,8 @@ def get_trtllm_comm_module():
             expanded_idx_to_permuted_idx,
             norm_out,
             residual_out,
+            quant_out,
+            scale_out,
             launch_with_pdl,
             workspace,
             world_rank,
@@ -379,6 +384,7 @@ def get_trtllm_comm_module():
             eps,
             shared_expert_output,
             expert_scale_factor,
+            routed_scaling_factor,
         )
 
     return SimpleNamespace(
@@ -1091,6 +1097,8 @@ def trtllm_moe_finalize_allreduce_fusion(
     expanded_idx_to_permuted_idx: torch.Tensor,
     norm_out: torch.Tensor,
     residual_out: torch.Tensor,
+    quant_out: torch.Tensor,
+    scale_out: torch.Tensor,
     workspace_ptrs: torch.Tensor,
     launch_with_pdl: bool,
     world_rank: int,
@@ -1098,6 +1106,7 @@ def trtllm_moe_finalize_allreduce_fusion(
     eps: float,
     shared_expert_output: Optional[torch.Tensor],
     expert_scale_factor: Optional[torch.Tensor],
+    routed_scaling_factor: Optional[float],
 ) -> None:
     """
     Parameters:
@@ -1107,6 +1116,8 @@ def trtllm_moe_finalize_allreduce_fusion(
     - expanded_idx_to_permuted_idx: the expanded index to permuted index tensor. [token_num, top_k]
     - norm_out: the norm output tensor. [token_num, hidden_dim]
     - residual_out: the residual output tensor. [token_num, hidden_dim]
+    - quant_out: the quant output tensor. [token_num // 4, hidden_dim], fp16/bf16 -> fp4
+    - scale_out: the scale output tensor. [token_num // 4, hidden_dim], fp16/bf16 -> fp4
     - workspace_ptrs: the workspace pointers.
     - launch_with_pdl: whether to launch with pdl.
     - world_rank: the rank of the current process.
@@ -1114,6 +1125,7 @@ def trtllm_moe_finalize_allreduce_fusion(
     - eps: the epsilon value.
     - shared_expert_output: the shared expert output tensor. [token_num, hidden_dim]
     - expert_scale_factor: the expert scale factor tensor. [token_num, top_k]
+    - routed_scaling_factor: the routed scaling factor.
     """
 
     required_lamport_comm_size = allreduce_in.numel() * 2 * world_size
@@ -1131,6 +1143,8 @@ def trtllm_moe_finalize_allreduce_fusion(
         expanded_idx_to_permuted_idx=expanded_idx_to_permuted_idx,
         norm_out=norm_out,
         residual_out=residual_out,
+        quant_out=quant_out,
+        scale_out=scale_out,
         workspace=workspace_ptrs,
         launch_with_pdl=launch_with_pdl,
         world_rank=world_rank,
@@ -1138,4 +1152,5 @@ def trtllm_moe_finalize_allreduce_fusion(
         eps=eps,
         shared_expert_output=shared_expert_output,
         expert_scale_factor=expert_scale_factor,
+        routed_scaling_factor=routed_scaling_factor,
     )
