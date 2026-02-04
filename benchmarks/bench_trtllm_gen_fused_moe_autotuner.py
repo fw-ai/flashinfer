@@ -5,7 +5,7 @@ import numpy as np
 from functools import partial
 from flashinfer import (
     RoutingMethodType,
-    GatedActType,
+    ActivationType,
     fp4_quantize,
     mxfp8_quantize,
 )
@@ -20,6 +20,7 @@ from flashinfer.fused_moe import (
 from flashinfer.autotuner import autotune
 from flashinfer.testing.utils import bench_gpu_time
 from flashinfer.utils import device_support_pdl
+from routines.flashinfer_benchmark_utils import enum_type
 
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 FLOAT4_E2M1_MAX = 6.0
@@ -61,6 +62,7 @@ def bench_trtllm_gen_fused_moe_autotuner_fp8(
     top_k: int,
     warmups: int,
     iterations: int,
+    activation_type: ActivationType,
 ):
     device = torch.device("cuda:0")
     enable_pdl = device_support_pdl(device)
@@ -144,6 +146,10 @@ def bench_trtllm_gen_fused_moe_autotuner_fp8(
     )
 
     if is_block_scale:
+        if activation_type != ActivationType.Swiglu:
+            raise ValueError(
+                "Only Swiglu activation is supported for FP8 block scale MoE."
+            )
         fn = lambda: trtllm_fp8_block_scale_moe(
             routing_logits,
             routing_bias,
@@ -194,6 +200,7 @@ def bench_trtllm_gen_fused_moe_autotuner_fp8(
             RoutingMethodType.TopK.value,
             enable_pdl,
             num_tokens if tune_max_num_tokens is None else tune_max_num_tokens,
+            activation_type.value,
         )
     input_kwargs = {
         "hidden_states": hidden_states,
@@ -238,6 +245,7 @@ def bench_trtllm_gen_fused_moe_autotuner_fp4(
     top_k: int,
     warmups: int,
     iterations: int,
+    activation_type: ActivationType,
 ):
     device = torch.device("cuda:0")
     enable_pdl = device_support_pdl(device)
@@ -297,6 +305,10 @@ def bench_trtllm_gen_fused_moe_autotuner_fp4(
         w13_global_scale = 1.0 / 448.0 / 6.0
         w2_global_scale = 1.0 / 448.0 / 6.0
     else:
+        if activation_type == ActivationType.Relu2:
+            raise ValueError(
+                "Relu2 activation is supported for FP4 only with 'NvFP4xNvFP4' quant mode"
+            )
         w13, w13_scale = fp4_quantize(
             w13, torch.tensor([1.0], device=device), sf_vec_size=32, sf_use_ue8m0=True
         )
@@ -351,7 +363,7 @@ def bench_trtllm_gen_fused_moe_autotuner_fp4(
         RoutingMethodType.Renormalize.value,
         True,
         enable_pdl,
-        GatedActType.SwiGlu.value,  # gated_act_type
+        activation_type.value,  # act_type
         None,
         num_tokens if tune_max_num_tokens is None else tune_max_num_tokens,
     )
@@ -524,6 +536,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--iterations", type=int, default=100, help="Number of benchmark iterations"
     )
+    parser.add_argument(
+        "--activation-type",
+        type=enum_type(ActivationType),
+        metavar=str([e.name for e in ActivationType]),
+        required=False,
+        default=ActivationType.Swiglu,
+        help=f"Type of activation function: {[e.name for e in ActivationType]}",
+    )
     args = parser.parse_args()
     if args.quant_mode in ["Fp8-Per-Tensor", "Fp8-Block"]:
         bench_trtllm_gen_fused_moe_autotuner_fp8(
@@ -536,6 +556,7 @@ if __name__ == "__main__":
             args.top_k,
             args.warmups,
             args.iterations,
+            args.activation_type,
         )
     else:
         bench_trtllm_gen_fused_moe_autotuner_fp4(
@@ -548,4 +569,5 @@ if __name__ == "__main__":
             args.top_k,
             args.warmups,
             args.iterations,
+            args.activation_type,
         )
