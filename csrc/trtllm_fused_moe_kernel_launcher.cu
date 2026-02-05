@@ -2127,10 +2127,9 @@ Array<Array<int64_t>> trtllm_get_valid_moe_configs(
   }
 
   TVM_FFI_LOG_AND_THROW(NotImplementedError)
-      << "Unsupported data type combination for getValidConfigs: "
-      << "dtype_act=" << static_cast<int>(dtype_act)
-      << ", dtype_weights=" << static_cast<int>(dtype_weights)
-      << ", quantization_type=" << fp8QuantizationTypeToString(quantization_type);
+      << "Unsupported data type combination for getValidConfigs: " << "dtype_act="
+      << static_cast<int>(dtype_act) << ", dtype_weights=" << static_cast<int>(dtype_weights)
+      << ", useDeepSeekFp8=" << useDeepSeekFp8;
 
   // Unreachable code - added to suppress compiler warning
   return Array<Array<int64_t>>();
