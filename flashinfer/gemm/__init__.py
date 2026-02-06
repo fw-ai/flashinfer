@@ -64,5 +64,4 @@ __all__ = [
     "fp8_blockscale_gemm_sm90",
     "mm_M1_16_K7168_N128",
     "mm_M1_16_K7168_N256",
-    "tinygemm_bf16",
 ] + _cute_dsl_kernels

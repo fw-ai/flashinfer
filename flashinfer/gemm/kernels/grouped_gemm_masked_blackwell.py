@@ -61,7 +61,6 @@ from flashinfer.cute_dsl.utils import (
     get_cutlass_dtype,
     cutlass_to_torch_dtype,
     get_num_sm,
-    get_max_active_clusters,
     make_ptr,
 )
 from typing import Callable, List
@@ -2622,9 +2621,10 @@ class MaskedBatchedMatmulCuteDSL:
                 f"MaskedBatchedMatmulCuteDSL: Unsupported with {ab_dtype}, {sf_dtype}, {sf_vec_size}, {c_dtype},  {mma_tiler_mn}, {cluster_shape_mn}, {m}, {n}, {k}, {l}, {a_major}, {b_major}, {c_major}"
             )
 
-        # Compute max active clusters on current device (cached to avoid expensive queries)
+        # Compute max active clusters on current device
+        hardware_info = cutlass.utils.HardwareInfo()
         self._max_active_clusters = min(
-            get_max_active_clusters(
+            hardware_info.get_max_active_clusters(
                 self._cluster_shape_mn[0] * self._cluster_shape_mn[1]
             ),
             sm_count,
