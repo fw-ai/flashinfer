@@ -3588,12 +3588,7 @@ def trtllm_batch_context_with_kv_cache(
     enable_pdl: Optional[bool] = None,
     sinks: Optional[List[torch.Tensor]] = None,
     skip_softmax_threshold_scale_factor: Optional[float] = None,
-    kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    return_lse: bool = False,
-    lse: Optional[torch.Tensor] = None,
-) -> Union[
-    torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]
-]:
+) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
     ----------
@@ -3651,13 +3646,6 @@ def trtllm_batch_context_with_kv_cache(
         If no value is provided, then standard attention is used.
         Setting the threshold to a higher value generally increases kernel performance at the cost of accuracy degradation.
         The actual threshold value equals the provided threshold_scale_factor divided by the context length.
-    kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-        scales for kv cache, if not provided, will be set to ``1.0``.
-    return_lse: whether to return the log-sum-exp value.
-    lse: log-sum-exp value, if not provided, will be allocated internally.
-        When ``return_lse`` is ``True``, a tuple of two tensors:
-            * attention output, shape: ``[batch_size, num_qo_heads, head_dim]``
-            * logsumexp of attention scores, shape: ``[batch_size, num_qo_heads]``.
     Returns
     -------
     out: Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]
@@ -3813,9 +3801,6 @@ def trtllm_batch_context_with_kv_cache(
         workspace_size,
         sinks,
         skip_softmax_threshold_scale_factor,
-        lse,
-        k_cache_scale,
-        v_cache_scale,
     )
 
     out = (
