@@ -58,6 +58,7 @@ from .jit.gemm import (
     gen_gemm_sm100_module,
     gen_gemm_sm100_module_cutlass_fp4,
     gen_gemm_sm100_module_cutlass_fp8,
+    gen_gemm_sm100_module_cutlass_mxfp8,
     gen_tgv_gemm_sm10x_module,
     gen_gemm_sm120_module,
     gen_gemm_sm120_module_cutlass_fp4,
