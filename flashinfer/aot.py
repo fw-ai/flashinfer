@@ -55,6 +55,7 @@ from .jit.fused_moe import (
 from .jit.gemm import (
     gen_gemm_module,
     gen_gemm_sm90_module,
+    gen_fp8_blockscale_gemm_sm90_module,
     gen_gemm_sm100_module,
     gen_gemm_sm100_module_cutlass_fp4,
     gen_gemm_sm100_module_cutlass_fp8,
