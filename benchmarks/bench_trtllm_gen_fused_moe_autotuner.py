@@ -162,8 +162,8 @@ def bench_trtllm_gen_fused_moe_autotuner_fp8(
             local_num_experts=num_experts,
             routed_scaling_factor=2.5,
             routing_method_type=RoutingMethodType.DeepSeekV3.value,
-            use_shuffled_weight=False,
-            weight_layout=WeightLayout.MajorK.value,  # weight_layout
+            use_shuffled_weight=quant_mode == "MxFP8xMxFP8",
+            weight_layout=WeightLayout.MajorK.value,
             enable_pdl=enable_pdl,
             tune_max_num_tokens=num_tokens
             if tune_max_num_tokens is None
@@ -497,6 +497,7 @@ if __name__ == "__main__":
             "MxFP4xMxFP8",
             "MxFP4xBf16",
             "MxInt4xBf16",
+            "MxFP8xMxFP8",
             "Fp8-Per-Tensor",
             "Fp8-Block",
         ],
@@ -534,7 +535,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     fn = (
         bench_trtllm_gen_fused_moe_autotuner_fp8
-        if args.quant_mode in ["Fp8-Per-Tensor", "Fp8-Block"]
+        if args.quant_mode in ["Fp8-Per-Tensor", "Fp8-Block", "MxFP8xMxFP8"]
         else bench_trtllm_gen_fused_moe_autotuner_mxint4
         if args.quant_mode == "MxInt4xBf16"
         else bench_trtllm_gen_fused_moe_autotuner_fp4

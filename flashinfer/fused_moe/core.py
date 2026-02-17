@@ -173,6 +173,26 @@ class WeightLayout(IntEnum):
     BlockMajorK = 2
 
 
+# The type of gated activation function
+# Please keep this in sync with the counterpart defined in include/flashinfer/trtllm/fused_moe/runner.h
+class GatedActType(IntEnum):
+    # SwiGlu
+    SwiGlu = 0
+    # GeGlu
+    GeGlu = 1
+
+
+# The type of FP8 quantization
+# Please keep this in sync with the counterpart defined in trtllm_fused_moe_kernel_launcher.cu
+class Fp8QuantizationType(IntEnum):
+    # No FP8 quantization
+    NoneFp8 = 0
+    # DeepSeek FP8
+    DeepSeekFp8 = 1
+    # MxFp8 x MxFp8
+    MxFp8 = 2
+
+
 @functools.cache
 def is_trtllm_moe_supported(
     dtype_weights: DtypeTrtllmGen,
@@ -1611,6 +1631,7 @@ def get_trtllm_moe_sm100_module():
         do_finalize: bool = True,
         enable_pdl: Optional[bool] = None,
         tune_max_num_tokens: int = 8192,
+        fp8_quantization_type: Fp8QuantizationType = Fp8QuantizationType.DeepSeekFp8,
     ) -> torch.Tensor:
         # Determine routing mode: compute from logits or use pre-computed
         if routing_logits is None:
@@ -1777,6 +1798,7 @@ def get_trtllm_moe_sm100_module():
         do_finalize: bool = True,
         enable_pdl: Optional[bool] = None,
         tune_max_num_tokens: int = 8192,
+        fp8_quantization_type: Fp8QuantizationType = Fp8QuantizationType.DeepSeekFp8,
     ):
         seq_len = hidden_states.shape[0]
         hidden_size = hidden_states.shape[1]
@@ -2071,7 +2093,7 @@ def get_trtllm_moe_sm100_module():
             num_local_experts=num_local_experts,
             dtype_act=dtype_act,
             dtype_weights=dtype_weights,
-            use_deepseek_fp8=False,
+            fp8_quantization_type=Fp8QuantizationType.NoneFp8,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             activation_type=ActivationType.Swiglu,
@@ -2385,7 +2407,7 @@ def trtllm_fp8_block_scale_moe(
     enable_pdl: Optional[bool] = None,
     tune_max_num_tokens: int = 8192,
     fp8_quantization_type: Fp8QuantizationType = Fp8QuantizationType.DeepSeekFp8,
-) -> Union[List[torch.Tensor], torch.Tensor]:
+) -> torch.Tensor:
     """FP8 block scale MoE operation.
 
     Args:
@@ -2396,11 +2418,11 @@ def trtllm_fp8_block_scale_moe(
         gemm1_weights: tensor of first layer weights
             - [num_experts, 2*intermediate_size, hidden_size] if weight_layout == WeightLayout.MajorK
             - [num_experts, 2*intermediate_size // 128, hidden_size, 128] if weight_layout == WeightLayout.BlockMajorK
-        gemm1_weights_scale: [num_experts, 2*intermediate_size//128, hidden_size//128] tensor of first layer block scales
+        gemm1_weights_scale: [num_experts, 2*intermediate_size//(32 if mxfp8 else 128), hidden_size//(32 if mxfp8 else 128)] tensor of first layer block scales
         gemm2_weights: tensor of second layer weights
             - [num_experts, hidden_size, intermediate_size] if weight_layout == WeightLayout.MajorK
             - [num_experts, hidden_size//128, intermediate_size, 128] if weight_layout == WeightLayout.BlockMajorK
-        gemm2_weights_scale: [num_experts, hidden_size//128, intermediate_size//128] tensor of second layer block scales
+        gemm2_weights_scale: [num_experts, hidden_size//(32 if mxfp8 else 128), intermediate_size//(32 if mxfp8 else 128)] tensor of second layer block scales
         num_experts: Total number of experts
         top_k: Number of experts to route to per token
         n_group: Number of expert groups
@@ -2448,6 +2470,7 @@ def trtllm_fp8_block_scale_moe(
         weight_layout,
         enable_pdl,
         tune_max_num_tokens,
+        fp8_quantization_type,
     )
 
 
@@ -2475,6 +2498,7 @@ def trtllm_fp8_block_scale_routed_moe(
     enable_pdl: Optional[bool] = None,
     output: Optional[torch.Tensor] = None,
     tune_max_num_tokens: int = 8192,
+    fp8_quantization_type: Fp8QuantizationType = Fp8QuantizationType.DeepSeekFp8,
 ) -> torch.Tensor:
     """FP8 block scale MoE operation with pre-computed routing (packed format).
 
@@ -2489,11 +2513,11 @@ def trtllm_fp8_block_scale_routed_moe(
             Can be created as: (topk_ids.int32 << 16) | expert_weights.bfloat16.view(int16)
         routing_bias: [num_experts] tensor of routing bias (can be None)
         hidden_states: [seq_len, hidden_size] tensor of input hidden states
-        hidden_states_scale: [hidden_size//128, seq_len] tensor of hidden states block scales
+        hidden_states_scale: [hidden_size//(32 if mxfp8 else 128), seq_len] tensor of hidden states block scales
         gemm1_weights: [num_experts, 2*intermediate_size, hidden_size] tensor of first layer weights
-        gemm1_weights_scale: [num_experts, 2*intermediate_size//128, hidden_size//128] tensor of first layer block scales
+        gemm1_weights_scale: [num_experts, 2*intermediate_size//(32 if mxfp8 else 128), hidden_size//(32 if mxfp8 else 128)] tensor of first layer block scales
         gemm2_weights: [num_experts, hidden_size, intermediate_size] tensor of second layer weights
-        gemm2_weights_scale: [num_experts, hidden_size//128, intermediate_size//128] tensor of second layer block scales
+        gemm2_weights_scale: [num_experts, hidden_size//(32 if mxfp8 else 128), intermediate_size//(32 if mxfp8 else 128)] tensor of second layer block scales
         num_experts: Total number of experts
         top_k: Number of experts to route to per token
         n_group: Number of expert groups
@@ -2509,6 +2533,7 @@ def trtllm_fp8_block_scale_routed_moe(
         output (Optional[torch.Tensor]): shape [seq_len, hidden_size]
             Optional inplace output tensor.
         tune_max_num_tokens(int): Maximum number of tokens for tuning. (default: 8192)
+        fp8_quantization_type: Type of FP8 quantization to use (default: DeepSeekFp8)
     Returns:
         torch.Tensor: Output tensor of shape [seq_len, hidden_size]
     """

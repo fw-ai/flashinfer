@@ -846,10 +846,6 @@ class FP8BlockScaleMoe(Moe):
     def quant_mode(self) -> QuantMode:
         return self.fp8_quantization_type
 
-    @property
-    def quant_mode(self) -> QuantMode:
-        return QuantMode.FP8_BLOCK_SCALE
-
     def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
         """Quantize weights to FP8 with block scaling."""
         num_experts = gemm1_weights.shape[0]
@@ -2931,7 +2927,14 @@ def test_renormalize_routing(
     "moe_impl",
     [
         pytest.param(FP8PerTensorMoe(), id="FP8_PerTensor"),
-        pytest.param(FP8BlockScaleMoe(), id="FP8_Block"),
+        pytest.param(
+            FP8BlockScaleMoe(fp8_quantization_type=QuantMode.FP8_BLOCK_SCALE_DEEPSEEK),
+            id="FP8_Block_DeepSeek",
+        ),
+        pytest.param(
+            FP8BlockScaleMoe(fp8_quantization_type=QuantMode.FP8_BLOCK_SCALE_MXFP8),
+            id="FP8_Block_MxFp8",
+        ),
         pytest.param(FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4), id="NvFP4xNvFP4"),
         pytest.param(FP4Moe(quant_mode=QuantMode.FP4_MXFP4_MXFP8), id="MxFP4xMxFP8"),
         pytest.param(FP4Moe(quant_mode=QuantMode.FP4_MXFP4_Bf16), id="MxFP4xBf16"),
