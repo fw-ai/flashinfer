@@ -288,13 +288,13 @@ routine_cc_to_supported_backends = {
         # NOTE: trtllm-native calls trtllm_batch_context_with_kv_cache
         # NOTE: cudnn-native calls cudnn_batch_prefill_with_kv_cache
         "7.5": [],
-        "8.0": ["fa2", "cudnn", "cudnn-native"],
-        "8.6": ["fa2", "cudnn", "cudnn-native"],
-        "8.9": ["fa2", "cudnn", "cudnn-native"],
-        "9.0": ["fa2", "fa3", "cudnn", "cudnn-native"],
-        "10.0": ["fa2", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
-        "10.3": ["fa2", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
-        "12.0": ["fa2", "cudnn", "cudnn-native"],
+        "8.0": ["fa2", "auto", "cudnn", "cudnn-native"],
+        "8.6": ["fa2", "auto", "cudnn", "cudnn-native"],
+        "8.9": ["fa2", "auto", "cudnn", "cudnn-native"],
+        "9.0": ["fa2", "fa3", "auto", "cudnn", "cudnn-native"],
+        "10.0": ["fa2", "auto", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
+        "10.3": ["fa2", "auto", "cudnn", "cudnn-native", "trtllm-gen", "trtllm-native"],
+        "12.0": ["fa2", "auto", "cudnn", "cudnn-native"],
     },
     "BatchPrefillWithRaggedKVCacheWrapper": {
         # NOTE: trtllm-native calls trtllm_ragged_attention_deepseek

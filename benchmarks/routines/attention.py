@@ -595,7 +595,7 @@ def testBatchDecodeWithPagedKVCacheWrapper(args):
         actual_seq_lens_kv,
         ragged_q,
     ):
-        if backend in ["fa2", "fa2_tc", "trtllm-gen"]:
+        if backend in ["fa2", "fa2_tc", "auto", "trtllm-gen"]:
             return backend_wrappers[backend].run(
                 q, kv_cache, k_scale=k_scale, v_scale=v_scale, q_len_per_req=s_qo
             )
@@ -1147,6 +1147,7 @@ def testBatchPrefillWithPagedKVCacheWrapper(args):
                 kv_data_type=kv_dtype,
                 block_tables=block_tables,
             )
+            resolved_backends[backend] = backend_wrappers[backend]._backend
         elif backend == "cudnn":
             # cuDNN uses NHD layout and the wrapper API
             backend_wrappers[backend] = (
@@ -1176,6 +1177,9 @@ def testBatchPrefillWithPagedKVCacheWrapper(args):
                 max_sequence_kv=s_kv,
                 block_tables=block_tables,
             )
+            resolved_backends[backend] = backend_wrappers[backend]._backend
+        else:
+            resolved_backends[backend] = backend
 
     def run_backend_wrapper(
         backend,
@@ -1191,7 +1195,7 @@ def testBatchPrefillWithPagedKVCacheWrapper(args):
         qo_indptr,
         kv_indptr,
     ):
-        if backend in ["fa2", "fa3", "trtllm-gen"]:
+        if backend in ["fa2", "fa3", "auto", "trtllm-gen"]:
             return backend_wrappers[backend].run(
                 q, kv_cache, q_scale=q_scale, k_scale=k_scale, v_scale=v_scale
             )
