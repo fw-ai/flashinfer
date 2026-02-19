@@ -219,6 +219,7 @@ def trtllm_batch_decode_mla(
     enable_pdl: bool,
     backend: str,
     MAX_SEQ_LEN: int,
+    skips_softmax: bool,
 ):
     compute_capability = get_compute_capability(torch.device(device="cuda"))
     if backend == "xqa":
@@ -309,6 +310,9 @@ def trtllm_batch_decode_mla(
     workspace_buffer = global_trtllm_gen_fmha_workspace_buffer
     workspace_buffer_ref = global_workspace_buffer
 
+    # Using a tiny threshold should give the same output as standard attention
+    skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
+
     # Run decode-MLA
     output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
         query=query,
@@ -322,6 +326,7 @@ def trtllm_batch_decode_mla(
         max_seq_len=max_seq_len,
         bmm1_scale=scale / ((128 + 64) ** 0.5),
         bmm2_scale=1.0,
+        skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
         enable_pdl=enable_pdl,
         backend=backend,
     )
@@ -457,6 +462,7 @@ def trtllm_batch_decode_mla(
 @pytest.mark.parametrize("dynamic_scale", [False])
 @pytest.mark.parametrize("enable_pdl", [True, False, None])
 @pytest.mark.parametrize("backend", ["trtllm-gen", "xqa"])
+@pytest.mark.parametrize("skips_softmax", [False, True])
 def test_trtllm_batch_decode_mla(
     batch_size: int,
     scale: float,
@@ -466,6 +472,7 @@ def test_trtllm_batch_decode_mla(
     dynamic_scale: bool,
     enable_pdl: bool,
     backend: str,
+    skips_softmax: bool,
 ):
     trtllm_batch_decode_mla(
         batch_size,
@@ -477,6 +484,7 @@ def test_trtllm_batch_decode_mla(
         enable_pdl,
         backend,
         1024,
+        skips_softmax,
     )
 
 
@@ -492,6 +500,7 @@ def test_trtllm_batch_decode_mla(
 @pytest.mark.parametrize("enable_pdl", [True, False, None])
 @pytest.mark.parametrize("backend", ["trtllm-gen"])
 @pytest.mark.parametrize("MAX_SEQ_LEN", [1024, 8960])
+@pytest.mark.parametrize("skips_softmax", [False, True])
 def test_dsr1_trtllm_mla(
     batch_size: int,
     scale: float,
@@ -502,6 +511,7 @@ def test_dsr1_trtllm_mla(
     enable_pdl: bool,
     backend: str,
     MAX_SEQ_LEN: int,
+    skips_softmax: bool,
 ):
     trtllm_batch_decode_mla(
         batch_size,
@@ -513,6 +523,7 @@ def test_dsr1_trtllm_mla(
         enable_pdl,
         backend,
         MAX_SEQ_LEN,
+        skips_softmax,
     )
 
 

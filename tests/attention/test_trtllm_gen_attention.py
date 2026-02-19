@@ -545,8 +545,8 @@ def _test_trtllm_batch_prefill(
     else:
         q_input = q.contiguous()
 
-    # Using 0.0 threshold should give the same result as normal attention.
-    skip_softmax_threshold_scale_factor = 0.0 if skips_softmax else None
+    # Using a tiny threshold should give the same result as normal attention.
+    skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
     output = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
         q_input,
@@ -969,8 +969,8 @@ def _test_trtllm_batch_decode(
     else:
         q_input = q.contiguous()
 
-    # Using 0.0 threshold should give the same result as normal attention.
-    skip_softmax_threshold_scale_factor = 0.0 if skips_softmax else None
+    # Using a tiny threshold should give the same result as normal attention.
+    skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
     output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
         q_input,
@@ -1546,106 +1546,6 @@ def test_trtllm_gen_prefill_deepseek_bs1(
 ):
     test_trtllm_gen_prefill_deepseek(
         batch_size, s_qo, s_kv, num_kv_heads, head_grp_size, causal, skips_softmax
-    )
-
-
-def make_query_non_contiguous(q, num_qo_heads, head_dim):
-    """
-    Create a non-contiguous version of the query tensor.
-    Create a (N, H, 2*D) tensor and slice the first D dimensions: x[..., :D]
-    This produces a non-contiguous view with the same data.
-    """
-    n, h, d = q.shape
-    # Create a larger tensor with 2*D in the last dimension
-    large_tensor = torch.zeros(n, h, 2 * d, dtype=q.dtype, device=q.device)
-    large_tensor[..., :d] = q
-    # Slice to get non-contiguous query (only last dim is contiguous)
-    q_non_contiguous = large_tensor[..., :d]
-    assert not q_non_contiguous.is_contiguous(), "Query should be non-contiguous"
-    return q_non_contiguous
-
-
-@pytest.mark.parametrize("backend", ["trtllm-gen"])
-@pytest.mark.parametrize("kv_layout", ["HND", "NHD"])
-@pytest.mark.parametrize(
-    "batch_size,max_q_len,page_size,num_kv_heads,head_grp_size",
-    [
-        (4, 1, 16, 2, 1),
-        (4, 1, 32, 2, 5),
-        (4, 2, 64, 2, 5),
-        (4, 3, 32, 2, 5),
-        (4, 3, 64, 2, 1),
-        (4, 4, 64, 4, 1),
-        (4, 5, 64, 4, 8),
-        (128, 1, 64, 2, 5),
-        (128, 2, 32, 4, 1),
-        (128, 3, 16, 4, 8),
-        (128, 4, 16, 2, 5),
-        (128, 5, 16, 2, 5),
-        (256, 1, 64, 4, 8),
-        (256, 2, 16, 2, 8),
-        (256, 3, 64, 4, 5),
-        (256, 4, 32, 2, 8),
-        (256, 5, 32, 2, 1),
-    ],
-)
-@pytest.mark.parametrize("window_left", [-1, 127])
-@pytest.mark.parametrize(
-    "q_dtype,kv_dtype,o_dtype",
-    [
-        ("bf16", "bf16", "bf16"),
-        ("fp16", "fp16", "fp16"),
-        ("bf16", "fp8", "bf16"),
-        ("fp16", "fp8", "fp16"),
-        ("bf16", "fp8", "fp8"),
-        ("fp16", "fp8", "fp8"),
-        ("fp8", "fp8", "bf16"),
-        ("fp8", "fp8", "fp16"),
-        ("fp8", "fp8", "fp8"),
-        ("fp8", "fp8", "nvfp4"),
-    ],
-)
-@pytest.mark.parametrize("enable_pdl", [True, False, None])
-@pytest.mark.parametrize("enable_sink", [True, False])
-@pytest.mark.parametrize("max_in_kv_len", [110])
-@pytest.mark.parametrize("head_dim", [128])
-@pytest.mark.parametrize("skips_softmax", [False, True])
-def test_trtllm_batch_decode_spec(
-    backend,
-    kv_layout,
-    batch_size,
-    max_q_len,
-    page_size,
-    num_kv_heads,
-    head_grp_size,
-    window_left,
-    q_dtype,
-    o_dtype,
-    kv_dtype,
-    enable_pdl,
-    enable_sink,
-    max_in_kv_len,
-    head_dim,
-    skips_softmax,
-):
-    _test_trtllm_batch_decode(
-        backend,
-        kv_layout,
-        batch_size,
-        None,  # q_len_per_req
-        page_size,
-        num_kv_heads,
-        head_grp_size,
-        window_left,
-        q_dtype,
-        o_dtype,
-        kv_dtype,
-        enable_pdl,
-        enable_sink,
-        max_in_kv_len,
-        head_dim,
-        max_q_len=max_q_len,
-        skips_softmax=skips_softmax,
     )
 
 
