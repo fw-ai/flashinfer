@@ -1565,6 +1565,8 @@ class moe_args:
         permute_info,
         use_routing_scales_on_input,
         activation_type,
+        gemm1_bias=None,
+        gemm2_bias=None,
     ):
         self.num_tokens = num_tokens
         self.num_experts = num_experts
@@ -1585,6 +1587,8 @@ class moe_args:
         self.permute_info = permute_info
         self.use_routing_scales_on_input = use_routing_scales_on_input
         self.activation_type = activation_type
+        self.gemm1_bias = gemm1_bias
+        self.gemm2_bias = gemm2_bias
 
 
 class moe_args_dequant:
@@ -2274,6 +2278,8 @@ def run_moe_reference_fp4(args, quant_mode: QuantMode):
         args.permute_info,
         args.use_routing_scales_on_input,
         args.activation_type,
+        gemm1_bias=args.gemm1_bias,
+        gemm2_bias=args.gemm2_bias,
     )
 
     return run_moe_dequant(args_dequant, quant_mode), args_dequant
@@ -2377,6 +2383,8 @@ def run_moe_reference_dsfp8(args):
         args.permute_info,
         args.use_routing_scales_on_input,
         args.activation_type,
+        gemm1_bias=args.gemm1_bias,
+        gemm2_bias=args.gemm2_bias,
     )
 
     return run_moe_dequant(
@@ -2416,6 +2424,8 @@ def run_moe_reference_per_tensor_scale_fp8(args):
         args.permute_info,
         args.use_routing_scales_on_input,
         args.activation_type,
+        gemm1_bias=args.gemm1_bias,
+        gemm2_bias=args.gemm2_bias,
     )
 
     return run_moe_dequant(args_dequant, QuantMode.FP8_PER_TENSOR), args_dequant
@@ -2447,6 +2457,8 @@ def run_moe_reference_bf16(args):
         args.permute_info,
         args.use_routing_scales_on_input,
         args.activation_type,
+        gemm1_bias=args.gemm1_bias,
+        gemm2_bias=args.gemm2_bias,
     )
 
     return run_moe_dequant(args_dequant, QuantMode.BF16), args_dequant
@@ -2498,6 +2510,8 @@ def run_moe_reference_mxint4(args):
         args.permute_info,
         args.use_routing_scales_on_input,
         args.activation_type,
+        gemm1_bias=args.gemm1_bias,
+        gemm2_bias=args.gemm2_bias,
     )
 
     return run_moe_dequant(args_dequant, QuantMode.MXINT4_BF16_BF16), args_dequant
@@ -2564,6 +2578,8 @@ def run_moe_test(
     activation_type,
     cache_permute_indices,
     zero_hidden_states=False,
+    gemm1_bias=None,
+    gemm2_bias=None,
 ):
     """Common test logic for all routing methods."""
     skip_checks(
@@ -2713,6 +2729,8 @@ def run_moe_test(
         permute_info,
         use_routing_scales_on_input,
         activation_type,
+        gemm1_bias=gemm1_bias,
+        gemm2_bias=gemm2_bias,
     )
 
     # Compute reference output
