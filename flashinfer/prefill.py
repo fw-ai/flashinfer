@@ -3859,7 +3859,14 @@ def fmha_v2_prefill_deepseek(
         If return_lse is True, the output will be a tuple of two tensors, the first is the output tensor, the second is the lse tensor.
         If return_lse is False, the output will be a single tensor.
     """
-    if not (is_sm120a_supported(query.device) or is_sm121a_supported(query.device)):
+    if not is_sm12x_supported(query.device):
+        major, minor = get_compute_capability(query.device)
+        if major == 12:
+            min_cuda = "13.0" if minor >= 1 else "12.8"
+            raise ValueError(
+                f"fmha_v2_prefill_deepseek requires CUDA >= {min_cuda} "
+                f"for SM12{minor}x GPUs."
+            )
         raise ValueError("fmha_v2_prefill_deepseek is only supported on SM12x GPUs.")
     assert query.shape[3] == 192 and key.shape[3] == 192 and value.shape[3] == 128, (
         "currently only support deepseek r1 192 query and 128 value"
