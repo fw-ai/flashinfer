@@ -651,7 +651,7 @@ def get_gemm_sm120_module_cutlass_fp8():
                 def _pad_to_multiple(x, multiple):
                     return ((x + multiple - 1) // multiple) * multiple
 
-                # SM120 CUTLASS blockwise scaling requires:
+                # SM120/SM121 CUTLASS blockwise scaling requires:
                 # - N % 128 == 0 (ScaleGranularityN)
                 # - K % 128 == 0 (TileK)
                 # If not aligned, we pad and then slice the result
@@ -708,7 +708,7 @@ def get_gemm_sm120_module_cutlass_fp8():
                 else:
                     out_padded = out
 
-                # For scalar scales, create compatible shapes for SM120
+                # For scalar scales, create compatible shapes for SM120/SM121
                 if scale_a.numel() == 1:
                     scale_m_count = (
                         batch_size * m_dim + scale_gran_m - 1
