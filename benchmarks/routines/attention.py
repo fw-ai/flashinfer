@@ -594,6 +594,7 @@ def testBatchDecodeWithPagedKVCacheWrapper(args):
         block_tables,
         actual_seq_lens_kv,
         ragged_q,
+        speculative_mask,
     ):
         if backend in ["fa2", "fa2_tc", "auto", "trtllm-gen"]:
             return backend_wrappers[backend].run(
@@ -649,6 +650,7 @@ def testBatchDecodeWithPagedKVCacheWrapper(args):
                     block_tables,
                     actual_seq_lens_kv,
                     ragged_q,
+                    speculative_mask,
                 )
                 .detach()
                 .clone()
@@ -675,6 +677,7 @@ def testBatchDecodeWithPagedKVCacheWrapper(args):
                 block_tables,
                 actual_seq_lens_kv,
                 ragged_q,
+                speculative_mask,
             ),
         )
 
