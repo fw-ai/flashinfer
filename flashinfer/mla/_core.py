@@ -610,11 +610,13 @@ def trtllm_batch_decode_with_kv_cache_mla(
     bmm2_scale: Union[float, torch.Tensor] = 1.0,
     sinks: Optional[List[torch.Tensor]] = None,
     skip_softmax_threshold_scale_factor: Optional[float] = None,
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
     enable_pdl: bool | None = None,
     backend: str = "auto",
     is_var_seq: bool = True,
     uses_shared_paged_kv_idx: bool = True,
-) -> torch.Tensor:
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Parameters
     ----------
@@ -645,6 +647,9 @@ def trtllm_batch_decode_with_kv_cache_mla(
         If no value is provided, then standard attention is used.
         Setting the threshold to a higher value generally increases kernel performance at the cost of accuracy degradation.
         The actual threshold value equals the provided threshold_scale_factor divided by the context length.
+    return_lse: whether to return the log-sum-exp value.
+    lse: log-sum-exp value, if not provided, will be allocated internally.
+    enable_pdl: whether to enable pdl.
     backend : str = "auto"
         The implementation backend, could be ``auto``/``xqa``, ``trtllm-gen``, or ``cute-dsl``. Defaults to ``auto``.
         When set to ``auto``, the backend will be chosen based on the device architecture and kernel availability.
@@ -709,6 +714,8 @@ def trtllm_batch_decode_with_kv_cache_mla(
             raise ValueError(
                 "XQA MLA does not support separate KV page indices (uses_shared_paged_kv_idx=False)"
             )
+        if return_lse or lse is not None:
+            raise ValueError("XQA MLA does not support return_lse")
         return xqa_batch_decode_with_kv_cache_mla(
             query,
             kv_cache,
@@ -770,6 +777,21 @@ def trtllm_batch_decode_with_kv_cache_mla(
 
         batch_size = query.size(0)
         max_q_len = query.size(1)
+        expected_lse_shape = [batch_size, max_q_len, query.shape[2]]
+
+        if return_lse and lse is None:
+            lse = torch.empty(
+                *expected_lse_shape,
+                device=query.device,
+                dtype=torch.float32,
+            )
+        if lse is not None:
+            check_shape_dtype_device(
+                lse, expected_lse_shape, torch.float32, query.device, "lse"
+            )
+            if not lse.is_contiguous():
+                raise ValueError("lse must be contiguous for trtllm-gen backend.")
+
         query = query.flatten(0, 1)  # [B*S, H, D]
 
         run_func(
@@ -800,9 +822,13 @@ def trtllm_batch_decode_with_kv_cache_mla(
             None,  # value_block_scales
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
+            lse,
         )
 
-        return out
+        if return_lse:
+            return out, lse
+        else:
+            return out
     elif backend == "cute-dsl":
         enable_pdl = (
             device_support_pdl(query.device) if enable_pdl is None else enable_pdl
@@ -841,6 +867,8 @@ def trtllm_batch_decode_with_kv_cache_mla(
                 "cute-dsl backend (MLA decode kernel) does not support separate KV page indices "
                 "(uses_shared_paged_kv_idx=False)"
             )
+        if return_lse or lse is not None:
+            raise ValueError("cute-dsl backend (MLA decode kernel) does not support return_lse")
 
         return cute_dsl_mla_decode(
             query=query,

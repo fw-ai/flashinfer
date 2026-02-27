@@ -2127,6 +2127,7 @@ class TrtllmGenDecodeModule:
             value_block_scales,
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
+            None,  # lse
         )
         return out
 
@@ -2305,7 +2306,13 @@ def trtllm_batch_decode_with_kv_cache(
     skip_softmax_threshold_scale_factor: Optional[float] = None,
     kv_cache_sf: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     uses_shared_paged_kv_idx: bool = True,
-) -> Union[torch.Tensor, FP4Tensor]:
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
+) -> Union[
+    torch.Tensor,
+    FP4Tensor,
+    Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor],
+]:
     """
     Parameters
     ----------
@@ -2425,10 +2432,19 @@ def trtllm_batch_decode_with_kv_cache(
         True (default) uses vLLM/FlashInfer layout with a 2D page table.
         False uses TRT-LLM layout with a 3D page table ``[batch_size, 2, max_num_pages_per_seq]``.
 
+    return_lse : bool = False
+        Whether to return the log-sum-exp of the attention scores.
+        Only supported by the ``trtllm-gen`` backend.
+
+    lse : Optional[torch.Tensor] = None
+        Optional output tensor for log-sum-exp values.
+        Shape: ``[num_tokens, num_qo_heads]``.
+
     Returns
     -------
-    out : Union[torch.Tensor, FP4Tensor]
-        output torch.Tensor or FP4Tensor.
+    out : Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]
+        Output torch.Tensor or FP4Tensor. If ``return_lse`` is ``True``, returns
+        ``(out, lse)``.
     """
     enable_pdl = device_support_pdl(query.device) if enable_pdl is None else enable_pdl
 
@@ -2489,6 +2505,8 @@ def trtllm_batch_decode_with_kv_cache(
             raise ValueError(
                 "xqa backend does not support uses_shared_paged_kv_idx=False"
             )
+        if return_lse or lse is not None:
+            raise ValueError("xqa backend does not support return_lse")
 
         # Handle out and out_dtype
         if out_dtype is None:
@@ -2623,6 +2641,19 @@ def trtllm_batch_decode_with_kv_cache(
             batch_size = cum_seq_lens_q.size(0) - 1
 
         _check_block_tables_shape(block_tables, uses_shared_paged_kv_idx)
+        expected_lse_shape = [query.shape[0], query.shape[1]]
+        if return_lse and lse is None:
+            lse = torch.empty(
+                *expected_lse_shape,
+                device=query.device,
+                dtype=torch.float32,
+            )
+        if lse is not None:
+            check_shape_dtype_device(
+                lse, expected_lse_shape, torch.float32, query.device, "lse"
+            )
+            if not lse.is_contiguous():
+                raise ValueError("lse must be contiguous for trtllm-gen backend.")
 
         run_func(
             out,
@@ -2652,13 +2683,18 @@ def trtllm_batch_decode_with_kv_cache(
             v_block_scales,
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
+            lse,
         )
 
-        return (
+        out = (
             out
             if out_dtype != "nvfp4"
             else FP4Tensor(out, out_scale_factor, o_sf_start_index, query.shape)
         )
+        if return_lse:
+            return out, lse
+        else:
+            return out
     else:
         raise KeyError(f"Backend {backend} not supported")
 

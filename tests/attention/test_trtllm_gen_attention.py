@@ -683,6 +683,7 @@ def _test_trtllm_batch_prefill(
         "kv_data_type": ref_kv_cache.dtype,
         "window_left": window_left,
     }
+    lse_ref = None
     sink = torch.rand(num_qo_heads, device=GPU_DEVICE, dtype=torch.float32) * 5
     if head_dim > 256:
         # FlashInfer's own FA2/FA3 kernels don't support head_dim > 256;
@@ -708,7 +709,7 @@ def _test_trtllm_batch_prefill(
             workspace_buffer_ref, kv_layout
         )
         wrapper_ref.plan(**plan_params)
-        output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
+        output_ref, lse_ref = wrapper_ref.run(ref_q, ref_kv_cache, return_lse=True)
     else:
         # Construct flat K/V via helper
         k_flat, v_flat, kv_indptr_tokens = flatten_paged_kv(
@@ -754,7 +755,7 @@ def _test_trtllm_batch_prefill(
     # Using a tiny threshold should give the same result as normal attention.
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
-    output = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
+    output, lse = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
         q_input,
         kv_cache_kernel,
         workspace_buffer,
@@ -778,6 +779,7 @@ def _test_trtllm_batch_prefill(
         kv_cache_sf=kv_cache_sf_kernel,
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
         uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
+        return_lse=True,
     )
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
@@ -829,6 +831,14 @@ def _test_trtllm_batch_prefill(
             f"NVFP4 KV cache attention: cosine similarity {cos:.4f} < 0.86. "
             f"Block scale factors may be mismatched to FP4 data blocks."
         )
+
+    if lse_ref is not None:
+        assert lse is not None, "LSE should be returned when return_lse=True"
+        if q_dtype == "fp8":
+            lse_rtol, lse_atol = 5e-2, 5e-2
+        else:
+            lse_rtol, lse_atol = 1e-3, 1e-3
+        torch.testing.assert_close(lse, lse_ref, rtol=lse_rtol, atol=lse_atol)
 
     if (
         o_dtype != "nvfp4" and kv_dtype != "nvfp4" and uses_shared_paged_kv_idx
@@ -1132,6 +1142,7 @@ def _test_trtllm_batch_decode(
         "q_data_type": ref_q.dtype,
         "window_left": window_left,
     }
+    lse_ref = None
     sink = torch.rand(num_qo_heads, device=GPU_DEVICE, dtype=torch.float32) * 5
     if head_dim > 256:
         # FlashInfer's own FA2/FA3 kernels don't support head_dim > 256;
@@ -1158,7 +1169,7 @@ def _test_trtllm_batch_decode(
                 workspace_buffer_ref, kv_layout, use_tensor_cores=True
             )
             wrapper_ref.plan(**plan_params)
-            output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
+            output_ref, lse_ref = wrapper_ref.run(ref_q, ref_kv_cache, return_lse=True)
 
         else:
             # speculative decoding test
@@ -1178,7 +1189,7 @@ def _test_trtllm_batch_decode(
                 }
             )
             wrapper_ref.plan(**plan_params_prefill)
-            output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
+            output_ref, lse_ref = wrapper_ref.run(ref_q, ref_kv_cache, return_lse=True)
     else:
         # Construct flat K/V via helper
         k_flat, v_flat, kv_indptr_tokens = flatten_paged_kv(
@@ -1230,16 +1241,7 @@ def _test_trtllm_batch_decode(
     # Using a tiny threshold should give the same result as normal attention.
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
-    output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
-        q_input,
-        kv_cache_arg,
-        workspace_buffer,
-        page_table_kernel,
-        seq_lens.to(GPU_DEVICE),
-        torch.max(seq_lens).item(),
-        bmm1_scale,
-        bmm2_scale,
-        window_left,  # window_left
+    decode_kwargs = dict(
         out=out,
         out_dtype=out_dtype,
         o_sf_scale=o_sf_scale,
@@ -1257,6 +1259,34 @@ def _test_trtllm_batch_decode(
         kv_cache_sf=kv_cache_sf_kernel,
         uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
     )
+    if backend == "trtllm-gen":
+        output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+            q_input,
+            kv_cache_arg,
+            workspace_buffer,
+            page_table_kernel,
+            seq_lens.to(GPU_DEVICE),
+            torch.max(seq_lens).item(),
+            bmm1_scale,
+            bmm2_scale,
+            window_left,  # window_left
+            return_lse=True,
+            **decode_kwargs,
+        )
+    else:
+        output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+            q_input,
+            kv_cache_arg,
+            workspace_buffer,
+            page_table_kernel,
+            seq_lens.to(GPU_DEVICE),
+            torch.max(seq_lens).item(),
+            bmm1_scale,
+            bmm2_scale,
+            window_left,  # window_left
+            **decode_kwargs,
+        )
+        lse = None
     if backend == "trtllm-gen":
         # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
         # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
@@ -1319,6 +1349,14 @@ def _test_trtllm_batch_decode(
             f"NVFP4 KV cache attention: cosine similarity {cos:.4f} < 0.86. "
             f"Block scale factors may be mismatched to FP4 data blocks."
         )
+
+    if lse_ref is not None and backend == "trtllm-gen":
+        assert lse is not None, "LSE should be returned when return_lse=True"
+        if q_dtype == "fp8":
+            lse_rtol, lse_atol = 5e-2, 5e-2
+        else:
+            lse_rtol, lse_atol = 1e-3, 1e-3
+        torch.testing.assert_close(lse, lse_ref, rtol=lse_rtol, atol=lse_atol)
 
     # Only test wrapper with trtllm-gen backend
     if (
