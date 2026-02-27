@@ -331,8 +331,7 @@ def trtllm_batch_decode_mla(
     # Using a tiny threshold should give the same output as standard attention
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
-    # Run decode-MLA
-    output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+    mla_kwargs = dict(
         query=query,
         kv_cache=kv_cache.unsqueeze(1),
         workspace_buffer=workspace_buffer,
@@ -345,11 +344,19 @@ def trtllm_batch_decode_mla(
         bmm1_scale=scale / ((128 + 64) ** 0.5),
         bmm2_scale=1.0,
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
-        return_lse=True,
         enable_pdl=enable_pdl,
         backend=backend,
         uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
     )
+    # Run decode-MLA
+    if backend == "trtllm-gen":
+        output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+            return_lse=True,
+            **mla_kwargs,
+        )
+    else:
+        output = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(**mla_kwargs)
+        lse = None
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
     assert (workspace_buffer[: 8192 * 256 * 4].cpu().numpy() == 0).all()
@@ -405,7 +412,7 @@ def trtllm_batch_decode_mla(
     ckv = kv_cache[..., : layer_dimensions.head_dimensions.kv_lora_rank]
     kpe = kv_cache[..., layer_dimensions.head_dimensions.kv_lora_rank :]
 
-    o_ref = wrapper.run(q_nope, q_pe, ckv, kpe, return_lse=False)
+    o_ref, lse_ref = wrapper.run(q_nope, q_pe, ckv, kpe, return_lse=True)
 
     if backend == "trtllm-gen":
         # check is nan
@@ -440,6 +447,16 @@ def trtllm_batch_decode_mla(
                 print("output:", output)
                 print("o_ref:", o_ref)
                 raise e
+
+        assert lse is not None, "LSE should be returned when return_lse=True"
+        # trtllm lse: [batch_size, q_len, num_q_heads]
+        # ref lse:    [batch_size * q_len_per_request, num_q_heads]
+        lse_flat = lse.view(batch_size * q_len_per_request, layer_dimensions.num_heads)
+        if dtype == torch.float8_e4m3fn:
+            lse_rtol, lse_atol = 5e-2, 5e-2
+        else:
+            lse_rtol, lse_atol = 1e-3, 1e-3
+        torch.testing.assert_close(lse_flat, lse_ref, rtol=lse_rtol, atol=lse_atol)
     elif backend == "xqa":
         atol = 0.05
         rtol = 0.05
