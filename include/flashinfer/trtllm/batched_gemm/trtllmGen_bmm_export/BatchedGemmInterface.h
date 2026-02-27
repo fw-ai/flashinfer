@@ -16,8 +16,10 @@
  */
 #pragma once
 
+#include <functional>
 #include <numeric>
 #include <optional>
+#include <unordered_map>
 
 #include "BatchedGemmOptions.h"
 #include "KernelParams.h"
@@ -94,23 +96,34 @@ struct BatchedGemmData {
   struct InputBuffers {
     // The matrix A. The data type is controlled by options.mDtypeA.
     //
+    // Sparsity is only supported with batchN.
+    // Let S be the sparsity ratio (1 for dense, 2 for sparse).
+    //
     // If (routeAct == true && batchM), the shape is [M, K]
-    // Else
+    // Elseif (batchStrideInTokens > 0)
     //   If batchM:
     //      Logical shape is [sum(divUpMul(M[bi], tileM) for bi in B), K].
     //      Logical strides are [K, 1].
     //
     //   If batchN:
     //      If layoutA is MatrixLayout::MajorK
-    //         Logical shape is [B, divUpMul(M, tileM), K].
-    //         Logical strides are [divUpMul(M, tileM) * K, K, 1].
-    //      If layoutA is MatrixLayout::MajorMn
+    //         Logical shape is [B, divUpMul(M, tileM), K / S].
+    //         Logical strides are [divUpMul(M, tileM) * K / S, K / S, 1].
+    //      If layoutA is MatrixLayout::MajorMn (sparsity not supported)
     //         Logical shape is [B, K, divUpMul(M, tileM)].
     //         Logical strides are [K * divUpMul(M, tileM), divUpMul(M, tileM), 1].
     //      If layoutA is MatrixLayout::BlockMajorK
-    //         Logical shape is [B, K / blockK, divUpMul(M, tileM), blockK].
-    //         Logical strides are [K * divUpMul(M, tileM), divUpMul(M, tileM) * blockK, blockK, 1].
-    //         where blockK is 128B.
+    //         Logical shape is [B, K / S / blockK, divUpMul(M, tileM), blockK].
+    //         Logical strides are [K / S * divUpMul(M, tileM), divUpMul(M, tileM) * blockK, blockK,
+    //         1]. where blockK is 128B.
+    // Else // batchStrideInTokens == 0
+    //   If batchM: (sparsity not supported)
+    //      Logical shape is [M, K].
+    //      Logical strides are [K, 1].
+    //
+    //   If batchN:
+    //      Logical shape is [B, divUpMul(M, tileM), K / S].
+    //      Logical strides are [divUpMul(M, tileM) * K / S, K / S, 1].
     void const* mPtrA{nullptr};
 
     // The block scaling factors to dequantize A.
@@ -122,17 +135,18 @@ struct BatchedGemmData {
     //      Otherwise, shape is [M / 128, K / 128].
     //    The rightmost dimension is contiguous in memory.
     //
-    //   If DeepSeek FP8 recipe is not used, but for MxFp{4,8} and NvFp4 formats:
+    //   If DeepSeek FP8 recipe is not used, but for MxFp{4,8}, MxInt4 and NvFp4 formats:
     //      The layout of scaling factors for A is always R128c4
     //      M must be a multiple of 128.
     //      K must be a multiple of 64.
-    //      The "logical" shape is: [paddedM, K / 16].
-    //      The R128c4 layout is: [paddedM / 128, K / 16 / 4, 512].
-    //      The shape we use for TMA is: [paddedM / 128, K / 16 / 4, 2, 256].
+    //      The "logical" shape is: [paddedM, K / P], where P is the scaling block size.
+    //      The R128c4 layout is: [paddedM / 128, K / P / 4, 512].
+    //      The shape we use for TMA is: [paddedM / 128, K / P / 4, 2, 256].
     //  Where paddedM is M if (routeAct == true && batchM), or
     //  sum(divUpMul(M[bi], tileM) for bi in B) if batchM,
     //  otherwise divUpMul(M, tileM) * B.
-    //  Dtype is Dtype::Fp32 if DeepSeek FP8 recipe is used, otherwise Dtype::E4m3.
+    //  Dtype is Dtype::Fp32 if DeepSeek FP8 recipe is used, otherwise Dtype is Dtype::E4m3 for
+    //  NvFp4, Dtype::UE8m0 for MxFp{4,8} formats, Dtype::Bfloat16 for MxInt4.
     //
     // Otherwise should be set to nullptr.
     void const* mPtrSfA{nullptr};
@@ -157,7 +171,7 @@ struct BatchedGemmData {
     //
     // If (routeAct == true && batchN), the shape is [N, K]
     //
-    // Else
+    // Else if (batchStrideInTokens > 0)
     //   If batchN:
     //      Logical shape is [sum(divUpMul(N[bi], tileN) for bi in B), K].
     //      Logical strides are [K, 1].
@@ -173,6 +187,15 @@ struct BatchedGemmData {
     //         Logical shape is [B, K / blockK, divUpMul(N, tileN), blockK].
     //         Logical strides are [K * divUpMul(N, tileN), divUpMul(N, tileN) * blockK, blockK, 1].
     //         where blockK is 128B.
+    //
+    // Else // batchStrideInTokens == 0
+    //   If batchN:
+    //      Logical shape is [N, K].
+    //      Logical strides are [K, 1].
+    //
+    //   If batchM:
+    //      Logical shape is [B, divUpMul(N, tileN), K].
+    //      Logical strides are [divUpMul(N, tileN) * K, K, 1].
     void const* mPtrB{nullptr};
 
     // The scaling factors to dequantize B.
@@ -189,15 +212,15 @@ struct BatchedGemmData {
     //    If the layout is R128c4,
     //       paddedN must be a multiple of 128.
     //       K must be a multiple of 64.
-    //       The R128c4 layout is: [paddedN / 128, K / 16 / 4, 512]
-    //       The shape we use for TMA is: [paddedN / 128, K / 16 / 4, 2, 256]
+    //       The R128c4 layout is: [paddedN / 128, K / P / 4, 512], where P is the scaling block
+    //       size. The shape we use for TMA is: [paddedN / 128, K / P / 4, 2, 256]
     //
     //    If the layout is R8c4,
     //       paddedN must be a multiple of 8.
     //       K must be a multiple of 64.
-    //       The R8c4 layout is: [paddedN / 8, K / 16 / 4, 32]
-    //       The shape we use for TMA is: [paddedN / 8, K / 16 / 4 / repeats, repeats * 32]
-    //       where repeats = min(tileK / 16 / 4, 8)
+    //       The R8c4 layout is: [paddedN / 8, K / P / 4, 32], where P is the scaling block size.
+    //       The shape we use for TMA is: [paddedN / 8, K / P / 4 / repeats, repeats * 32]
+    //       where repeats = min(tileK / P / 4, 8)
     //
     // where paddedN is N if (routeAct == true && batchN),
     // or sum(divUpMul(N[bi], tileN) for bi in B) if batchN,
@@ -222,6 +245,25 @@ struct BatchedGemmData {
     // if (batchN (B is activations)):
     //     Logical shape is [sum(divUpMul(N[bi], tileN) for bi in B)]
     void const* mPtrPerTokenSfB{nullptr};
+
+    // The sparsity information of A, if structured sparsity is used.
+    // Only supported for batchN (A is weights).
+    //
+    // When sparsityA is Any_2_4:
+    //     2 elements are non-zero in any chunk of 4 elements.
+    //     A 4-bit index indicates the position of the non-zero elements.
+    //     The shape in Uint8 is: [B, divUpMul(M, tileM), K / 8]
+    //     (two 4-bit indices packed into one UInt8)
+    //
+    // When sparsityA is Pairwise_4_8:
+    //     4 elements are non-zero in any chunk of 8 elements.
+    //     The zero and non-zero elements are grouped in pairs.
+    //     A 4-bit index indicates the position of the non-zero pairs.
+    //     The shape in Uint8 is: [B, divUpMul(M, tileM), K / 16]
+    //     (two 4-bit indices packed into one UInt8)
+    //
+    // If sparsityA is Dense, this should be set to nullptr.
+    void const* mPtrSparsityInfoA{nullptr};
 
     // The bias applied after the GEMM and before the activation function.
     // The bias is applied before applying the global scaling factor. I.e.
@@ -252,6 +294,13 @@ struct BatchedGemmData {
     //    otherwise it is 1.
     // Shape is [B].
     float const* mPtrScaleC{nullptr};
+
+    // The pre-activation scaling factor (typically dequantA * dequantB) for non-gated non-linear
+    // activation.
+    // Only used when non-linear activation is applied (e.g., GELU, Relu2).
+    // When used, scaleC should be quantScaleC only, and this scale is applied before the
+    // activation. Shape is [B].
+    float const* mPtrScaleAct{nullptr};
 
     // The output gate scale for Fp8 (not DeepSeek FP8) and NvFp4 quantization.
     // TensorRT-LLM API requires a scaling factor on the device.
@@ -354,7 +403,8 @@ struct BatchedGemmData {
     // Computed as
     // int32_t totalNumPaddedTokens{0};
     // for (int bi = 0; bi < options.mNumBatches; bi++) {
-    //   totalNumPaddedTokens += batchM ? divUpMul(options.mBatchedM[bi], options.mTileM)
+    //   totalNumPaddedTokens += batchM ? divUpMul(options.mBatchedM[bi], options.mTileM *
+    //   options.mClusterDimX)
     //                                  : divUpMul(options.mBatchedN[bi], options.mTileN);
     // }
     // The size is 1 and the dtype is int32_t.
@@ -403,26 +453,26 @@ struct BatchedGemmData {
     // The output block scaling factors for C.
     //
     // If MxFp{4,8} and NvFp4 formats are used,
-    // The "logical" shape is:
-    //    if batchM: [paddedM, N / 16]
-    //    if batchN: [paddedN, M / 16]
+    // The "logical" shape is (P is the scaling block size):
+    //    if batchM: [paddedM, N / P]
+    //    if batchN: [paddedN, M / P]
     // where paddedM is sum(divUpMul(M[bi], tileM) for bi in B),
     // where paddedN is sum(divUpMul(N[bi], tileN) for bi in B).
     //
     // If the layout is R128c4,
     //    paddedOuter must be a multiple of 128.
     //    inner must be a multiple of 64.
-    //    The R128c4 layout is: [paddedOuter / 128, inner / 16 / 4, 512]
-    //    The shape we use for TMA is: [paddedOuter / 128, inner / 16 / 4, 2, 256]
+    //    The R128c4 layout is: [paddedOuter / 128, inner / P / 4, 512]
+    //    The shape we use for TMA is: [paddedOuter / 128, inner / P / 4, 2, 256]
     //    where inner = N if batchM, otherwise M.
     //    where paddedOuter = paddedM if batchM, otherwise paddedN.
     //
     // If the layout is R8c4,
     //    paddedOuter must be a multiple of 8.
     //    inner must be a multiple of 64.
-    //    The R8c4 layout is: [paddedOuter / 8, inner / 16 / 4, 32]
-    //    The shape we use for TMA is: [paddedOuter / 8, inner / 16 / 4 / repeats, repeats * 32]
-    //    where repeats = min(tileInner / 16 / 4, 8),
+    //    The R8c4 layout is: [paddedOuter / 8, inner / P / 4, 32]
+    //    The shape we use for TMA is: [paddedOuter / 8, inner / P / 4 / repeats, repeats * 32]
+    //    where repeats = min(tileInner / P / 4, 8),
     //    where tileInner = tileN if batchM, otherwise tileM,
     //    where paddedOuter = paddedM if batchM, otherwise paddedN.
     //    where inner = N if batchM, otherwise M.
@@ -476,9 +526,6 @@ class BatchedGemmInterface {
               BatchedGemmData const& batchedGemmData, void* cudaStream,
               int32_t /*multiProcessorCount*/, bool usePdl = true,
               std::optional<std::reference_wrapper<ModuleCache>> moduleCache = std::nullopt) {
-    // Might be used.
-    (void)usePdl;
-    (void)moduleCache;
     // Get options from config and data.
     auto options = getOptionsFromConfigAndData(config, batchedGemmData);
 
@@ -504,13 +551,16 @@ class BatchedGemmInterface {
 
     auto [numCtaBatch, numCtaTile, numCtaInner] =
         getGridDim(options, batchedGemmData.mProblemDimensions.mMaxNumCtasInTokenDim);
+
     auto kernelParams = KernelParamsSetup::setKernelParams(
         options, batchM, batchedGemmData.mInputBuffers.mPtrA, batchedGemmData.mInputBuffers.mPtrB,
         batchedGemmData.mOutputBuffers.mPtrC, batchedGemmData.mInputBuffers.mPtrSfA,
         batchedGemmData.mInputBuffers.mPtrSfB, batchedGemmData.mInputBuffers.mPtrPerTokenSfA,
-        batchedGemmData.mInputBuffers.mPtrPerTokenSfB, batchedGemmData.mInputBuffers.mPtrBias,
+        batchedGemmData.mInputBuffers.mPtrPerTokenSfB,
+        batchedGemmData.mInputBuffers.mPtrSparsityInfoA, batchedGemmData.mInputBuffers.mPtrBias,
         batchedGemmData.mOutputBuffers.mPtrSfC, batchedGemmData.mInputBuffers.mPtrScaleC,
-        batchedGemmData.mInputBuffers.mPtrScaleGate, batchedGemmData.mInputBuffers.mPtrClampLimit,
+        batchedGemmData.mInputBuffers.mPtrScaleAct, batchedGemmData.mInputBuffers.mPtrScaleGate,
+        batchedGemmData.mInputBuffers.mPtrClampLimit,
         batchedGemmData.mInputBuffers.mPtrGatedActAlpha,
         batchedGemmData.mInputBuffers.mPtrGatedActBeta, batchedGemmData.mInputBuffers.mPtrRouteMap,
         dPtrRowMax, dPtrRowMaxBars, batchedGemmData.mInputBuffers.mPtrNumNonExitingCtas,
@@ -519,8 +569,7 @@ class BatchedGemmInterface {
         batchedGemmData.mInputBuffers.mPtrCtaIdxXyToMnLimit, numCtaBatch);
 
     // The size of the grid.
-    std::vector<int32_t> grid = batchM ? std::vector<int32_t>{numCtaBatch, numCtaTile, numCtaInner}
-                                       : std::vector<int32_t>{numCtaTile, numCtaBatch, numCtaInner};
+    auto grid = getLaunchGrid(options, batchedGemmData.mProblemDimensions.mMaxNumCtasInTokenDim);
 
     BatchedGemmConfig batchedGemmConfig = config;
 #ifndef TLLM_GEN_EXPORT_INTERFACE
@@ -579,15 +628,18 @@ class BatchedGemmInterface {
                   static_cast<uint32_t>(options.mClusterDimY),
                   static_cast<uint32_t>(options.mClusterDimZ)};
 
+    // Whether PDL can safely be enabled
+    const bool pdlSafe = batchedGemmConfig.mOptions.mGridWaitForPrimaryRouting ||
+                         batchedGemmConfig.mOptions.mGridWaitForPrimaryEarlyExit ||
+                         batchedGemmConfig.mOptions.mGridWaitForPrimaryA ||
+                         batchedGemmConfig.mOptions.mGridWaitForPrimaryB;
+
     // Run the kernel.
-    auto result = trtllm::gen::launchKernel(
-        (void*)&kernelParams, cudaStream, batchedGemmConfig.mSharedMemSize, cuFunction, block3,
-        grid3, cluster3,
-        usePdl && (batchedGemmConfig.mOptions.mGridWaitForPrimaryEarlyExit |
-                   batchedGemmConfig.mOptions.mGridWaitForPrimaryA |
-                   batchedGemmConfig.mOptions.mGridWaitForPrimaryB));
+    auto result = trtllm::gen::launchKernel((void*)&kernelParams, cudaStream,
+                                            batchedGemmConfig.mSharedMemSize, cuFunction, block3,
+                                            grid3, cluster3, usePdl && pdlSafe);
     if (result != CUDA_SUCCESS) {
-      return -1;
+      return result;
     }
     // If a module cache has not been given, unload the module to avoid leaking
     if (!moduleCache.has_value()) {
@@ -648,8 +700,10 @@ class BatchedGemmInterface {
     // For normal BMM, mNumTokens == 0 and the number of CTAs is known to host.
     if (options.mIsStaticBatch) {
       for (int32_t bi = 0; bi < options.mNumBatches; ++bi) {
-        numCtasBatch += batchM ? gemm::divUp(options.mBatchedM[bi], options.mTileM)
-                               : gemm::divUp(options.mBatchedN[bi], options.mTileN);
+        numCtasBatch +=
+            batchM ? gemm::divUp(options.mBatchedM[bi], options.mTileM * options.mClusterDimX) *
+                         options.mClusterDimX
+                   : gemm::divUp(options.mBatchedN[bi], options.mTileN);
       }
     }
     // For MoE, mNumTokens != 0 and the number of CTAs is known only at runtime.
@@ -684,10 +738,23 @@ class BatchedGemmInterface {
   //////////////////////////////////////////////////////////////////////////////////////////////////
 
   // Returns the number of CTAs of the current kernel.
+  std::vector<int32_t> getLaunchGrid(
+      BatchedGemmOptions const& options,
+      std::optional<int32_t> maxNumCtasInBatchDim = std::nullopt) const {
+    auto [numCtaBatch, numCtaTile, numCtaInner] = getGridDim(options, maxNumCtasInBatchDim);
+    bool const batchM = options.mBatchMode == BatchedGemmOptions::BatchMode::BatchM;
+    std::vector<int32_t> grid = batchM ? std::vector<int32_t>{numCtaBatch, numCtaTile, numCtaInner}
+                                       : std::vector<int32_t>{numCtaTile, numCtaBatch, numCtaInner};
+    return grid;
+  }
+
+  //////////////////////////////////////////////////////////////////////////////////////////////////
+
+  // Returns the number of CTAs of the current kernel.
   int32_t getNumCtas(BatchedGemmOptions const& options,
                      std::optional<int32_t> maxNumCtasInBatchDim = std::nullopt) const {
-    auto [numCtasBatch, numCtasTile, numCtasInner] = getGridDim(options, maxNumCtasInBatchDim);
-    return numCtasBatch * numCtasTile * numCtasInner;
+    auto grid = getLaunchGrid(options, maxNumCtasInBatchDim);
+    return grid[0] * grid[1] * grid[2];
   }
 
   //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -719,11 +786,8 @@ class BatchedGemmInterface {
     // Get options from config and data.
     auto options = getOptionsFromConfigAndData(config, data);
 
-    // Is Blackwell?
-    bool isBlackwell = gemm::isSmVersionBlackwell(config.mSm);
-
     // Check options without modifications.
-    return checkAndUpdateBatchedGemmOptions(options, isBlackwell,
+    return checkAndUpdateBatchedGemmOptions(options, config.mSm,
                                             /* updateOptions */ false);
   }
 
@@ -754,19 +818,20 @@ class BatchedGemmInterface {
       auto const batchM = options.mBatchMode == BatchedGemmOptions::BatchMode::BatchM;
       if (!options.mEnablesEarlyExit || options.mNumTokens == 0) {
         for (int32_t bi = 0; bi < options.mNumBatches; ++bi) {
-          totalNumPaddedTokens += batchM ? gemm::divUpMul(options.mBatchedM[bi], options.mTileM)
-                                         : gemm::divUpMul(options.mBatchedN[bi], options.mTileN);
+          totalNumPaddedTokens +=
+              batchM ? gemm::divUpMul(options.mBatchedM[bi], options.mTileM * options.mClusterDimX)
+                     : gemm::divUpMul(options.mBatchedN[bi], options.mTileN);
         }
       } else {
         // Get tile in token dim.
-        auto tileTokensDim = batchM ? options.mTileM : options.mTileN;
+        auto tileTokensDim = batchM ? options.mTileM * options.mClusterDimX : options.mTileN;
         totalNumPaddedTokens = data.mProblemDimensions.mMaxNumCtasInTokenDim * tileTokensDim;
       }
 
       // Get options from config.
       auto& options = config.mOptions;
 
-      int const tokenTile = batchM ? options.mTileM : options.mTileN;
+      int const tokenTile = batchM ? options.mTileM * options.mClusterDimX : options.mTileN;
 
       auto const numTokens = totalNumPaddedTokens;
       auto const intermediateDim = batchM ? options.mN : options.mM;
