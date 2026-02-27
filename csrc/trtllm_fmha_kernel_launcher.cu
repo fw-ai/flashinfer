@@ -473,7 +473,6 @@ void trtllm_paged_attention_context(
     lse_stride_tokens = lse.value().stride(0);
     lse_stride_heads = lse.value().stride(lse.value().ndim() - 1);
   }
-
   trtllm_paged_attention_launcher(
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),
       workspace_buffer.data_ptr(), static_cast<int*>(block_tables.data_ptr()), k_block_scales_ptr,
