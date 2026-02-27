@@ -605,10 +605,12 @@ def trtllm_batch_decode_with_kv_cache_mla(
     bmm2_scale: Union[float, torch.Tensor] = 1.0,
     sinks: Optional[List[torch.Tensor]] = None,
     skip_softmax_threshold_scale_factor: Optional[float] = None,
-    enable_pdl: bool | None = None,
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
+    enable_pdl: bool = None,
     backend: str = "auto",
     uses_shared_paged_kv_idx: bool = True,
-) -> torch.Tensor:
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Parameters
     ----------
@@ -647,6 +649,14 @@ def trtllm_batch_decode_with_kv_cache_mla(
         True (default) uses vLLM/FlashInfer layout with a 2D page table.
         False uses TRT-LLM layout with a 3D page table ``[batch_size, 2, max_num_pages_per_seq]``.
         False is only supported for trtllm-gen backend.
+
+    return_lse: bool
+        Whether to return the log-sum-exp value.
+
+    lse : Optional[torch.Tensor]
+        Log-sum-exp value, if not provided, will be allocated internally.
+        When ``return_lse`` is ``True``, this should have shape
+        ``[batch_size, q_len_per_request, num_qo_heads]``.
 
     Note
     ----
@@ -757,6 +767,22 @@ def trtllm_batch_decode_with_kv_cache_mla(
 
         batch_size = query.size(0)
         max_q_len = query.size(1)
+
+        expected_lse_shape = [batch_size, max_q_len, query.shape[2]]
+
+        if return_lse and lse is None:
+            lse = torch.empty(
+                *expected_lse_shape,
+                device=query.device,
+                dtype=torch.float32,
+            )
+        if lse is not None:
+            check_shape_dtype_device(
+                lse, expected_lse_shape, torch.float32, query.device, "lse"
+            )
+            if not lse.is_contiguous():
+                raise ValueError("lse must be contiguous for trtllm-gen backend.")
+
         query = query.flatten(0, 1)  # [B*S, H, D]
 
         run_func(
@@ -786,10 +812,14 @@ def trtllm_batch_decode_with_kv_cache_mla(
             None,  # key_block_scales
             None,  # value_block_scales
             skip_softmax_threshold_scale_factor,
+            lse,
             uses_shared_paged_kv_idx,
         )
 
-        return out
+        if return_lse:
+            return out, lse
+        else:
+            return out
     else:
         raise ValueError(f"Backend {backend} not supported")
 
