@@ -77,7 +77,7 @@ void trtllm_paged_attention_launcher(
     void* out, void* out_scale_factor, void* query, void* key_cache, void* value_cache,
     void* workspace_buffer, int* block_tables, int* seq_lens, int* cum_seq_lens_q,
     int* cum_seq_lens_kv, float* attention_sinks, float* lse,
-    void* k_cache_scales, void* v_cache_scale, Data_type q_data_type, Data_type kv_data_type,
+    void* k_cache_scales, void* v_cache_scales, Data_type q_data_type, Data_type kv_data_type,
     Data_type o_data_type, TllmPagedAttentionMode mode, int64_t batch_size, int64_t max_q_len,
     int64_t max_kv_len, int64_t num_pages_in_mem_pool, int64_t num_qo_heads, int64_t num_kv_heads,
     int64_t head_dim_qk, int64_t head_dim_vo, int64_t page_size, int64_t q_stride_tokens,
@@ -103,7 +103,7 @@ void trtllm_paged_attention_launcher(
   runner_params.kPtr = key_cache;
   runner_params.kSfBasePtr = k_cache_scales;
   runner_params.vPtr = value_cache;
-  runner_params.vSfBasePtr = v_cache_scale;
+  runner_params.vSfBasePtr = v_cache_scales;
   runner_params.kvPageIdxPtr = block_tables;
   runner_params.seqLensKvPtr = seq_lens;
   runner_params.oPtr = out;
@@ -241,7 +241,7 @@ void trtllm_paged_attention_decode(
     int64_t workspace_size, Optional<TensorView> attention_sinks,
     Optional<TensorView> cum_seq_lens_q, Optional<float> skip_softmax_threshold_scale_factor,
     Optional<TensorView> lse, Optional<TensorView> k_cache_scales,
-    Optional<TensorView> v_cache_scale) {
+    Optional<TensorView> v_cache_scales) {
   auto q_data_type = dl_dtype_to_tllm_data_type(query.dtype());
   auto kv_data_type = dl_dtype_to_tllm_data_type(key_cache.dtype());
   TVM_FFI_ICHECK_EQ(key_cache.ndim(), value_cache.ndim());
@@ -323,7 +323,7 @@ void trtllm_paged_attention_decode(
     TVM_FFI_ICHECK_EQ(lse.value().dtype(), dl_float32) << "lse must be a float tensor";
     lse_ptr = static_cast<float*>(lse.value().data_ptr());
     lse_stride_tokens = lse.value().stride(0);
-    lse_stride_heads = lse.value().stride(2);
+    lse_stride_heads = lse.value().stride(lse.value().ndim() - 1);
   }
 
   void* k_cache_scales_ptr = k_cache_scales.has_value() ? k_cache_scales.value().data_ptr() : nullptr;
@@ -353,7 +353,7 @@ void trtllm_paged_attention_context(
     int64_t window_left, TensorView cum_seq_lens_q, TensorView cum_seq_lens_kv, int64_t sm_count,
     bool enable_pdl, int64_t workspace_size, Optional<TensorView> attention_sinks,
     Optional<float> skip_softmax_threshold_scale_factor, Optional<TensorView> lse,
-    Optional<TensorView> k_cache_scales, Optional<TensorView> v_cache_scale) {
+    Optional<TensorView> k_cache_scales, Optional<TensorView> v_cache_scales) {
   auto q_data_type = dl_dtype_to_tllm_data_type(query.dtype());
   auto kv_data_type = dl_dtype_to_tllm_data_type(key_cache.dtype());
   auto o_data_type = dl_dtype_to_tllm_data_type(out.dtype());
@@ -421,6 +421,19 @@ void trtllm_paged_attention_context(
       skip_softmax_threshold_scale_factor.value_or(0.0f);
   bool const skips_softmax = skip_softmax_threshold_scale_factor_value != 0.0f;
 
+  float* lse_ptr = nullptr;
+  int lse_stride_tokens = 0;
+  int lse_stride_heads = 0;
+  if (lse.has_value()) {
+    TVM_FFI_ICHECK_EQ(lse.value().dtype(), dl_float32) << "lse must be a float tensor";
+    lse_ptr = static_cast<float*>(lse.value().data_ptr());
+    lse_stride_tokens = lse.value().stride(0);
+    lse_stride_heads = lse.value().stride(1);
+  }
+
+  void* k_cache_scales_ptr = k_cache_scales.has_value() ? k_cache_scales.value().data_ptr() : nullptr;
+  void* v_cache_scales_ptr = v_cache_scales.has_value() ? v_cache_scales.value().data_ptr() : nullptr;
+
   trtllm_paged_attention_launcher(
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),
       workspace_buffer.data_ptr(), static_cast<int*>(block_tables.data_ptr()),
@@ -434,6 +447,7 @@ void trtllm_paged_attention_context(
       kv_stride_heads, kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
       bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left,
       sum_seq_q, /*sparse_mla_top_k=*/0, skip_softmax_threshold_scale_factor_value, skips_softmax,
+      lse_stride_tokens, lse_stride_heads,
       sm_count, enable_pdl, workspace_size, stream);
 }
 

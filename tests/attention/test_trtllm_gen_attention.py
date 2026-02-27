@@ -495,12 +495,13 @@ def _test_trtllm_batch_prefill(
         "kv_data_type": ref_kv_cache.dtype,
         "window_left": window_left,
     }
+    lse_ref = None
     if not enable_sink:
         wrapper_ref = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
             workspace_buffer_ref, kv_layout
         )
         wrapper_ref.plan(**plan_params)
-        output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
+        output_ref, lse_ref = wrapper_ref.run(ref_q, ref_kv_cache, return_lse=True)
     else:
         # Construct flat K/V via helper
         k_flat, v_flat, kv_indptr_tokens = flatten_paged_kv(
@@ -602,6 +603,14 @@ def _test_trtllm_batch_prefill(
         atol=atol,
         max_mismatched_elements=max_mismatched_elements,
     )
+
+    if lse_ref is not None:
+        assert lse is not None, "LSE should be returned when return_lse=True"
+        if q_dtype == "fp8":
+            lse_rtol, lse_atol = 5e-2, 5e-2
+        else:
+            lse_rtol, lse_atol = 1e-3, 1e-3
+        torch.testing.assert_close(lse, lse_ref, rtol=lse_rtol, atol=lse_atol)
 
     if o_dtype != "nvfp4":  # wrapper api does not support fp4 output yet.
         # test wrapper with trtllm-gen backend
@@ -884,13 +893,16 @@ def _test_trtllm_batch_decode(
         "q_data_type": ref_q.dtype,
         "window_left": window_left,
     }
+    lse_ref = None
     if not enable_sink:
         if q_len_per_req is not None and q_len_per_req == 1:
             wrapper_ref = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
                 workspace_buffer_ref, kv_layout, use_tensor_cores=True
             )
             wrapper_ref.plan(**plan_params)
-            output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
+            output_ref, lse_ref = wrapper_ref.run(
+                ref_q, ref_kv_cache, return_lse=True
+            )
 
         else:
             # speculative decoding test
@@ -910,7 +922,9 @@ def _test_trtllm_batch_decode(
                 }
             )
             wrapper_ref.plan(**plan_params_prefill)
-            output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
+            output_ref, lse_ref = wrapper_ref.run(
+                ref_q, ref_kv_cache, return_lse=True
+            )
     else:
         # Construct flat K/V via helper
         k_flat, v_flat, kv_indptr_tokens = flatten_paged_kv(
@@ -1029,6 +1043,14 @@ def _test_trtllm_batch_decode(
         atol=atol,
         max_mismatched_elements=max_mismatched_elements,
     )
+
+    if lse_ref is not None:
+        assert lse is not None, "LSE should be returned when return_lse=True"
+        if q_dtype == "fp8":
+            lse_rtol, lse_atol = 5e-2, 5e-2
+        else:
+            lse_rtol, lse_atol = 1e-3, 1e-3
+        torch.testing.assert_close(lse, lse_ref, rtol=lse_rtol, atol=lse_atol)
 
     # Only test wrapper with trtllm-gen backend
     if (
