@@ -3588,6 +3588,9 @@ def trtllm_batch_context_with_kv_cache(
     enable_pdl: Optional[bool] = None,
     sinks: Optional[List[torch.Tensor]] = None,
     skip_softmax_threshold_scale_factor: Optional[float] = None,
+    kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
@@ -3755,6 +3758,18 @@ def trtllm_batch_context_with_kv_cache(
     if isinstance(bmm2_scale, torch.Tensor):
         assert bmm2_scale.dtype == torch.float32
     workspace_size = workspace_buffer.numel() * workspace_buffer.element_size()
+
+    k_cache_scale = kv_cache_scales[0] if kv_cache_scales is not None else None
+    v_cache_scale = kv_cache_scales[1] if kv_cache_scales is not None else None
+
+    if return_lse and lse is None:
+        lse = torch.empty(
+            query.shape[0],
+            query.shape[1],
+            device=query.device,
+            dtype=torch.float32,
+        )
+
     run_func(
         out,
         out_scale_factor,
@@ -3780,12 +3795,20 @@ def trtllm_batch_context_with_kv_cache(
         workspace_size,
         sinks,
         skip_softmax_threshold_scale_factor,
+        lse,
+        k_cache_scale,
+        v_cache_scale,
     )
-    return (
+
+    out = (
         out
         if out_dtype != "nvfp4"
         else FP4Tensor(out, out_scale_factor, o_sf_start_index, query.shape)
     )
+    if return_lse:
+        return out, lse
+    else:
+        return out
 
 
 @flashinfer_api

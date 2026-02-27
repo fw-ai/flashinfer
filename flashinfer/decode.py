@@ -1983,6 +1983,9 @@ class TrtllmGenDecodeModule:
             sinks,
             None,  # cum_seq_lens_q
             skip_softmax_threshold_scale_factor,
+            None,  # lse
+            None,  # k_cache_scales
+            None,  # v_cache_scale
         )
         return out
 
@@ -2150,6 +2153,9 @@ def trtllm_batch_decode_with_kv_cache(
     max_q_len: Optional[int] = None,
     cum_seq_lens_q: Optional[torch.Tensor] = None,
     skip_softmax_threshold_scale_factor: Optional[float] = None,
+    kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
@@ -2396,6 +2402,17 @@ def trtllm_batch_decode_with_kv_cache(
             assert max_q_len is not None
             batch_size = cum_seq_lens_q.size(0) - 1
 
+        k_cache_scale = kv_cache_scales[0] if kv_cache_scales is not None else None
+        v_cache_scale = kv_cache_scales[1] if kv_cache_scales is not None else None
+
+        if return_lse and lse is None:
+            lse = torch.empty(
+                query.shape[0],
+                query.shape[1],
+                device=query.device,
+                dtype=torch.float32,
+            )
+
         run_func(
             out,
             out_scale_factor,
@@ -2421,13 +2438,20 @@ def trtllm_batch_decode_with_kv_cache(
             sinks,
             cum_seq_lens_q,
             skip_softmax_threshold_scale_factor,
+            lse,  # lse
+            k_cache_scale,  # k_cache_scale
+            v_cache_scale,  # v_cache_scale
         )
 
-        return (
+        out = (
             out
             if out_dtype != "nvfp4"
             else FP4Tensor(out, out_scale_factor, o_sf_start_index, query.shape)
         )
+        if return_lse:
+            return out, lse
+        else:
+            return out
     else:
         raise KeyError(f"Backend {backend} not supported")
 

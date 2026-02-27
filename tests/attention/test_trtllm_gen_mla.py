@@ -315,7 +315,7 @@ def trtllm_batch_decode_mla(
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
     # Run decode-MLA
-    output = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+    output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
         query=query,
         kv_cache=kv_cache.unsqueeze(1),
         workspace_buffer=workspace_buffer,
@@ -328,6 +328,7 @@ def trtllm_batch_decode_mla(
         bmm1_scale=scale / ((128 + 64) ** 0.5),
         bmm2_scale=1.0,
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+        return_lse=True,
         enable_pdl=enable_pdl,
         backend=backend,
     )

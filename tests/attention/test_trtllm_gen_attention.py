@@ -547,7 +547,7 @@ def _test_trtllm_batch_prefill(
     # Using a tiny threshold should give the same result as normal attention.
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
-    output = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
+    output, lse = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
         q_input,
         kv_cache,
         workspace_buffer,
@@ -569,6 +569,7 @@ def _test_trtllm_batch_prefill(
         enable_pdl=enable_pdl,
         sinks=(sink if enable_sink else None),
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+        return_lse=True,
     )
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
@@ -962,7 +963,7 @@ def _test_trtllm_batch_decode(
     # Using a tiny threshold should give the same result as normal attention.
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
-    output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+    output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
         q_input,
         kv_cache,
         workspace_buffer,
@@ -986,6 +987,7 @@ def _test_trtllm_batch_decode(
         max_q_len=max_q_len if max_q_len is not None else None,
         cum_seq_lens_q=q_indptr if max_q_len is not None else None,
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+        return_lse=True,
     )
     if backend == "trtllm-gen":
         # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
