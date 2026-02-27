@@ -405,7 +405,7 @@ def trtllm_batch_decode_mla(
     ckv = kv_cache[..., : layer_dimensions.head_dimensions.kv_lora_rank]
     kpe = kv_cache[..., layer_dimensions.head_dimensions.kv_lora_rank :]
 
-    o_ref = wrapper.run(q_nope, q_pe, ckv, kpe, return_lse=False)
+    o_ref, lse_ref = wrapper.run(q_nope, q_pe, ckv, kpe, return_lse=True)
 
     if backend == "trtllm-gen":
         # check is nan
@@ -440,6 +440,16 @@ def trtllm_batch_decode_mla(
                 print("output:", output)
                 print("o_ref:", o_ref)
                 raise e
+
+        assert lse is not None, "LSE should be returned when return_lse=True"
+        # trtllm lse: [batch_size, q_len, num_heads]
+        # ref lse:    [batch_size * q_len_per_request, num_heads]
+        lse_flat = lse.view(batch_size * q_len_per_request, layer_dimensions.num_heads)
+        if dtype == torch.float8_e4m3fn:
+            lse_rtol, lse_atol = 5e-2, 5e-2
+        else:
+            lse_rtol, lse_atol = 1e-3, 1e-3
+        torch.testing.assert_close(lse_flat, lse_ref, rtol=lse_rtol, atol=lse_atol)
     elif backend == "xqa":
         atol = 0.05
         rtol = 0.05
