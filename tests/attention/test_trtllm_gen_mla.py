@@ -272,6 +272,7 @@ def trtllm_batch_decode_mla(
     MAX_SEQ_LEN: int,
     skips_softmax: bool,
     uses_shared_paged_kv_idx: bool = True,
+    use_preallocated_lse: bool = False,
 ):
     compute_capability = get_compute_capability(torch.device(device="cuda"))
     if backend == "xqa":
@@ -389,6 +390,15 @@ def trtllm_batch_decode_mla(
 
     # Using a tiny threshold should give the same output as standard attention
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
+    lse_input = None
+    if use_preallocated_lse:
+        lse_input = torch.empty(
+            batch_size,
+            q_len_per_request,
+            layer_dimensions.num_heads,
+            device=device,
+            dtype=torch.float32,
+        )
 
     mla_kwargs = dict(
         query=query,
@@ -403,6 +413,7 @@ def trtllm_batch_decode_mla(
         bmm1_scale=scale / ((128 + 64) ** 0.5),
         bmm2_scale=1.0,
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+        lse=lse_input,
         enable_pdl=enable_pdl,
         backend=backend,
         uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
@@ -525,6 +536,11 @@ def trtllm_batch_decode_mla(
 
         if backend == "trtllm-gen":
             assert lse is not None, "LSE should be returned when return_lse=True"
+            if lse_input is not None:
+                assert lse.data_ptr() == lse_input.data_ptr(), (
+                    "Expected output LSE to reuse provided tensor"
+                )
+            assert not torch.isnan(lse).any(), "LSE contains NaN values"
             # trtllm lse: [batch_size, q_len, num_q_heads]
             # ref lse:    [batch_size * q_len_per_request, num_q_heads]
             lse_flat = lse.view(
@@ -855,6 +871,24 @@ def test_trtllm_batch_decode_mla(
         1024,
         skips_softmax,
         uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
+    )
+
+
+def test_trtllm_batch_decode_mla_preallocated_lse_regression():
+    trtllm_batch_decode_mla(
+        layer_dimensions=supported_mla_layer_dimensions[0],
+        batch_size=8,
+        scale=1.0,
+        dtype=torch.bfloat16,
+        page_size=64,
+        q_len_per_request=2,
+        dynamic_scale=False,
+        enable_pdl=True,
+        backend="trtllm-gen",
+        MAX_SEQ_LEN=1024,
+        skips_softmax=False,
+        uses_shared_paged_kv_idx=True,
+        use_preallocated_lse=True,
     )
 
 
