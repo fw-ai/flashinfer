@@ -2263,9 +2263,7 @@ def trtllm_batch_decode_with_kv_cache(
     return_lse: bool = False,
     lse: Optional[torch.Tensor] = None,
 ) -> Union[
-    torch.Tensor,
-    FP4Tensor,
-    Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor],
+    torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]
 ]:
     """
     Parameters
@@ -2397,6 +2395,7 @@ def trtllm_batch_decode_with_kv_cache(
     Returns
     -------
     out : Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]
+        Output torch.Tensor or FP4Tensor. If ``return_lse`` is ``True``, returns
         Output torch.Tensor or FP4Tensor. If ``return_lse`` is ``True``, returns
         ``(out, lse)``.
     """

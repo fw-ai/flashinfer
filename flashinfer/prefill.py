@@ -3868,9 +3868,7 @@ def trtllm_batch_context_with_kv_cache(
     return_lse: bool = False,
     lse: Optional[torch.Tensor] = None,
 ) -> Union[
-    torch.Tensor,
-    FP4Tensor,
-    Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor],
+    torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]
 ]:
     """
     Parameters
