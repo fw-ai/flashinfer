@@ -222,6 +222,7 @@ def trtllm_batch_decode_mla(
     skips_softmax: bool,
     qk_nope_head_dim: int,
     num_attn_heads: int,
+    use_preallocated_lse: bool = False,
 ):
     compute_capability = get_compute_capability(torch.device(device="cuda"))
     if backend == "xqa":
@@ -313,6 +314,15 @@ def trtllm_batch_decode_mla(
 
     # Using a tiny threshold should give the same output as standard attention
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
+    lse_input = None
+    if use_preallocated_lse:
+        lse_input = torch.empty(
+            batch_size,
+            q_len_per_request,
+            num_q_heads,
+            device=device,
+            dtype=torch.float32,
+        )
 
     # Run decode-MLA
     output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
@@ -329,6 +339,7 @@ def trtllm_batch_decode_mla(
         bmm2_scale=1.0,
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
         return_lse=True,
+        lse=lse_input,
         enable_pdl=enable_pdl,
         backend=backend,
     )
@@ -416,6 +427,11 @@ def trtllm_batch_decode_mla(
                 raise e
 
         assert lse is not None, "LSE should be returned when return_lse=True"
+        if lse_input is not None:
+            assert (
+                lse.data_ptr() == lse_input.data_ptr()
+            ), "Expected output LSE to reuse provided tensor"
+        assert not torch.isnan(lse).any(), "LSE contains NaN values"
         # trtllm lse: [batch_size, q_len, num_q_heads]
         # ref lse:    [batch_size * q_len_per_request, num_q_heads]
         lse_flat = lse.view(batch_size * q_len_per_request, num_q_heads)
@@ -732,6 +748,24 @@ def test_trtllm_batch_decode_mla(
         skips_softmax,
         qk_nope_head_dim,
         num_attn_heads,
+    )
+
+
+def test_trtllm_batch_decode_mla_preallocated_lse_regression():
+    trtllm_batch_decode_mla(
+        batch_size=8,
+        scale=1.0,
+        dtype=torch.bfloat16,
+        page_size=64,
+        q_len_per_request=2,
+        dynamic_scale=False,
+        enable_pdl=True,
+        backend="trtllm-gen",
+        MAX_SEQ_LEN=1024,
+        skips_softmax=False,
+        qk_nope_head_dim=128,
+        num_attn_heads=128,
+        use_preallocated_lse=True,
     )
 
 

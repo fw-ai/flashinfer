@@ -566,6 +566,9 @@ def trtllm_batch_decode_with_kv_cache_mla(
         If no value is provided, then standard attention is used.
         Setting the threshold to a higher value generally increases kernel performance at the cost of accuracy degradation.
         The actual threshold value equals the provided threshold_scale_factor divided by the context length.
+    return_lse: whether to return the log-sum-exp value.
+    lse: log-sum-exp value, if not provided, will be allocated internally.
+    enable_pdl: whether to enable pdl.
     backend : str = "auto"
         The implementation backend, could be ``auto``/``xqa`` or ``trtllm-gen``. Defaults to ``auto``.
         When set to ``auto``, the backend will be chosen based on the device architecture and kernel availability.
@@ -677,15 +680,22 @@ def trtllm_batch_decode_with_kv_cache_mla(
 
         batch_size = query.size(0)
         max_q_len = query.size(1)
+        expected_lse_shape = [batch_size, max_q_len, query.shape[2]]
 
         if return_lse and lse is None:
             lse = torch.empty(
-                batch_size,
-                max_q_len,
-                query.shape[2],
+                *expected_lse_shape,
                 device=query.device,
                 dtype=torch.float32,
             )
+        if lse is not None:
+            check_shape_dtype_device(
+                lse, expected_lse_shape, torch.float32, query.device, "lse"
+            )
+            if not lse.is_contiguous():
+                raise ValueError(
+                    "lse must be contiguous for trtllm-gen backend."
+                )
 
         query = query.flatten(0, 1)  # [B*S, H, D]
 

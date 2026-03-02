@@ -3591,7 +3591,7 @@ def trtllm_batch_context_with_kv_cache(
     kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     return_lse: bool = False,
     lse: Optional[torch.Tensor] = None,
-) -> Union[torch.Tensor, FP4Tensor]:
+) -> Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]:
     """
     Parameters
     ----------
@@ -3649,10 +3649,20 @@ def trtllm_batch_context_with_kv_cache(
         If no value is provided, then standard attention is used.
         Setting the threshold to a higher value generally increases kernel performance at the cost of accuracy degradation.
         The actual threshold value equals the provided threshold_scale_factor divided by the context length.
+    kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        scales for kv cache, if not provided, will be set to ``1.0``.
+    return_lse: whether to return the log-sum-exp value.
+    lse: log-sum-exp value, if not provided, will be allocated internally.
+        When ``return_lse`` is ``True``, a tuple of two tensors:
+            * attention output, shape: ``[batch_size, num_qo_heads, head_dim]``
+            * logsumexp of attention scores, shape: ``[batch_size, num_qo_heads]``.
     Returns
     -------
-    out: Union[torch.Tensor, FP4Tensor]
+    out: Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]
         output torch.Tensor or FP4Tensor.
+        If ``return_lse`` is ``True``, a tuple of two tensors:
+            * attention output, shape: ``[batch_size, num_qo_heads, head_dim]``
+            * logsumexp of attention scores, shape: ``[batch_size, num_qo_heads]``.
     """
 
     if enable_pdl is None:
@@ -3761,14 +3771,22 @@ def trtllm_batch_context_with_kv_cache(
 
     k_cache_scale = kv_cache_scales[0] if kv_cache_scales is not None else None
     v_cache_scale = kv_cache_scales[1] if kv_cache_scales is not None else None
+    expected_lse_shape = [query.shape[0], query.shape[1]]
 
     if return_lse and lse is None:
         lse = torch.empty(
-            query.shape[0],
-            query.shape[1],
+            *expected_lse_shape,
             device=query.device,
             dtype=torch.float32,
         )
+    if lse is not None:
+        check_shape_dtype_device(
+            lse, expected_lse_shape, torch.float32, query.device, "lse"
+        )
+        if not lse.is_contiguous():
+            raise ValueError(
+                "lse must be contiguous for trtllm-gen backend."
+            )
 
     run_func(
         out,
