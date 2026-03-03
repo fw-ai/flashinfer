@@ -693,9 +693,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
                 lse, expected_lse_shape, torch.float32, query.device, "lse"
             )
             if not lse.is_contiguous():
-                raise ValueError(
-                    "lse must be contiguous for trtllm-gen backend."
-                )
+                raise ValueError("lse must be contiguous for trtllm-gen backend.")
 
         query = query.flatten(0, 1)  # [B*S, H, D]
 

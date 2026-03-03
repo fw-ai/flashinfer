@@ -900,9 +900,7 @@ def _test_trtllm_batch_decode(
                 workspace_buffer_ref, kv_layout, use_tensor_cores=True
             )
             wrapper_ref.plan(**plan_params)
-            output_ref, lse_ref = wrapper_ref.run(
-                ref_q, ref_kv_cache, return_lse=True
-            )
+            output_ref, lse_ref = wrapper_ref.run(ref_q, ref_kv_cache, return_lse=True)
 
         else:
             # speculative decoding test
@@ -922,9 +920,7 @@ def _test_trtllm_batch_decode(
                 }
             )
             wrapper_ref.plan(**plan_params_prefill)
-            output_ref, lse_ref = wrapper_ref.run(
-                ref_q, ref_kv_cache, return_lse=True
-            )
+            output_ref, lse_ref = wrapper_ref.run(ref_q, ref_kv_cache, return_lse=True)
     else:
         # Construct flat K/V via helper
         k_flat, v_flat, kv_indptr_tokens = flatten_paged_kv(

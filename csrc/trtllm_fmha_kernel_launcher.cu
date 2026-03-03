@@ -76,13 +76,13 @@ class TllmGenFmhaRunnerCache {
 void trtllm_paged_attention_launcher(
     void* out, void* out_scale_factor, void* query, void* key_cache, void* value_cache,
     void* workspace_buffer, int* block_tables, int* seq_lens, int* cum_seq_lens_q,
-    int* cum_seq_lens_kv, float* attention_sinks, float* lse,
-    void* k_cache_scales, void* v_cache_scales, Data_type q_data_type, Data_type kv_data_type,
-    Data_type o_data_type, TllmPagedAttentionMode mode, int64_t batch_size, int64_t max_q_len,
-    int64_t max_kv_len, int64_t num_pages_in_mem_pool, int64_t num_qo_heads, int64_t num_kv_heads,
-    int64_t head_dim_qk, int64_t head_dim_vo, int64_t page_size, int64_t q_stride_tokens,
-    int64_t q_stride_heads, int64_t kv_stride_keys_values, int64_t kv_stride_heads,
-    int64_t kv_stride_batch, int64_t max_num_blocks_per_seq, double bmm1_scale, double bmm2_scale,
+    int* cum_seq_lens_kv, float* attention_sinks, float* lse, void* k_cache_scales,
+    void* v_cache_scales, Data_type q_data_type, Data_type kv_data_type, Data_type o_data_type,
+    TllmPagedAttentionMode mode, int64_t batch_size, int64_t max_q_len, int64_t max_kv_len,
+    int64_t num_pages_in_mem_pool, int64_t num_qo_heads, int64_t num_kv_heads, int64_t head_dim_qk,
+    int64_t head_dim_vo, int64_t page_size, int64_t q_stride_tokens, int64_t q_stride_heads,
+    int64_t kv_stride_keys_values, int64_t kv_stride_heads, int64_t kv_stride_batch,
+    int64_t max_num_blocks_per_seq, double bmm1_scale, double bmm2_scale,
     const float* bmm1_scale_log2_ptr, const float* bmm2_scale_ptr, double o_sf_scale,
     int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t window_left, int64_t sum_seq_q,
     int64_t sparse_mla_top_k, float skip_softmax_threshold_scale_factor, bool skips_softmax,
@@ -329,22 +329,23 @@ void trtllm_paged_attention_decode(
     lse_stride_heads = lse.value().stride(lse.value().ndim() - 1);
   }
 
-  void* k_cache_scales_ptr = k_cache_scales.has_value() ? k_cache_scales.value().data_ptr() : nullptr;
-  void* v_cache_scales_ptr = v_cache_scales.has_value() ? v_cache_scales.value().data_ptr() : nullptr;
+  void* k_cache_scales_ptr =
+      k_cache_scales.has_value() ? k_cache_scales.value().data_ptr() : nullptr;
+  void* v_cache_scales_ptr =
+      v_cache_scales.has_value() ? v_cache_scales.value().data_ptr() : nullptr;
 
   trtllm_paged_attention_launcher(
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),
       workspace_buffer.data_ptr(), static_cast<int*>(block_tables.data_ptr()),
       static_cast<int*>(seq_lens.data_ptr()), cum_seq_lens_q_ptr,
-      /*cum_seq_lens_kv*/ nullptr, attention_sinks_ptr, lse_ptr,
-      k_cache_scales_ptr, v_cache_scales_ptr, q_data_type, kv_data_type, o_data_type,
-      TllmPagedAttentionMode::ForGen, batch_size, max_q_len, max_kv_len, num_pages_in_mem_pool,
-      num_qo_heads, num_kv_heads, head_dim_q, head_dim_o, page_size, q_stride_tokens,
-      q_stride_heads, kv_stride_keys_values, kv_stride_heads, kv_stride_batch,
-      max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value, bmm1_scale_log2_ptr,
-      bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left, sum_seq_q,
-      sparse_mla_top_k, skip_softmax_threshold_scale_factor_value, skips_softmax, lse_stride_tokens,
-      lse_stride_heads, sm_count, enable_pdl, workspace_size, stream);
+      /*cum_seq_lens_kv*/ nullptr, attention_sinks_ptr, lse_ptr, k_cache_scales_ptr,
+      v_cache_scales_ptr, q_data_type, kv_data_type, o_data_type, TllmPagedAttentionMode::ForGen,
+      batch_size, max_q_len, max_kv_len, num_pages_in_mem_pool, num_qo_heads, num_kv_heads,
+      head_dim_q, head_dim_o, page_size, q_stride_tokens, q_stride_heads, kv_stride_keys_values,
+      kv_stride_heads, kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
+      bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left,
+      sum_seq_q, sparse_mla_top_k, skip_softmax_threshold_scale_factor_value, skips_softmax,
+      lse_stride_tokens, lse_stride_heads, sm_count, enable_pdl, workspace_size, stream);
 }
 
 void trtllm_paged_attention_context(
@@ -434,8 +435,10 @@ void trtllm_paged_attention_context(
     lse_stride_heads = lse.value().stride(1);
   }
 
-  void* k_cache_scales_ptr = k_cache_scales.has_value() ? k_cache_scales.value().data_ptr() : nullptr;
-  void* v_cache_scales_ptr = v_cache_scales.has_value() ? v_cache_scales.value().data_ptr() : nullptr;
+  void* k_cache_scales_ptr =
+      k_cache_scales.has_value() ? k_cache_scales.value().data_ptr() : nullptr;
+  void* v_cache_scales_ptr =
+      v_cache_scales.has_value() ? v_cache_scales.value().data_ptr() : nullptr;
 
   trtllm_paged_attention_launcher(
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),
@@ -443,15 +446,14 @@ void trtllm_paged_attention_context(
       static_cast<int*>(seq_lens.data_ptr()),
       /*cum_seq_lens_q=*/static_cast<int*>(cum_seq_lens_q.data_ptr()),
       /*cum_seq_lens_kv=*/static_cast<int*>(cum_seq_lens_kv.data_ptr()), attention_sinks_ptr,
-      lse_ptr, k_cache_scales_ptr, v_cache_scales_ptr,
-      q_data_type, kv_data_type, o_data_type, TllmPagedAttentionMode::Context, batch_size,
-      max_q_len, max_kv_len, num_pages_in_mem_pool, num_qo_heads, num_kv_heads, head_dim_q,
-      head_dim_o, page_size, q_stride_tokens, q_stride_heads, kv_stride_keys_values,
-      kv_stride_heads, kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
-      bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left,
-      sum_seq_q, /*sparse_mla_top_k=*/0, skip_softmax_threshold_scale_factor_value, skips_softmax,
-      lse_stride_tokens, lse_stride_heads,
-      sm_count, enable_pdl, workspace_size, stream);
+      lse_ptr, k_cache_scales_ptr, v_cache_scales_ptr, q_data_type, kv_data_type, o_data_type,
+      TllmPagedAttentionMode::Context, batch_size, max_q_len, max_kv_len, num_pages_in_mem_pool,
+      num_qo_heads, num_kv_heads, head_dim_q, head_dim_o, page_size, q_stride_tokens,
+      q_stride_heads, kv_stride_keys_values, kv_stride_heads, kv_stride_batch,
+      max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value, bmm1_scale_log2_ptr,
+      bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left, sum_seq_q,
+      /*sparse_mla_top_k=*/0, skip_softmax_threshold_scale_factor_value, skips_softmax,
+      lse_stride_tokens, lse_stride_heads, sm_count, enable_pdl, workspace_size, stream);
 }
 
 void trtllm_ragged_attention_launcher(

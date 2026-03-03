@@ -428,9 +428,9 @@ def trtllm_batch_decode_mla(
 
         assert lse is not None, "LSE should be returned when return_lse=True"
         if lse_input is not None:
-            assert (
-                lse.data_ptr() == lse_input.data_ptr()
-            ), "Expected output LSE to reuse provided tensor"
+            assert lse.data_ptr() == lse_input.data_ptr(), (
+                "Expected output LSE to reuse provided tensor"
+            )
         assert not torch.isnan(lse).any(), "LSE contains NaN values"
         # trtllm lse: [batch_size, q_len, num_q_heads]
         # ref lse:    [batch_size * q_len_per_request, num_q_heads]
@@ -439,9 +439,7 @@ def trtllm_batch_decode_mla(
             lse_rtol, lse_atol = 5e-2, 5e-2
         else:
             lse_rtol, lse_atol = 1e-3, 1e-3
-        torch.testing.assert_close(
-            lse_flat, lse_ref, rtol=lse_rtol, atol=lse_atol
-        )
+        torch.testing.assert_close(lse_flat, lse_ref, rtol=lse_rtol, atol=lse_atol)
     elif backend == "xqa":
         atol = 0.05
         rtol = 0.05

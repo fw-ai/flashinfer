@@ -3591,7 +3591,9 @@ def trtllm_batch_context_with_kv_cache(
     kv_cache_scales: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     return_lse: bool = False,
     lse: Optional[torch.Tensor] = None,
-) -> Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]:
+) -> Union[
+    torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]
+]:
     """
     Parameters
     ----------
@@ -3784,9 +3786,7 @@ def trtllm_batch_context_with_kv_cache(
             lse, expected_lse_shape, torch.float32, query.device, "lse"
         )
         if not lse.is_contiguous():
-            raise ValueError(
-                "lse must be contiguous for trtllm-gen backend."
-            )
+            raise ValueError("lse must be contiguous for trtllm-gen backend.")
 
     run_func(
         out,
