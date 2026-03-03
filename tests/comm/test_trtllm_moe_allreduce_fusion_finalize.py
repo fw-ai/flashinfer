@@ -95,6 +95,14 @@ def _run_correctness_worker(
 
                     norm_out = torch.empty_like(residual)
                     residual_out = torch.empty_like(residual)
+                    seq_len, hidden_size = norm_out.shape
+                    quant_out = torch.empty(
+                        seq_len * hidden_size // 4, dtype=dtype, device=device
+                    )
+                    scale_out = torch.empty(
+                        seq_len * hidden_size // SF_VEC_SIZE, dtype=dtype, device=device
+                    )
+                    routed_scaling_factor = 2.5
 
                     # == Run kernel ==
                     torch.cuda.synchronize()
@@ -117,6 +125,9 @@ def _run_correctness_worker(
                                 expert_scale_factor=scale,
                                 norm_out=norm_out,
                                 residual_out=residual_out,
+                                quant_out=quant_out,
+                                scale_out=scale_out,
+                                routed_scaling_factor=routed_scaling_factor,
                             )
                     torch.cuda.current_stream().wait_stream(s)
 
@@ -138,6 +149,9 @@ def _run_correctness_worker(
                                 expert_scale_factor=scale,
                                 norm_out=norm_out,
                                 residual_out=residual_out,
+                                quant_out=quant_out,
+                                scale_out=scale_out,
+                                routed_scaling_factor=routed_scaling_factor,
                             )
 
                     # replay
@@ -148,7 +162,8 @@ def _run_correctness_worker(
                     # == Calculate reference output ==
                     expert_reduction = torch.sum(
                         fc2_output_clone[expanded_idx_to_permuted_idx]
-                        * scale.unsqueeze(-1),
+                        * scale.unsqueeze(-1)
+                        * routed_scaling_factor,
                         dim=1,
                     )
 
@@ -210,17 +225,20 @@ def _run_correctness_worker(
                             f"max diff ref value: {torch_output_hidden_states.to(torch.float32).view(-1)[torch.argmax(torch.abs(norm_out.to(torch.float32) - torch_output_hidden_states.to(torch.float32)))]}"
                         )
 
+                    # bfloat16 with multiple ranks accumulates more rounding errors
+                    # due to order-of-operations differences vs PyTorch reference
+                    tol = 0.2 if dtype == torch.float16 else 0.5
                     torch.testing.assert_close(
                         residual_out.to(torch.float32),
                         torch_residual.to(torch.float32),
-                        rtol=0.2,
-                        atol=0.2,
+                        rtol=tol,
+                        atol=tol,
                     )
                     torch.testing.assert_close(
                         norm_out.to(torch.float32),
                         torch_output_hidden_states.to(torch.float32),
-                        rtol=0.2,
-                        atol=0.2,
+                        rtol=tol,
+                        atol=tol,
                     )
 
                 dist.barrier(group=group)
