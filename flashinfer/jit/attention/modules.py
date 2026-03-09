@@ -31,6 +31,7 @@ from ..core import (
 from ...jit.cubin_loader import get_cubin, get_meta_hash
 from ..utils import (
     dtype_map,
+    dtype_map_kv,
     filename_safe_dtype_map,
     mask_mode_literal,
     pos_encoding_mode_literal,
@@ -140,7 +141,7 @@ def gen_batch_mla_module(
             generated_config_path,
             config_templ.render(
                 dtype_q=dtype_map[dtype_q],
-                dtype_kv=dtype_map[dtype_kv],
+                dtype_kv=dtype_map_kv[dtype_kv],
                 dtype_o=dtype_map[dtype_o],
                 dtype_idx=dtype_map[dtype_idx],
                 head_dim_ckv=head_dim_ckv,
@@ -168,7 +169,7 @@ def gen_batch_mla_module(
             generated_config_path,
             config_templ.render(
                 dtype_q=dtype_map[dtype_q],
-                dtype_kv=dtype_map[dtype_kv],
+                dtype_kv=dtype_map_kv[dtype_kv],
                 dtype_o=dtype_map[dtype_o],
                 dtype_idx=dtype_map[dtype_idx],
                 head_dim_ckv=head_dim_ckv,
@@ -277,7 +278,7 @@ def gen_batch_decode_mla_module(
         generated_config_path,
         config_templ.render(
             dtype_q=dtype_map[dtype_q],
-            dtype_kv=dtype_map[dtype_kv],
+            dtype_kv=dtype_map_kv[dtype_kv],
             dtype_o=dtype_map[dtype_o],
             dtype_idx=dtype_map[dtype_idx],
             head_dim_ckv=head_dim,
@@ -517,8 +518,14 @@ def gen_single_prefill_module(
 
     if backend == "fa2":
         assert not fp8_enabled, "fp8 tensor core is not supported in fa2 backend"
-        additional_tensor_names = ["maybe_custom_mask", "maybe_alibi_slopes"]
+        additional_tensor_names = [
+            "maybe_custom_mask",
+            "maybe_alibi_slopes",
+        ]
         additional_tensor_dtypes = ["uint8_t", "float"]
+        if dtype_kv == torch.uint8:
+            additional_tensor_names += ["maybe_k_cache_sf", "maybe_v_cache_sf"]
+            additional_tensor_dtypes += ["uint8_t", "uint8_t"]
         additional_scalar_names = [
             "logits_soft_cap",
             "sm_scale",
@@ -754,7 +761,7 @@ def gen_customize_pod_module(
         "variant_name_p": variant_name_p,
         "variant_name_d": variant_name_d,
         "dtype_q": dtype_map[dtype_q],
-        "dtype_kv": dtype_map[dtype_kv],
+        "dtype_kv": dtype_map_kv[dtype_kv],
         "dtype_o": dtype_map[dtype_o],
         "idtype": dtype_map[dtype_idx],
         "head_dim_qk": head_dim,
@@ -854,7 +861,7 @@ def gen_customize_batch_pod_module(
         "variant_name_p": variant_name_p,
         "variant_name_d": variant_name_d,
         "dtype_q": dtype_map[dtype_q],
-        "dtype_kv": dtype_map[dtype_kv],
+        "dtype_kv": dtype_map_kv[dtype_kv],
         "dtype_o": dtype_map[dtype_o],
         "idtype": dtype_map[dtype_idx],
         "head_dim_qk": head_dim,
@@ -1009,6 +1016,9 @@ def gen_batch_prefill_module(
             "uint16_t",
             "uint16_t",
         ]  # NOTE(Zihao): int32_t should follow dtype_idx
+        if dtype_kv == torch.uint8:
+            additional_tensor_names += ["maybe_k_cache_sf", "maybe_v_cache_sf"]
+            additional_tensor_dtypes += ["uint8_t", "uint8_t"]
         additional_scalar_names = [
             "logits_soft_cap",
             "sm_scale",
@@ -1150,6 +1160,9 @@ def gen_batch_attention_module(
 
     additional_tensor_names: List[str] = []
     additional_tensor_dtypes: List[str] = []
+    if dtype_kv == torch.uint8:
+        additional_tensor_names = ["maybe_k_cache_sf", "maybe_v_cache_sf"]
+        additional_tensor_dtypes = ["uint8_t", "uint8_t"]
     additional_scalar_names: List[str] = []
     additional_scalar_dtypes: List[str] = []
     variant_name = f"StandardAttention<{str(use_logits_soft_cap).lower()}>"
@@ -1220,7 +1233,7 @@ def gen_customize_single_decode_module(
         "variant_decl": variant_decl,
         "variant_name": variant_name,
         "dtype_q": dtype_map[dtype_q],
-        "dtype_kv": dtype_map[dtype_kv],
+        "dtype_kv": dtype_map_kv[dtype_kv],
         "dtype_o": dtype_map[dtype_o],
         "head_dim_qk": head_dim_qk,
         "head_dim_vo": head_dim_vo,
@@ -1285,7 +1298,7 @@ def gen_customize_single_prefill_module(
         "variant_decl": variant_decl,
         "variant_name": variant_name,
         "dtype_q": dtype_map[dtype_q],
-        "dtype_kv": dtype_map[dtype_kv],
+        "dtype_kv": dtype_map_kv[dtype_kv],
         "dtype_o": dtype_map[dtype_o],
         "head_dim_qk": head_dim_qk,
         "head_dim_vo": head_dim_vo,
@@ -1460,7 +1473,7 @@ def gen_customize_batch_decode_module(
         "variant_decl": variant_decl,
         "variant_name": variant_name,
         "dtype_q": dtype_map[dtype_q],
-        "dtype_kv": dtype_map[dtype_kv],
+        "dtype_kv": dtype_map_kv[dtype_kv],
         "dtype_o": dtype_map[dtype_o],
         "idtype": dtype_map[idtype],
         "head_dim_qk": head_dim_qk,
@@ -1530,7 +1543,7 @@ def gen_customize_batch_prefill_module(
         "variant_decl": variant_decl,
         "variant_name": variant_name,
         "dtype_q": dtype_map[dtype_q],
-        "dtype_kv": dtype_map[dtype_kv],
+        "dtype_kv": dtype_map_kv[dtype_kv],
         "dtype_o": dtype_map[dtype_o],
         "idtype": dtype_map[idtype],
         "head_dim_qk": head_dim_qk,
@@ -1818,7 +1831,7 @@ def gen_customize_batch_attention_module(
         "variant_decl": variant_decl,
         "variant_name": variant_name,
         "dtype_q": dtype_map[dtype_q],
-        "dtype_kv": dtype_map[dtype_kv],
+        "dtype_kv": dtype_map_kv[dtype_kv],
         "dtype_o": dtype_map[dtype_o],
         "idtype": dtype_map[idtype],
         "head_dim_qk": head_dim_qk,
@@ -1827,13 +1840,26 @@ def gen_customize_batch_attention_module(
         "use_logits_soft_cap": str(use_logits_soft_cap).lower(),
     }
     gen_directory = jit_env.FLASHINFER_GEN_SRC_DIR / uri
-    (additional_params_decl, additional_func_params, additional_params_setter) = (
-        generate_additional_params(
-            additional_tensor_names,
-            additional_tensor_dtypes,
-            additional_scalar_names,
-            additional_scalar_dtypes,
-        )
+    (additional_params_decl, additional_func_params, _) = generate_additional_params(
+        additional_tensor_names,
+        additional_tensor_dtypes,
+        additional_scalar_names,
+        additional_scalar_dtypes,
+    )
+    # batch_attention.cu loops over params[i], so generate a setter using params[i] syntax
+    # instead of the params.X syntax from generate_additional_params.
+    batch_additional_params_setter = " \\\n".join(
+        [
+            (
+                f"params[i].{var} = {var} ? static_cast<{dtype}*>({var}.value().data_ptr()): nullptr;"
+                if var.startswith("maybe")
+                else f"params[i].{var} = static_cast<{dtype}*>({var}.data_ptr());"
+            )
+            for dtype, var in zip(
+                additional_tensor_dtypes, additional_tensor_names, strict=True
+            )
+        ]
+        + [f"params[i].{var} = {var};" for var in additional_scalar_names]
     )
     with open(
         jit_env.FLASHINFER_CSRC_DIR / "batch_attention_customize_config.jinja"
@@ -1848,7 +1874,7 @@ def gen_customize_batch_attention_module(
     kwargs |= {
         "additional_params_decl": additional_params_decl,
         "additional_func_params": additional_func_params,
-        "additional_params_setter": additional_params_setter,
+        "additional_params_setter": batch_additional_params_setter,
     }
 
     generated_inc_str = config_templ.render(

@@ -146,6 +146,9 @@ class BatchAttention:
         v_scale: Optional[torch.Tensor] = None,
         logits_soft_cap: float = 0.0,
         profiler_buffer: Optional[torch.Tensor] = None,
+        kv_block_scales: Optional[
+            Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
+        ] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if profiler_buffer is None:
             if self._use_profiler:
@@ -176,7 +179,14 @@ class BatchAttention:
         # profiler_buffer is optional
         profiler_args = (profiler_buffer,) if self._use_profiler else ()
 
-        self.module.run(
+        # Unpack kv_block_scales for NVFP4 (maybe_k_cache_sf, maybe_v_cache_sf)
+        k_cache_sf, v_cache_sf = (
+            _unpack_paged_kv_cache(kv_block_scales, self._kv_layout)
+            if kv_block_scales is not None
+            else (None, None)
+        )
+
+        run_args = [
             self.float_workspace_buffer,
             self.int_workspace_buffer,
             self._plan_info,
@@ -194,10 +204,11 @@ class BatchAttention:
             v_scale,
             sm_scale,
             logits_soft_cap,
-            # ADDITIONAL_FUNC_PARAMS
-            # PROFILER_FUNC_PARAMS
-            *profiler_args,
-        )
+        ]
+        if k_cache.dtype == torch.uint8:
+            run_args.extend([k_cache_sf, v_cache_sf])
+        run_args.extend(profiler_args)
+        self.module.run(*run_args)
 
         return out, lse
 
