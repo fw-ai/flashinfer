@@ -2150,6 +2150,7 @@ def trtllm_batch_decode_with_kv_cache(
     max_q_len: Optional[int] = None,
     cum_seq_lens_q: Optional[torch.Tensor] = None,
     skip_softmax_threshold_scale_factor: Optional[float] = None,
+    kv_cache_sf: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
@@ -2286,6 +2287,7 @@ def trtllm_batch_decode_with_kv_cache(
         return xqa_batch_decode_with_kv_cache(
             query=query,
             kv_cache=(k_cache, v_cache),
+            kv_cache_sf=kv_cache_sf,
             workspace_buffer=workspace_buffer,
             block_tables=block_tables,
             seq_lens=seq_lens,
@@ -2457,6 +2459,9 @@ def xqa_batch_decode_with_kv_cache(
     q_len_per_req: Optional[int] = 1,
     o_scale: Optional[float] = 1.0,
     mask: Optional[torch.Tensor] = None,
+    kv_cache_sf: Union[
+        torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]
+    ] = None,
 ) -> torch.Tensor:
     """
     Parameters
@@ -2511,6 +2516,9 @@ def xqa_batch_decode_with_kv_cache(
     mask : Optional[torch.Tensor] = None
         causal attention mask for xqa speculative decoding.
 
+    kv_cache_sf : Optional[torch.Tensor] = None
+        KV cache scaling factors. Must provide when NVFP4 KV cache is used.
+
     Returns
     -------
     out : torch.Tensor
@@ -2530,6 +2538,19 @@ def xqa_batch_decode_with_kv_cache(
             # NOTE(Zihao): unbind transforms [num_pages, 2, ...] to ([num_pages, ...], [num_pages, ...])
             # it doesn't change underlying storage
             k_cache, v_cache = kv_cache.unbind(dim=1)
+
+    k_cache_sf = None
+    v_cache_sf = None
+    if kv_cache_sf is not None:
+        if isinstance(kv_cache_sf, tuple):
+            k_cache_sf, v_cache_sf = kv_cache_sf
+        else:
+            assert kv_cache_sf.shape[1] == 2, (
+                "When kv_cache is a single tensor, the second dimension must be 1 or 2"
+            )
+            # NOTE(Zihao): unbind transforms [num_pages, 2, ...] to ([num_pages, ...], [num_pages, ...])
+            # it doesn't change underlying storage
+            k_cache_sf, v_cache_sf = kv_cache_sf.unbind(dim=1)
 
     sm_count = get_device_sm_count(query.device)
 
@@ -2567,6 +2588,8 @@ def xqa_batch_decode_with_kv_cache(
         query_new,
         k_cache,
         v_cache,
+        k_cache_sf,
+        v_cache_sf,
         block_tables,
         seq_lens_new,
         out_4d,
