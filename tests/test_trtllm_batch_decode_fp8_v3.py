@@ -23,7 +23,6 @@ Quantization:
 """
 
 import torch
-import flashinfer
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 from kvfp4_tensor import KVFP4QuantizeUtil
 
@@ -117,7 +116,7 @@ def verify_fp4_quantization(original, quantized, name="Tensor"):
     print(f"    Inf check: original={has_inf_orig}, quantized={has_inf_quant}")
 
     if has_nan_quant or has_inf_quant:
-        print(f"    ⚠️  WARNING: Found NaN or Inf after quantization!")
+        print("    ⚠️  WARNING: Found NaN or Inf after quantization!")
         return False
 
     # 2. Statistics comparison
@@ -162,7 +161,7 @@ def verify_fp4_quantization(original, quantized, name="Tensor"):
 
     # Sample 5 random indices
     sample_indices = torch.randperm(flat_orig.numel())[:5]
-    print(f"    Sample values (5 random elements):")
+    print("    Sample values (5 random elements):")
     for i, idx in enumerate(sample_indices):
         orig_val = flat_orig[idx].item()
         quant_val = flat_quant[idx].item()
@@ -187,7 +186,7 @@ def verify_fp4_quantization(original, quantized, name="Tensor"):
         (1.0, float("inf")),
     ]
 
-    print(f"    Value distribution (% of total):")
+    print("    Value distribution (% of total):")
     for low, high in ranges:
         orig_count = count_in_range(original_f32, low, high)
         quant_count = count_in_range(quantized_f32, low, high)
@@ -198,7 +197,7 @@ def verify_fp4_quantization(original, quantized, name="Tensor"):
 
     # 7. Check if std ratio is too small (indicates severe compression)
     if std_ratio < 0.1:
-        print(f"    ⚠️  WARNING: Std ratio < 0.1, severe information loss!")
+        print("    ⚠️  WARNING: Std ratio < 0.1, severe information loss!")
         return False
 
     return True
@@ -282,7 +281,7 @@ def test_trtllm_batch_decode_fp8():
     page_size = 64
     device = torch.device("cuda:0")
 
-    print(f"Configuration:")
+    print("Configuration:")
     print(f"  batch_size: {batch_size}")
     print(f"  num_qo_heads: {num_qo_heads}")
     print(f"  num_kv_heads: {num_kv_heads}")
@@ -404,10 +403,10 @@ def test_trtllm_batch_decode_fp8():
 
     # Apply KVFP4 quantization to KV cache
     # Reshape for batched quantization [B, M, N] where B=batch_size, M=seq_len*num_kv_heads, N=head_dim
-    print(f"\n  [KVFP4 Quantization Process - Using KVFP4QuantizeUtil]")
+    print("\n  [KVFP4 Quantization Process - Using KVFP4QuantizeUtil]")
 
     # Process K cache
-    print(f"  Quantizing K cache with KVFP4QuantizeUtil...")
+    print("  Quantizing K cache with KVFP4QuantizeUtil...")
     k_cache_for_kvfp4 = k_cache_bf16.reshape(
         batch_size, kv_len * num_kv_heads, head_dim
     )
@@ -440,7 +439,7 @@ def test_trtllm_batch_decode_fp8():
     )
 
     # Process V cache
-    print(f"\n  Quantizing V cache with KVFP4QuantizeUtil...")
+    print("\n  Quantizing V cache with KVFP4QuantizeUtil...")
     v_cache_for_kvfp4 = v_cache_bf16.reshape(
         batch_size, kv_len * num_kv_heads, head_dim
     )
@@ -473,10 +472,10 @@ def test_trtllm_batch_decode_fp8():
     )
 
     if not k_valid_kvfp4 or not v_valid_kvfp4:
-        print(f"\n  ⚠️  KVFP4 quantization quality check FAILED!")
+        print("\n  ⚠️  KVFP4 quantization quality check FAILED!")
     else:
         print(
-            f"\n  ✓ KVFP4 quantization quality check PASSED (with expected precision loss)"
+            "\n  ✓ KVFP4 quantization quality check PASSED (with expected precision loss)"
         )
 
     # Prepare paged KV cache with KVFP4-quantized data
@@ -546,7 +545,7 @@ def test_trtllm_batch_decode_fp8():
     print("  Scale adjustment: block_scale /= 6, global_scale *= 6 (for FP8 compute)")
 
     # Reuse quantization results from Variant 4
-    print(f"\n  [Using Quantized Data from Variant 4]")
+    print("\n  [Using Quantized Data from Variant 4]")
     print(
         f"    K quantized data shape: {k_quant_packed.shape}, dtype: {k_quant_packed.dtype}"
     )
@@ -563,9 +562,9 @@ def test_trtllm_batch_decode_fp8():
     print(f"    V global scale (original): {v_global_scale.item():.6f}")
 
     # Step 1: Adjust scales (block_scale /= 6, global_scale *= 6)
-    print(f"\n  [Step 1: Adjust Scales for FP8 Compute]")
-    print(f"    Adjustment: block_scale /= 6, global_scale *= 6")
-    print(f"    Reason: Kernel uses FP8 compute, need to prevent overflow")
+    print("\n  [Step 1: Adjust Scales for FP8 Compute]")
+    print("    Adjustment: block_scale /= 6, global_scale *= 6")
+    print("    Reason: Kernel uses FP8 compute, need to prevent overflow")
 
     # Adjust K scales
     k_block_scales_adjusted = (k_block_scales_fp8.float() / 6.0).to(torch.float8_e4m3fn)
@@ -586,7 +585,7 @@ def test_trtllm_batch_decode_fp8():
     print(f"    V global scale adjusted: {v_global_scale_adjusted.item():.6f}")
 
     # Step 2: Prepare paged FP4 KV cache (uint8 packed format)
-    print(f"\n  [Step 2: Prepare Paged FP4 KV Cache]")
+    print("\n  [Step 2: Prepare Paged FP4 KV Cache]")
 
     # Reshape K: [batch_size, seq_len*num_kv_heads, head_dim] -> [batch_size, seq_len, num_kv_heads, head_dim]
     # -> paged format
@@ -644,7 +643,7 @@ def test_trtllm_batch_decode_fp8():
     )
 
     # Step 3: Prepare paged block scales
-    print(f"\n  [Step 3: Prepare Paged Block Scales]")
+    print("\n  [Step 3: Prepare Paged Block Scales]")
 
     # Reshape block scales: [batch_size, seq_len*num_kv_heads*head_dim/16] -> [batch_size, seq_len, num_kv_heads, head_dim/16]
     k_block_scales_reshaped = k_block_scales_adjusted.reshape(
@@ -695,7 +694,7 @@ def test_trtllm_batch_decode_fp8():
     )
 
     # Step 4: Fuse global scales into bmm1_scale and bmm2_scale
-    print(f"\n  [Step 4: Fuse Global Scales into BMM Scales]")
+    print("\n  [Step 4: Fuse Global Scales into BMM Scales]")
     print(f"    Original bmm1_scale: {bmm1_scale:.6f} (q_scale * k_scale * sm_scale)")
     print(f"    Original bmm2_scale: {bmm2_scale:.6f} (v_scale / o_scale)")
 
@@ -715,8 +714,8 @@ def test_trtllm_batch_decode_fp8():
     print(f"    Block tables shape: {block_tables_fp4.shape}")
 
     # Step 6: Call trtllm_batch_decode_with_kv_cache with FP4 KV cache
-    print(f"\n  [Step 5: Call Kernel with FP4 KV Cache]")
-    print(f"    Note: is_nvfp4_kvcache will be auto-detected by the interface")
+    print("\n  [Step 5: Call Kernel with FP4 KV Cache]")
+    print("    Note: is_nvfp4_kvcache will be auto-detected by the interface")
 
     output_test_fp4_native = trtllm_batch_decode_with_kv_cache(
         query=q_fp8,
@@ -778,11 +777,10 @@ def test_trtllm_batch_decode_fp8():
     ).item()
     r2_score_native = 1 - (ss_res_native / (ss_tot_native + 1e-10))
 
-    print(f"\n  Variant 5 (Native) vs Variant 4 (Dequant):")
+    print("\n  Variant 5 (Native) vs Variant 4 (Dequant):")
     print(f"    Mean absolute error: {mean_abs_error_native:.6f}")
     print(f"    Max absolute error: {max_abs_error_native:.6f}")
     print(f"    R² score: {r2_score_native:.6f} (1.0 = perfect match)")
-
 
     # Summary comparison table
     print("\n" + "=" * 80)
