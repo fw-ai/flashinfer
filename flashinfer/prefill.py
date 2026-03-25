@@ -303,6 +303,7 @@ def get_trtllm_gen_prefill_module():
             value_block_scales,
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
+            None,  # lse
         )
         return out
 
@@ -3736,7 +3737,11 @@ def trtllm_batch_context_with_kv_cache(
     ] = None,
     skip_softmax_threshold_scale_factor: Optional[float] = None,
     uses_shared_paged_kv_idx: bool = True,
-) -> Union[torch.Tensor, FP4Tensor]:
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
+) -> Union[
+    torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]
+]:
     """
     Parameters
     ----------
@@ -3804,13 +3809,16 @@ def trtllm_batch_context_with_kv_cache(
         Whether the K and V page indices are shared as a unified index.
         True (default) uses vLLM/FlashInfer layout with a 2D page table.
         False uses TRT-LLM layout with a 3D page table ``[batch_size, 2, max_num_pages_per_seq]``.
+    return_lse : bool = False
+        Whether to return the log-sum-exp tensor.
+    lse : Optional[torch.Tensor] = None
+        Optional output tensor for the log-sum-exp values with shape
+        ``[query.shape[0], query.shape[1]]``.
     Returns
     -------
     out: Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]
-        output torch.Tensor or FP4Tensor.
-        If ``return_lse`` is ``True``, a tuple of two tensors:
-            * attention output, shape: ``[batch_size, num_qo_heads, head_dim]``
-            * logsumexp of attention scores, shape: ``[batch_size, num_qo_heads]``.
+        output torch.Tensor or FP4Tensor. If ``return_lse`` is ``True``, returns a tuple of the
+        output tensor and the LSE tensor.
     """
 
     if enable_pdl is None:
@@ -3942,10 +3950,7 @@ def trtllm_batch_context_with_kv_cache(
     _check_block_tables_shape(block_tables, uses_shared_paged_kv_idx)
     workspace_size = workspace_buffer.numel() * workspace_buffer.element_size()
 
-    k_cache_scale = kv_cache_scales[0] if kv_cache_scales is not None else None
-    v_cache_scale = kv_cache_scales[1] if kv_cache_scales is not None else None
     expected_lse_shape = [query.shape[0], query.shape[1]]
-
     if return_lse and lse is None:
         lse = torch.empty(
             *expected_lse_shape,
@@ -3987,13 +3992,16 @@ def trtllm_batch_context_with_kv_cache(
         value_block_scales,
         skip_softmax_threshold_scale_factor,
         uses_shared_paged_kv_idx,
+        lse,
     )
-
     out = (
         out
         if out_dtype != "nvfp4"
         else FP4Tensor(out, out_scale_factor, o_sf_start_index, query.shape)
     )
+    if return_lse:
+        return out, lse
+    return out
 
 
 @functools.cache

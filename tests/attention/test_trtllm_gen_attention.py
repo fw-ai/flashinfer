@@ -632,7 +632,7 @@ def _test_trtllm_batch_prefill(
     # Using a tiny threshold should give the same result as normal attention.
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
-    output = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
+    output, lse = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
         q_input,
         kv_cache_kernel,
         workspace_buffer,
@@ -656,6 +656,7 @@ def _test_trtllm_batch_prefill(
         kv_block_scales=kv_block_scales_kernel,
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
         uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
+        return_lse=True,
     )
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
@@ -692,6 +693,14 @@ def _test_trtllm_batch_prefill(
         atol=atol,
         max_mismatched_elements=max_mismatched_elements,
     )
+
+    if lse_ref is not None:
+        assert lse is not None, "LSE should be returned when return_lse=True"
+        if q_dtype == "fp8":
+            lse_rtol, lse_atol = 5e-2, 5e-2
+        else:
+            lse_rtol, lse_atol = 1e-3, 1e-3
+        torch.testing.assert_close(lse, lse_ref, rtol=lse_rtol, atol=lse_atol)
 
     if (
         o_dtype != "nvfp4" and kv_dtype != "nvfp4" and uses_shared_paged_kv_idx
@@ -1084,33 +1093,64 @@ def _test_trtllm_batch_decode(
     # Using a tiny threshold should give the same result as normal attention.
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
-    output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
-        q_input,
-        kv_cache_arg,
-        workspace_buffer,
-        page_table_kernel,
-        seq_lens.to(GPU_DEVICE),
-        torch.max(seq_lens).item(),
-        bmm1_scale,
-        bmm2_scale,
-        window_left,  # window_left
-        out=out,
-        out_dtype=out_dtype,
-        o_sf_scale=o_sf_scale,
-        o_sf_vec_size=o_sf_vec_size,
-        sinks=(sink if enable_sink else None),
-        kv_layout=kv_layout,
-        enable_pdl=enable_pdl,
-        backend=backend,
-        q_len_per_req=q_len_per_req,
-        o_scale=o_scale,
-        mask=mask,
-        max_q_len=max_q_len if max_q_len is not None else None,
-        cum_seq_lens_q=q_indptr if max_q_len is not None else None,
-        skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
-        kv_block_scales=kv_block_scales_kernel,
-        uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
-    )
+    if backend == "trtllm-gen":
+        output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+            q_input,
+            kv_cache_arg,
+            workspace_buffer,
+            page_table_kernel,
+            seq_lens.to(GPU_DEVICE),
+            torch.max(seq_lens).item(),
+            bmm1_scale,
+            bmm2_scale,
+            window_left,  # window_left
+            out=out,
+            out_dtype=out_dtype,
+            o_sf_scale=o_sf_scale,
+            o_sf_vec_size=o_sf_vec_size,
+            sinks=(sink if enable_sink else None),
+            kv_layout=kv_layout,
+            enable_pdl=enable_pdl,
+            backend=backend,
+            q_len_per_req=q_len_per_req,
+            o_scale=o_scale,
+            mask=mask,
+            max_q_len=max_q_len if max_q_len is not None else None,
+            cum_seq_lens_q=q_indptr if max_q_len is not None else None,
+            skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+            kv_block_scales=kv_block_scales_kernel,
+            uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
+            return_lse=True,
+        )
+    else:
+        output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+            q_input,
+            kv_cache_arg,
+            workspace_buffer,
+            page_table_kernel,
+            seq_lens.to(GPU_DEVICE),
+            torch.max(seq_lens).item(),
+            bmm1_scale,
+            bmm2_scale,
+            window_left,  # window_left
+            out=out,
+            out_dtype=out_dtype,
+            o_sf_scale=o_sf_scale,
+            o_sf_vec_size=o_sf_vec_size,
+            sinks=(sink if enable_sink else None),
+            kv_layout=kv_layout,
+            enable_pdl=enable_pdl,
+            backend=backend,
+            q_len_per_req=q_len_per_req,
+            o_scale=o_scale,
+            mask=mask,
+            max_q_len=max_q_len if max_q_len is not None else None,
+            cum_seq_lens_q=q_indptr if max_q_len is not None else None,
+            skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+            kv_block_scales=kv_block_scales_kernel,
+            uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
+        )
+        lse = None
     if backend == "trtllm-gen":
         # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
         # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
@@ -1156,7 +1196,7 @@ def _test_trtllm_batch_decode(
         max_mismatched_elements=max_mismatched_elements,
     )
 
-    if lse_ref is not None:
+    if backend == "trtllm-gen" and lse_ref is not None:
         assert lse is not None, "LSE should be returned when return_lse=True"
         if q_dtype == "fp8":
             lse_rtol, lse_atol = 5e-2, 5e-2

@@ -608,7 +608,9 @@ def trtllm_batch_decode_with_kv_cache_mla(
     enable_pdl: bool | None = None,
     backend: str = "auto",
     uses_shared_paged_kv_idx: bool = True,
-) -> torch.Tensor:
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Parameters
     ----------
@@ -647,6 +649,11 @@ def trtllm_batch_decode_with_kv_cache_mla(
         True (default) uses vLLM/FlashInfer layout with a 2D page table.
         False uses TRT-LLM layout with a 3D page table ``[batch_size, 2, max_num_pages_per_seq]``.
         False is only supported for trtllm-gen backend.
+    return_lse : bool = False
+        Whether to return the log-sum-exp tensor. Only supported for the ``trtllm-gen`` backend.
+    lse : Optional[torch.Tensor] = None
+        Optional output tensor for the log-sum-exp values with shape
+        ``[batch_size, q_len_per_request, num_heads]``.
 
     Note
     ----
@@ -697,6 +704,8 @@ def trtllm_batch_decode_with_kv_cache_mla(
             raise ValueError(
                 "XQA MLA does not support separate KV page indices (uses_shared_paged_kv_idx=False)"
             )
+        if return_lse or lse is not None:
+            raise ValueError("XQA MLA does not support return_lse or lse")
         return xqa_batch_decode_with_kv_cache_mla(
             query,
             kv_cache,
@@ -757,6 +766,21 @@ def trtllm_batch_decode_with_kv_cache_mla(
 
         batch_size = query.size(0)
         max_q_len = query.size(1)
+        expected_lse_shape = [batch_size, max_q_len, query.shape[2]]
+
+        if return_lse and lse is None:
+            lse = torch.empty(
+                *expected_lse_shape,
+                device=query.device,
+                dtype=torch.float32,
+            )
+        if lse is not None:
+            check_shape_dtype_device(
+                lse, expected_lse_shape, torch.float32, query.device, "lse"
+            )
+            if not lse.is_contiguous():
+                raise ValueError("lse must be contiguous for trtllm-gen backend.")
+
         query = query.flatten(0, 1)  # [B*S, H, D]
 
         run_func(
@@ -787,8 +811,11 @@ def trtllm_batch_decode_with_kv_cache_mla(
             None,  # value_block_scales
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
+            lse,
         )
 
+        if return_lse:
+            return out, lse
         return out
     else:
         raise ValueError(f"Backend {backend} not supported")

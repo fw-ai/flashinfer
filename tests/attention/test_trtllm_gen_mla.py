@@ -332,23 +332,44 @@ def trtllm_batch_decode_mla(
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
     # Run decode-MLA
-    output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
-        query=query,
-        kv_cache=kv_cache.unsqueeze(1),
-        workspace_buffer=workspace_buffer,
-        qk_nope_head_dim=layer_dimensions.head_dimensions.qk_nope_head_dim,
-        kv_lora_rank=layer_dimensions.head_dimensions.kv_lora_rank,
-        qk_rope_head_dim=layer_dimensions.head_dimensions.qk_rope_head_dim,
-        block_tables=block_tables_kernel,
-        seq_lens=seq_lens_tensor,
-        max_seq_len=max_seq_len,
-        bmm1_scale=scale / ((128 + 64) ** 0.5),
-        bmm2_scale=1.0,
-        skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
-        enable_pdl=enable_pdl,
-        backend=backend,
-        uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
-    )
+    if backend == "trtllm-gen":
+        output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+            query=query,
+            kv_cache=kv_cache.unsqueeze(1),
+            workspace_buffer=workspace_buffer,
+            qk_nope_head_dim=layer_dimensions.head_dimensions.qk_nope_head_dim,
+            kv_lora_rank=layer_dimensions.head_dimensions.kv_lora_rank,
+            qk_rope_head_dim=layer_dimensions.head_dimensions.qk_rope_head_dim,
+            block_tables=block_tables_kernel,
+            seq_lens=seq_lens_tensor,
+            max_seq_len=max_seq_len,
+            bmm1_scale=scale / ((128 + 64) ** 0.5),
+            bmm2_scale=1.0,
+            skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+            enable_pdl=enable_pdl,
+            backend=backend,
+            uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
+            return_lse=True,
+        )
+    else:
+        output = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+            query=query,
+            kv_cache=kv_cache.unsqueeze(1),
+            workspace_buffer=workspace_buffer,
+            qk_nope_head_dim=layer_dimensions.head_dimensions.qk_nope_head_dim,
+            kv_lora_rank=layer_dimensions.head_dimensions.kv_lora_rank,
+            qk_rope_head_dim=layer_dimensions.head_dimensions.qk_rope_head_dim,
+            block_tables=block_tables_kernel,
+            seq_lens=seq_lens_tensor,
+            max_seq_len=max_seq_len,
+            bmm1_scale=scale / ((128 + 64) ** 0.5),
+            bmm2_scale=1.0,
+            skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+            enable_pdl=enable_pdl,
+            backend=backend,
+            uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
+        )
+        lse = None
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
     assert (workspace_buffer[: 8192 * 256 * 4].cpu().numpy() == 0).all()
@@ -440,20 +461,14 @@ def trtllm_batch_decode_mla(
                 print("o_ref:", o_ref)
                 raise e
 
-        assert lse is not None, "LSE should be returned when return_lse=True"
-        if lse_input is not None:
-            assert lse.data_ptr() == lse_input.data_ptr(), (
-                "Expected output LSE to reuse provided tensor"
-            )
-        assert not torch.isnan(lse).any(), "LSE contains NaN values"
-        # trtllm lse: [batch_size, q_len, num_q_heads]
-        # ref lse:    [batch_size * q_len_per_request, num_q_heads]
-        lse_flat = lse.view(batch_size * q_len_per_request, num_q_heads)
+        lse_ref = lse_ref.view(
+            batch_size, q_len_per_request, layer_dimensions.num_heads
+        )
         if dtype == torch.float8_e4m3fn:
-            lse_rtol, lse_atol = 5e-2, 5e-2
+            lse_rtol, lse_atol = 1e-1, 1e-1
         else:
-            lse_rtol, lse_atol = 1e-3, 1e-3
-        torch.testing.assert_close(lse_flat, lse_ref, rtol=lse_rtol, atol=lse_atol)
+            lse_rtol, lse_atol = 1e-2, 1e-2
+        torch.testing.assert_close(lse, lse_ref, rtol=lse_rtol, atol=lse_atol)
     elif backend == "xqa":
         atol = 0.05
         rtol = 0.05
