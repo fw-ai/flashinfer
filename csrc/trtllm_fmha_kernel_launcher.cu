@@ -101,9 +101,7 @@ void trtllm_paged_attention_launcher(
   // Common params
   runner_params.qPtr = query;
   runner_params.kPtr = key_cache;
-  runner_params.kSfBasePtr = k_cache_scales;
   runner_params.vPtr = value_cache;
-  runner_params.vSfBasePtr = v_cache_scales;
   runner_params.kvPageIdxPtr = block_tables;
   runner_params.kSfBasePtr = k_block_scales_ptr;
   runner_params.vSfBasePtr = v_block_scales_ptr;
