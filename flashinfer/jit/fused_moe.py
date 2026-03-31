@@ -26,7 +26,7 @@ from .core import (
     sm89_nvcc_flags,
 )
 from .cpp_ext import is_cuda_version_at_least
-from .cubin_loader import get_cubin, get_meta_hash
+from .cubin_loader import get_cubin, get_meta_hash, download_trtllm_headers
 from .gemm.cutlass.generate_kernels import generate_gemm_operations
 
 
@@ -59,7 +59,7 @@ def gen_cutlass_fused_moe_sm103_module(use_fast_build: bool = False) -> JitSpec:
     ]
 
     nvcc_flags += current_compilation_context.get_nvcc_flags_list(
-        supported_major_versions=[10]
+        supported_major_versions=[10, 12]
     )
 
     return gen_cutlass_fused_moe_module(nvcc_flags, "103", use_fast_build)
@@ -76,7 +76,7 @@ def gen_cutlass_fused_moe_sm100_module(use_fast_build: bool = False) -> JitSpec:
     ]
 
     nvcc_flags += current_compilation_context.get_nvcc_flags_list(
-        supported_major_versions=[10, 11]
+        supported_major_versions=[10, 11, 12]
     )
 
     return gen_cutlass_fused_moe_module(nvcc_flags, "100", use_fast_build)
@@ -233,9 +233,22 @@ def gen_trtllm_gen_fused_moe_sm100_module() -> JitSpec:
     # make sure "flashinferMetaInfo.h" is downloaded or cached
     assert metainfo, f"{header_name}.h not found"
 
+    header_path = f"{include_path}/trtllmGen_bmm_export"
+    header_dest_dir = (
+        jit_env.FLASHINFER_CUBIN_DIR
+        / "flashinfer"
+        / "trtllm"
+        / "batched_gemm"
+        / "trtllmGen_bmm_export"
+    )
+
+    download_trtllm_headers(
+        "bmm", header_dest_dir, header_path, ArtifactPath.TRTLLM_GEN_BMM, checksum
+    )
+
     # currently only support Blackwell
     nvcc_flags = current_compilation_context.get_nvcc_flags_list(
-        supported_major_versions=[10]
+        supported_major_versions=[10, 12]
     )
 
     return gen_jit_spec(
@@ -248,10 +261,40 @@ def gen_trtllm_gen_fused_moe_sm100_module() -> JitSpec:
             jit_env.FLASHINFER_CSRC_DIR / "nv_internal/cpp/common/memoryUtils.cu",
             jit_env.FLASHINFER_CSRC_DIR / "trtllm_fused_moe_kernel_launcher.cu",
             jit_env.FLASHINFER_CSRC_DIR / "trtllm_fused_moe_runner.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "trtllm_fused_moe_routing_deepseek.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "trtllm_fused_moe_routing_llama4.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "trtllm_fused_moe_routing_renormalize.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "trtllm_fused_moe_dev_kernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/trtllm_fused_moe_routing_llama4.cu",
+            # DeepSeek routing (split files)
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/trtllm_fused_moe_routing_deepseek.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchMainKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchClusterKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchCoopKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchHistogramKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchInitExpertCounts.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchOffsetsKernel.cu",
+            # Renormalize routing (split files)
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/trtllm_fused_moe_routing_renormalize.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingRenormalize/launchBlockKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingRenormalize/launchClusterKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingRenormalize/launchHistogramKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingRenormalize/launchHistogramScoresKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingRenormalize/launchInitExpertCounts.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingRenormalize/launchOffsetsKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/trtllm_fused_moe_dev_kernel.cu",
             jit_env.FLASHINFER_CSRC_DIR / "trtllm_batched_gemm_runner.cu",
         ],
         extra_cuda_cflags=[
@@ -265,7 +308,7 @@ def gen_trtllm_gen_fused_moe_sm100_module() -> JitSpec:
         ]
         + nvcc_flags,
         extra_include_paths=[
-            # link "include" sub-directory in cache
+            jit_env.FLASHINFER_CUBIN_DIR,
             jit_env.FLASHINFER_CUBIN_DIR / include_path,
             jit_env.FLASHINFER_CSRC_DIR / "nv_internal",
             jit_env.FLASHINFER_CSRC_DIR / "nv_internal/include",

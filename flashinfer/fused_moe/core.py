@@ -15,7 +15,6 @@ limitations under the License.
 """
 
 import functools
-from enum import IntEnum
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
@@ -54,143 +53,7 @@ from .utils import (
     get_last_power_of_2_num_tokens_buckets,
     last_positive_power_of_2,
 )
-
-
-# The type of method in top-K routing, for use in torch custom op
-# Please keep this in sync with the counterpart defined in include/flashinfer/trtllm/fused_moe/runner.h
-class RoutingMethodType(IntEnum):
-    # Default: Softmax -> TopK
-    Default = (0,)
-    # Renormalize: TopK -> Softmax
-    Renormalize = (1,)
-    # DeepSeekV3: Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups -> Top8 experts from the Top4 groups
-    DeepSeekV3 = (2,)
-    # Llama4: Top1 -> Sigmoid
-    Llama4 = (3,)
-    # Qwen3: Softmax -> TopK -> Renormalize
-    RenormalizeNaive = (4,)
-    # TopK only (no softmax)
-    TopK = (5,)
-    # Unspecified
-    Unspecified = 6
-
-
-# Copied from csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/common.h
-class ActivationType(IntEnum):
-    Gelu = 0
-    Relu = 1
-    Silu = 2
-    Swiglu = 3
-    Geglu = 4
-    SwigluBias = 5
-    Relu2 = 6
-    Identity = 7
-    InvalidType = 8
-
-
-class DtypeTrtllmGen(IntEnum):
-    def __new__(cls, block_format_bit, signed_bit, integer_bit, num_bits, uid):
-        value = (
-            (block_format_bit << 24)
-            | (signed_bit << 20)
-            | (integer_bit << 16)
-            | (num_bits << 8)
-            | uid
-        )
-        obj = int.__new__(cls, value)
-        obj._value_ = value
-        return obj
-
-    # keep the values in sync with include/flashinfer/trtllm/batched_gemm/trtllmGen_bmm_export/trtllm/gen/DtypeDecl.h
-    Bfloat16 = (0, 1, 0, 16, 0)
-    Bool = (0, 0, 1, 1, 1)
-    E2m1 = (1, 1, 0, 4, 2)
-    E2m3 = (1, 1, 0, 6, 3)
-    E3m2 = (1, 1, 0, 6, 4)
-    E4m3 = (0, 1, 0, 8, 5)
-    E5m2 = (0, 1, 0, 8, 6)
-    Fp16 = (0, 1, 0, 16, 7)
-    Fp32 = (0, 1, 0, 32, 8)
-    Int8 = (0, 1, 1, 8, 9)
-    Int32 = (0, 1, 1, 32, 10)
-    Int64 = (0, 1, 1, 64, 11)
-    MxE2m1 = (1, 1, 0, 4, 12)
-    MxE4m3 = (1, 1, 0, 8, 13)
-    MxInt4 = (1, 1, 1, 4, 14)
-    UE8m0 = (0, 0, 0, 8, 15)
-    UInt8 = (0, 0, 1, 8, 16)
-    UInt16 = (0, 0, 1, 16, 17)
-    UInt32 = (0, 0, 1, 32, 18)
-    UInt64 = (0, 0, 1, 64, 19)
-    UInt128 = (0, 0, 1, 128, 20)
-    Void = (0, 1, 0, 0, 21)
-
-
-def trtllm_gen_dtype_has_scale(dtype: DtypeTrtllmGen) -> bool:
-    if dtype in [
-        DtypeTrtllmGen.MxE4m3,
-        DtypeTrtllmGen.E2m1,
-        DtypeTrtllmGen.MxE2m1,
-        DtypeTrtllmGen.MxE4m3,
-        DtypeTrtllmGen.MxInt4,
-    ]:
-        return True
-    else:
-        return False
-
-
-def deduce_trtllm_gen_tensor_dtype(
-    x: torch.Tensor, scale: Optional[torch.Tensor]
-) -> DtypeTrtllmGen:
-    hidden_size = x.shape[-1]
-    if x.dtype == torch.uint8:  # FIXME(siyuan): use torch.float4_e2m1x2 after torch 2.8
-        hidden_size *= 2
-    if x.dtype == torch.bfloat16:
-        dtype = DtypeTrtllmGen.Bfloat16
-    elif x.dtype == torch.float8_e4m3fn:
-        dtype = DtypeTrtllmGen.E4m3 if scale is None else DtypeTrtllmGen.MxE4m3
-    elif (
-        x.dtype == torch.uint8
-    ):  # FIXME(siyuan): use torch.float4_e2m1x2 after torch 2.8
-        assert scale is not None, "Scale tensor must be provided for float4x2 input"
-        if scale.shape[-1] == hidden_size // 16:
-            dtype = DtypeTrtllmGen.E2m1
-        else:
-            dtype = DtypeTrtllmGen.MxE2m1
-    else:
-        raise ValueError("Unsupported trtllm-gen input tensor.")
-    return dtype
-
-
-# See MatrixLayout from include/flashinfer/trtllm/batched_gemm/trtllmGen_bmm_export/Enums.h
-class WeightLayout(IntEnum):
-    # K-major layout (default). [Mn, K]
-    MajorK = 0
-    # M-major for A and N-major for B. [K, Mn]
-    MajorMn = 1
-    # Layout is blocked along the K dimension. [K / blockK, Mn, blockK]
-    # where blockK is fixed at 128B
-    BlockMajorK = 2
-
-
-# The type of gated activation function
-# Please keep this in sync with the counterpart defined in include/flashinfer/trtllm/fused_moe/runner.h
-class GatedActType(IntEnum):
-    # SwiGlu
-    SwiGlu = 0
-    # GeGlu
-    GeGlu = 1
-
-
-# The type of FP8 quantization
-# Please keep this in sync with the counterpart defined in trtllm_fused_moe_kernel_launcher.cu
-class Fp8QuantizationType(IntEnum):
-    # No FP8 quantization
-    NoneFp8 = 0
-    # DeepSeek FP8
-    DeepSeekFp8 = 1
-    # MxFp8 x MxFp8
-    MxFp8 = 2
+from ..tllm_enums import *
 
 
 @functools.cache
@@ -1112,6 +975,8 @@ def get_trtllm_moe_sm100_module():
                 moe_op.trtllm_bf16_moe(
                     routing_logits,
                     kwargs["routing_bias"],
+                    topk_ids,
+                    expert_weights,
                     hidden_states,
                     kwargs["gemm1_weights"],
                     kwargs["gemm2_weights"],
@@ -1188,6 +1053,7 @@ def get_trtllm_moe_sm100_module():
                         kwargs["enable_pdl"],
                         [-1, -1] if tactic == -1 else tactic,
                         self.fp8_quantization_type,
+                        self.activation_type,
                     )
                 else:
                     # FP8 per tensor scale
@@ -1283,7 +1149,7 @@ def get_trtllm_moe_sm100_module():
 
         @classmethod
         @functools.lru_cache(maxsize=None)
-        def refine_tuning_config(cls, tune_max_num_tokens: int):
+        def refine_tuning_config(cls, tune_max_num_tokens: int, **kwargs):
             cls.tuning_config_with_hidden_states_scales = TuningConfig(
                 dynamic_tensor_specs=(
                     DynamicTensorSpec(
@@ -1293,7 +1159,8 @@ def get_trtllm_moe_sm100_module():
                         lambda x: min(last_positive_power_of_2(x), tune_max_num_tokens),
                         cls.dynamic_tensor_initializers,
                     ),
-                )
+                ),
+                **kwargs,
             )
             cls.tuning_config_no_hidden_states_scales = TuningConfig(
                 dynamic_tensor_specs=(
@@ -1305,6 +1172,7 @@ def get_trtllm_moe_sm100_module():
                         cls.dynamic_tensor_initializers[:5],
                     ),
                 ),
+                **kwargs,
             )
 
     @register_custom_op(
@@ -1312,8 +1180,10 @@ def get_trtllm_moe_sm100_module():
         mutates_args=(""),
     )
     def trtllm_bf16_moe_op(
-        routing_logits: torch.Tensor,
+        routing_logits: Optional[torch.Tensor],
         routing_bias: Optional[torch.Tensor],
+        topk_ids: Optional[torch.Tensor],
+        expert_weights: Optional[torch.Tensor],
         hidden_states: torch.Tensor,
         gemm1_weights: torch.Tensor,
         gemm2_weights: torch.Tensor,
@@ -1332,6 +1202,9 @@ def get_trtllm_moe_sm100_module():
         enable_pdl: Optional[bool] = None,
         tune_max_num_tokens: int = 8192,
     ) -> List[torch.Tensor]:
+        assert routing_logits is not None or topk_ids is not None, (
+            "either routing_logits or topk_ids must be provided"
+        )
         if enable_pdl is None:
             enable_pdl = device_support_pdl(hidden_states.device)
 
@@ -1346,12 +1219,22 @@ def get_trtllm_moe_sm100_module():
         output = torch.empty(
             num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
         )
-        topk_ids = torch.empty(
-            num_tokens, top_k, dtype=torch.int32, device=hidden_states.device
-        )
-        expert_weights = torch.empty(
-            num_tokens, top_k, dtype=routing_logits.dtype, device=hidden_states.device
-        )
+        if routing_logits is not None:
+            # When routing_logits is provided, we must pass topk_ids/expert_weights with no allocation
+            topk_ids = torch.empty(0, dtype=torch.int32, device=hidden_states.device)
+            expert_weights = torch.empty(
+                0, dtype=routing_logits.dtype, device=hidden_states.device
+            )
+        else:
+            # When routing_logits is provided, we either have topk_ids/expert_weights,
+            # packed into a single tensor as topk_id
+            # or have them individually as topk_ids and expert_weights respectively
+            topk_ids = topk_ids
+            expert_weights = (
+                expert_weights
+                if expert_weights is not None
+                else torch.empty(0, dtype=torch.bfloat16, device=hidden_states.device)
+            )
 
         dtype_act = DtypeTrtllmGen.Bfloat16
         dtype_weights = DtypeTrtllmGen.Bfloat16
@@ -1396,6 +1279,8 @@ def get_trtllm_moe_sm100_module():
         intermediate_output = moe_op.trtllm_bf16_moe(
             routing_logits,
             routing_bias,
+            topk_ids,
+            expert_weights,
             hidden_states,
             gemm1_weights,
             gemm2_weights,
@@ -1426,8 +1311,10 @@ def get_trtllm_moe_sm100_module():
 
     @register_fake_op("flashinfer::trtllm_bf16_moe")
     def _fake_trtllm_bf16_moe(
-        routing_logits: torch.Tensor,
+        routing_logits: Optional[torch.Tensor],
         routing_bias: Optional[torch.Tensor],
+        expert_indices: Optional[torch.Tensor],
+        expert_weights: Optional[torch.Tensor],
         hidden_states: torch.Tensor,
         gemm1_weights: torch.Tensor,
         gemm2_weights: torch.Tensor,
@@ -1634,6 +1521,7 @@ def get_trtllm_moe_sm100_module():
         enable_pdl: Optional[bool] = None,
         tune_max_num_tokens: int = 8192,
         fp8_quantization_type: Fp8QuantizationType = Fp8QuantizationType.DeepSeekFp8,
+        activation_type: int = ActivationType.Swiglu.value,
     ) -> List[torch.Tensor]:
         # Determine routing mode: compute from logits or use pre-computed
         if routing_logits is None:
@@ -1695,6 +1583,7 @@ def get_trtllm_moe_sm100_module():
             fp8_quantization_type=fp8_quantization_type,  # block_scale mode
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
+            activation_type=activation_type,
             weight_layout=weight_layout,
             use_shuffled_weight=use_shuffled_weight,
         )
@@ -1758,6 +1647,7 @@ def get_trtllm_moe_sm100_module():
             enable_pdl,
             [-1, -1] if tactic == -1 else tactic,
             fp8_quantization_type,
+            activation_type,
         )
 
         if do_finalize:
@@ -1801,6 +1691,7 @@ def get_trtllm_moe_sm100_module():
         enable_pdl: Optional[bool] = None,
         tune_max_num_tokens: int = 8192,
         fp8_quantization_type: Fp8QuantizationType = Fp8QuantizationType.DeepSeekFp8,
+        activation_type: int = ActivationType.Swiglu.value,
     ) -> List[torch.Tensor]:
         seq_len = hidden_states.shape[0]
         hidden_size = hidden_states.shape[1]
@@ -1888,7 +1779,9 @@ def get_trtllm_moe_sm100_module():
             )
 
         tuner = AutoTuner.get()
-        MoERunner.refine_tuning_config(tune_max_num_tokens)
+        MoERunner.refine_tuning_config(
+            tune_max_num_tokens, use_cold_l2_cache=True, use_cuda_graph=True
+        )
         dtype_act = deduce_trtllm_gen_tensor_dtype(hidden_states, hidden_states_scale)
         dtype_weights = deduce_trtllm_gen_tensor_dtype(
             gemm1_weights, gemm1_weights_scale
@@ -2275,6 +2168,102 @@ def trtllm_bf16_moe(
     result = get_trtllm_moe_sm100_module().trtllm_bf16_moe(
         routing_logits,
         routing_bias,
+        None,
+        None,
+        hidden_states,
+        gemm1_weights,
+        gemm2_weights,
+        num_experts,
+        top_k,
+        n_group,
+        topk_group,
+        intermediate_size,
+        local_expert_offset,
+        local_num_experts,
+        routed_scaling_factor,
+        routing_method_type,
+        use_shuffled_weight,
+        weight_layout,
+        do_finalize,
+        enable_pdl,
+        tune_max_num_tokens,
+    )
+
+    if do_finalize:
+        logger.warning_once(
+            "the single torch.Tensor return type is deprecated and will be replaced with List[torch.Tensor] in the v0.8.0."
+        )
+        return result[0]
+    else:
+        return result
+
+
+@flashinfer_api
+def trtllm_bf16_routed_moe(
+    topk_ids: torch.Tensor,
+    hidden_states: torch.Tensor,
+    gemm1_weights: torch.Tensor,
+    gemm2_weights: torch.Tensor,
+    num_experts: int,
+    top_k: int,
+    n_group: Optional[int],
+    topk_group: Optional[int],
+    intermediate_size: int,
+    local_expert_offset: int,
+    local_num_experts: int,
+    routed_scaling_factor: Optional[float] = None,
+    routing_method_type: int = 0,
+    use_shuffled_weight: bool = True,
+    weight_layout: int = WeightLayout.BlockMajorK,
+    do_finalize: bool = True,
+    enable_pdl: bool = True,
+    tune_max_num_tokens: int = 8192,
+) -> List[torch.Tensor]:
+    """BF16 MoE operation with autotuning support.
+
+    This function implements a bfloat16 Mixture of Experts layer using the TensorRT-LLM backend
+    with automatic performance tuning for optimal tile size selection.
+
+    Args:
+        topk_ids: [seq_len, top_k] tensor of packed expert indices and weights (int32).
+            Format: (expert_id << 16) | (weight_bf16.view(int16))
+            Can be created as: (topk_ids.int32 << 16) | expert_weights.bfloat16.view(int16)
+        hidden_states: [seq_len, hidden_size] tensor of input hidden states.
+            Must be bfloat16.
+        gemm1_weights: [num_experts, 2*intermediate_size // 128, hidden_size // 128, 128] tensor of first layer weights. must be bfloat16.
+        gemm2_weights: [num_experts, hidden_size//128, intermediate_size, 128] tensor of second layer weights. must be bfloat16.
+        num_experts: Total number of experts.
+        top_k: Number of experts to route to per token.
+        n_group: Number of expert groups.
+        topk_group: Number of groups to consider for top-k routing.
+        intermediate_size: Size of intermediate layer.
+        local_expert_offset: Offset of local experts in global expert space.
+        local_num_experts: Number of experts handled by this device.
+        routed_scaling_factor (Optional[float]): Scaling factor for routing (can be None for some routing methods)
+        routing_method_type: Type of routing method to use (default: 0).
+            - 0: Default (Softmax -> TopK)
+            - 1: Renormalize (TopK -> Softmax)
+            - 2: DeepSeekV3 (Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups -> Top8 experts)
+            - 3: Llama4 (Top1 -> Sigmoid)
+            - 4: RenormalizeNaive (Softmax -> TopK -> Renormalize)
+        use_shuffled_weight: Whether to use shuffled weight layout for optimization (default: True).
+        weight_layout: Weight layout format (default: WeightLayout.BlockMajorK).
+            - 0: MajorK - K-major layout [Mn, K]
+            - 1: MajorMn - M-major for A and N-major for B [K, Mn]
+            - 2: BlockMajorK - Blocked along K dimension [K/blockK, Mn, blockK]
+        do_finalize: Whether to finalize the output (default: True).
+        enable_pdl: Whether to enable Programmatic Dependent Launch. Auto-enabled for >= sm90.
+        tune_max_num_tokens: Maximum number of tokens for autotuning (default: 8192).
+
+    Returns:
+        when do_finalize=True, returns the final MoE output.
+        otherwise, returns the intermediate results (gemm2_output, undefined, expanded_idx_to_permuted_idx) that need further processing.
+    """
+    result = get_trtllm_moe_sm100_module().trtllm_bf16_moe(
+        None,
+        None,
+        topk_ids,
+        None,
         hidden_states,
         gemm1_weights,
         gemm2_weights,
@@ -2422,6 +2411,7 @@ def trtllm_fp8_block_scale_moe(
     enable_pdl: Optional[bool] = None,
     tune_max_num_tokens: int = 8192,
     fp8_quantization_type: Fp8QuantizationType = Fp8QuantizationType.DeepSeekFp8,
+    activation_type: int = ActivationType.Swiglu.value,
 ) -> Union[List[torch.Tensor], torch.Tensor]:
     """FP8 block scale MoE operation.
 
@@ -2431,8 +2421,10 @@ def trtllm_fp8_block_scale_moe(
         hidden_states: [seq_len, hidden_size] tensor of input hidden states
         hidden_states_scale: [hidden_size//128, seq_len] tensor of hidden states block scales
         gemm1_weights: tensor of first layer weights
-            - [num_experts, 2*intermediate_size, hidden_size] if weight_layout == WeightLayout.MajorK
-            - [num_experts, 2*intermediate_size // 128, hidden_size, 128] if weight_layout == WeightLayout.BlockMajorK
+            - [num_experts, M, hidden_size] if weight_layout == WeightLayout.MajorK
+            - [num_experts, M // 128, hidden_size, 128] if weight_layout == WeightLayout.BlockMajorK
+            where M is `2*intermediate_size` for gated activations and
+            `intermediate_size` for non-gated activations (e.g. Relu2/Identity).
         gemm1_weights_scale: [num_experts, 2*intermediate_size//(32 if mxfp8 else 128), hidden_size//(32 if mxfp8 else 128)] tensor of first layer block scales
         gemm2_weights: tensor of second layer weights
             - [num_experts, hidden_size, intermediate_size] if weight_layout == WeightLayout.MajorK
@@ -2454,6 +2446,11 @@ def trtllm_fp8_block_scale_moe(
         enable_pdl: Whether to enable Programmatic Dependent Launch (PDL). Auto-enabled for >= sm90.
         tune_max_num_tokens(int): Maximum number of tokens for tuning. (default: 8192)
         fp8_quantization_type: Type of FP8 quantization to use (default: DeepSeekFp8)
+        activation_type (int): Type of activation function (default: 3 - Swiglu)
+            - 3: Swiglu
+            - 4: Geglu
+            - 6: Relu2
+            - 7: Identity
     Returns:
         when do_finalize=True, returns the final MoE output.
         otherwise, returns the intermediate results (gemm2_output, expert_weights, expanded_idx_to_permuted_idx) that need further processing.
@@ -2488,6 +2485,7 @@ def trtllm_fp8_block_scale_moe(
         enable_pdl,
         tune_max_num_tokens,
         fp8_quantization_type,
+        activation_type,
     )
 
     if do_finalize:
@@ -2525,6 +2523,7 @@ def trtllm_fp8_block_scale_routed_moe(
     output: Optional[torch.Tensor] = None,
     tune_max_num_tokens: int = 8192,
     fp8_quantization_type: Fp8QuantizationType = Fp8QuantizationType.DeepSeekFp8,
+    activation_type: int = ActivationType.Swiglu.value,
 ) -> Union[List[torch.Tensor], torch.Tensor]:
     """FP8 block scale MoE operation with pre-computed routing (packed format).
 
@@ -2540,7 +2539,9 @@ def trtllm_fp8_block_scale_routed_moe(
         routing_bias: [num_experts] tensor of routing bias (can be None)
         hidden_states: [seq_len, hidden_size] tensor of input hidden states
         hidden_states_scale: [hidden_size//(32 if mxfp8 else 128), seq_len] tensor of hidden states block scales
-        gemm1_weights: [num_experts, 2*intermediate_size, hidden_size] tensor of first layer weights
+        gemm1_weights: [num_experts, M, hidden_size] tensor of first layer weights where
+            M is `2*intermediate_size` for gated activations and
+            `intermediate_size` for non-gated activations.
         gemm1_weights_scale: [num_experts, 2*intermediate_size//(32 if mxfp8 else 128), hidden_size//(32 if mxfp8 else 128)] tensor of first layer block scales
         gemm2_weights: [num_experts, hidden_size, intermediate_size] tensor of second layer weights
         gemm2_weights_scale: [num_experts, hidden_size//(32 if mxfp8 else 128), intermediate_size//(32 if mxfp8 else 128)] tensor of second layer block scales
@@ -2561,6 +2562,11 @@ def trtllm_fp8_block_scale_routed_moe(
             Optional inplace output tensor.
         tune_max_num_tokens(int): Maximum number of tokens for tuning. (default: 8192)
         fp8_quantization_type: Type of FP8 quantization to use (default: DeepSeekFp8)
+        activation_type (int): Type of activation function (default: 3 - Swiglu)
+            - 3: Swiglu
+            - 4: Geglu
+            - 6: Relu2
+            - 7: Identity
     Returns:
         when do_finalize=True, returns the final MoE output.
         otherwise, returns the intermediate results (gemm2_output, undefined, expanded_idx_to_permuted_idx) that need further processing.
@@ -2592,6 +2598,7 @@ def trtllm_fp8_block_scale_routed_moe(
         enable_pdl,
         tune_max_num_tokens,
         fp8_quantization_type,
+        activation_type,
     )
 
     if do_finalize:

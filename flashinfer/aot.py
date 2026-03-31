@@ -53,8 +53,11 @@ from .jit.fp4_quantization import (
     gen_fp4_quantization_sm103_module,
     gen_fp4_quantization_sm110_module,
     gen_fp4_quantization_sm120_module,
+    gen_fp4_quantization_sm120f_module,
     gen_fp4_quantization_sm121_module,
 )
+from .jit.fp4_kv_dequantization import gen_fp4_kv_dequantization_module
+from .jit.fp4_kv_quantization import gen_fp4_kv_quantization_module
 from .jit.fp8_quantization import gen_mxfp8_quantization_sm100_module
 from .jit.fused_moe import (
     gen_cutlass_fused_moe_sm90_module,
@@ -452,6 +455,7 @@ def gen_all_modules(
     has_sm103 = sm_capabilities.get("sm103", False)
     has_sm110 = sm_capabilities.get("sm110", False)
     has_sm120 = sm_capabilities.get("sm120", False)
+    has_sm120f = sm_capabilities.get("sm120f", False)
     has_sm121 = sm_capabilities.get("sm121", False)
 
     jit_specs += list(
@@ -512,11 +516,17 @@ def gen_all_modules(
             jit_specs.append(gen_fp4_quantization_sm110_module())
         if has_sm120:
             jit_specs.append(gen_fp4_quantization_sm120_module())
+        if has_sm121:
+            jit_specs.append(gen_fp4_quantization_sm121_module())
+        if has_sm120 or has_sm121:
+            # SM120 and SM121 share the same CUTLASS kernels for fused MOE and GEMM.
+            # The SM120 module generators use supported_major_versions=[12] which
+            # compiles for all SM12x targets.
             jit_specs.append(gen_cutlass_fused_moe_sm120_module())
             jit_specs.append(gen_gemm_sm120_module())
             jit_specs.append(gen_gemm_sm120_module_cutlass_fp4())
-        if has_sm121:
-            jit_specs.append(gen_fp4_quantization_sm121_module())
+        if has_sm120f:
+            jit_specs.append(gen_fp4_quantization_sm120f_module())
 
     if add_comm:
         from .jit.comm import (
@@ -548,40 +558,75 @@ def gen_all_modules(
         ]
         # selective_state_update: one module per dtype combo per GPU arch
         _ssu_dtype_combos = [
-            # (state,        input,          weight,         matrixA,      stateIndex)
+            # (state,        input,          weight,         matrixA,      stateIndex, state_scale_dtype)
             (
                 torch.bfloat16,
                 torch.bfloat16,
                 torch.bfloat16,
                 torch.float32,
                 torch.int64,
+                None,
             ),
-            (torch.float32, torch.bfloat16, torch.bfloat16, torch.float32, torch.int64),
+            # int16 state (block-scaled quantization, scale stored as float32)
+            (
+                torch.int16,
+                torch.bfloat16,
+                torch.bfloat16,
+                torch.float32,
+                torch.int64,
+                torch.float32,
+            ),
+            (
+                torch.float32,
+                torch.bfloat16,
+                torch.bfloat16,
+                torch.float32,
+                torch.int64,
+                None,
+            ),
         ]
         _ssu_dims = [64]
         _ssu_dstates = [128]
         _ssu_ntokens = [1, 4, 6, 8]
-        for dtype_combo, dim, dstate, ntokens in product(
-            _ssu_dtype_combos, _ssu_dims, _ssu_dstates, _ssu_ntokens
+        _ssu_cu_seqlens_dtypes = [torch.int32, torch.int64]
+        _ssu_num_accepted_dtypes = [torch.int32, torch.int64]
+        for dtype_combo, dim, dstate, ntokens, cs_dtype, na_dtype in product(
+            _ssu_dtype_combos,
+            _ssu_dims,
+            _ssu_dstates,
+            _ssu_ntokens,
+            _ssu_cu_seqlens_dtypes,
+            _ssu_num_accepted_dtypes,
         ):
             jit_specs.append(
                 # false positive: mypy can't resolve the signature because flashinfer.jit deps (filelock etc.)
                 # are absent in mypy's isolated env, causing it to infer an incorrect function signature
-                gen_selective_state_update_module(*dtype_combo, dim, dstate, ntokens)  # type: ignore[call-arg]
+                gen_selective_state_update_module(
+                    *dtype_combo, dim, dstate, ntokens, cs_dtype, na_dtype
+                )  # type: ignore[call-arg]
             )
         if has_sm90 or has_sm100:
-            for dtype_combo, dim, dstate, ntokens in product(
-                _ssu_dtype_combos, _ssu_dims, _ssu_dstates, _ssu_ntokens
+            for dtype_combo, dim, dstate, ntokens, cs_dtype, na_dtype in product(
+                _ssu_dtype_combos,
+                _ssu_dims,
+                _ssu_dstates,
+                _ssu_ntokens,
+                _ssu_cu_seqlens_dtypes,
+                _ssu_num_accepted_dtypes,
             ):
                 jit_specs.append(
                     # same false positive as above
                     gen_selective_state_update_sm90_module(  # type: ignore[call-arg]
-                        *dtype_combo, dim, dstate, ntokens
+                        *dtype_combo, dim, dstate, ntokens, cs_dtype, na_dtype
                     )
                 )
             jit_specs.append(gen_trtllm_utils_module())
         if has_sm90:
             jit_specs.append(gen_gdn_prefill_sm90_module())
+        # FP4 KV cache quantization/dequantization
+        jit_specs.append(gen_fp4_kv_dequantization_module())
+        if has_sm100 or has_sm103 or has_sm110 or has_sm120 or has_sm121:
+            jit_specs.append(gen_fp4_kv_quantization_module())
 
     if (
         add_xqa and get_cuda_version() > Version("12.8")
@@ -795,6 +840,7 @@ def detect_sm_capabilities():
         "sm103": has_sm("compute_103", "12.9"),
         "sm110": has_sm("compute_110", "13.0"),
         "sm120": has_sm("compute_120", "12.8"),
+        "sm120f": has_sm("compute_120f", "12.9"),
         "sm121": has_sm("compute_121", "12.9"),
     }
 

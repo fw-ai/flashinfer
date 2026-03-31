@@ -33,14 +33,35 @@ def gen_moe_utils_module() -> JitSpec:
     - moeActivation: Apply activation functions with optional FP4 quantization
     - moeSort: Sort tokens by expert assignment (DeepSeekV3 routing)
     """
+    # Lazy imports to avoid circular dependency:
+    # artifacts.py imports from jit.cubin_loader, which triggers jit/__init__.py,
+    # which imports this module — so ArtifactPath/CheckSumHash aren't defined yet
+    # at module load time if these imports are at the top level.
+    from .cubin_loader import download_trtllm_headers, get_cubin
+    from ..artifacts import ArtifactPath, CheckSumHash
+
+    download_trtllm_headers(
+        "bmm",
+        jit_env.FLASHINFER_CUBIN_DIR
+        / "flashinfer"
+        / "trtllm"
+        / "batched_gemm"
+        / "trtllmGen_bmm_export",
+        f"{ArtifactPath.TRTLLM_GEN_BMM}/include/trtllmGen_bmm_export",
+        ArtifactPath.TRTLLM_GEN_BMM,
+        get_cubin(
+            f"{ArtifactPath.TRTLLM_GEN_BMM}/checksums.txt", CheckSumHash.TRTLLM_GEN_BMM
+        ),
+    )
     nvcc_flags = [
+        "-DTLLM_GEN_EXPORT_INTERFACE",  # Use relative includes in downloaded headers
         "-DENABLE_BF16",
         "-DENABLE_FP8",
         "-DENABLE_FP4",
     ]
 
     nvcc_flags += current_compilation_context.get_nvcc_flags_list(
-        supported_major_versions=[9, 10, 11, 12]
+        supported_major_versions=[10]
     )
 
     return gen_jit_spec(
@@ -55,7 +76,20 @@ def gen_moe_utils_module() -> JitSpec:
             jit_env.FLASHINFER_CSRC_DIR / "nv_internal/cpp/common/tllmException.cpp",
             jit_env.FLASHINFER_CSRC_DIR / "nv_internal/cpp/common/memoryUtils.cu",
             # Routing kernels for moe_sort
-            jit_env.FLASHINFER_CSRC_DIR / "trtllm_fused_moe_routing_deepseek.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/trtllm_fused_moe_routing_deepseek.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchMainKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchClusterKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchCoopKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchHistogramKernel.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchInitExpertCounts.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / "fused_moe/trtllm_backend/routingDeepSeek/launchOffsetsKernel.cu",
         ],
         extra_cuda_cflags=nvcc_flags,
         extra_include_paths=[
@@ -78,13 +112,7 @@ def gen_moe_utils_module() -> JitSpec:
             / "tensorrt_llm"
             / "kernels"
             / "cutlass_kernels",
-            # Include paths for routing kernels
-            jit_env.FLASHINFER_INCLUDE_DIR,
-            # Include path for trtllm/gen/MmaDecl.h (used by DtypeDecl.h)
-            jit_env.FLASHINFER_INCLUDE_DIR
-            / "flashinfer"
-            / "trtllm"
-            / "batched_gemm"
-            / "trtllmGen_bmm_export",
+            # Include paths for routing kernels and downloaded headers
+            jit_env.FLASHINFER_CUBIN_DIR,
         ],
     )
