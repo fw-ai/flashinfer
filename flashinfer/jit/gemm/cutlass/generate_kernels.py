@@ -1053,7 +1053,11 @@ def generate_gemm_operations(output_dir, architectures):
     operations += generate_sm80_operations(has_arch(80) or has_arch(89))
 
     def should_skip(op):
-        return False  # All kernels have a public implementation
+        return (
+            not isinstance(op, GemmSm80LauncherConfig)
+            and op.arch == 90
+            and is_mixed_dtype_grouped(op)
+        )
 
     # The mixed dtype grouped gemm for w4afp8 has a different launcher
     def is_mixed_dtype_grouped(op):
