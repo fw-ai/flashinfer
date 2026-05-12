@@ -272,6 +272,7 @@ def trtllm_batch_decode_mla(
     MAX_SEQ_LEN: int,
     skips_softmax: bool,
     uses_shared_paged_kv_idx: bool = True,
+    use_preallocated_lse: bool = False,
 ):
     compute_capability = get_compute_capability(torch.device(device="cuda"))
     if backend == "xqa":
@@ -389,9 +390,17 @@ def trtllm_batch_decode_mla(
 
     # Using a tiny threshold should give the same output as standard attention
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
+    lse_input = None
+    if use_preallocated_lse:
+        lse_input = torch.empty(
+            batch_size,
+            q_len_per_request,
+            layer_dimensions.num_heads,
+            device=device,
+            dtype=torch.float32,
+        )
 
-    # Run decode-MLA
-    output = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+    mla_kwargs = dict(
         query=query,
         kv_cache=kv_cache.unsqueeze(1),
         workspace_buffer=workspace_buffer,
@@ -404,10 +413,20 @@ def trtllm_batch_decode_mla(
         bmm1_scale=scale / ((128 + 64) ** 0.5),
         bmm2_scale=1.0,
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+        lse=lse_input,
         enable_pdl=enable_pdl,
         backend=backend,
         uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
     )
+    # Run decode-MLA
+    if backend == "trtllm-gen":
+        output, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+            return_lse=True,
+            **mla_kwargs,
+        )
+    else:
+        output = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(**mla_kwargs)
+        lse = None
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
     if backend == "trtllm-gen":
@@ -464,7 +483,7 @@ def trtllm_batch_decode_mla(
     ckv = kv_cache[..., : layer_dimensions.head_dimensions.kv_lora_rank]
     kpe = kv_cache[..., layer_dimensions.head_dimensions.kv_lora_rank :]
 
-    o_ref = wrapper.run(q_nope, q_pe, ckv, kpe, return_lse=False)
+    o_ref, lse_ref = wrapper.run(q_nope, q_pe, ckv, kpe, return_lse=True)
 
     # cute-dsl fp8 kernel outputs fp8; cast to bf16 to match trtllm-gen / reference
     if backend == "cute-dsl" and output.dtype == torch.float8_e4m3fn:
@@ -514,6 +533,24 @@ def trtllm_batch_decode_mla(
                 print("output:", output)
                 print("o_ref:", o_ref)
                 raise fa2_err
+
+        if backend == "trtllm-gen":
+            assert lse is not None, "LSE should be returned when return_lse=True"
+            if lse_input is not None:
+                assert lse.data_ptr() == lse_input.data_ptr(), (
+                    "Expected output LSE to reuse provided tensor"
+                )
+            assert not torch.isnan(lse).any(), "LSE contains NaN values"
+            # trtllm lse: [batch_size, q_len, num_q_heads]
+            # ref lse:    [batch_size * q_len_per_request, num_q_heads]
+            lse_flat = lse.view(
+                batch_size * q_len_per_request, layer_dimensions.num_heads
+            )
+            if dtype == torch.float8_e4m3fn:
+                lse_rtol, lse_atol = 5e-2, 5e-2
+            else:
+                lse_rtol, lse_atol = 1e-3, 1e-3
+            torch.testing.assert_close(lse_flat, lse_ref, rtol=lse_rtol, atol=lse_atol)
     elif backend == "xqa":
         atol = 0.05
         rtol = 0.05
@@ -834,6 +871,24 @@ def test_trtllm_batch_decode_mla(
         1024,
         skips_softmax,
         uses_shared_paged_kv_idx=uses_shared_paged_kv_idx,
+    )
+
+
+def test_trtllm_batch_decode_mla_preallocated_lse_regression():
+    trtllm_batch_decode_mla(
+        layer_dimensions=supported_mla_layer_dimensions[0],
+        batch_size=8,
+        scale=1.0,
+        dtype=torch.bfloat16,
+        page_size=64,
+        q_len_per_request=2,
+        dynamic_scale=False,
+        enable_pdl=True,
+        backend="trtllm-gen",
+        MAX_SEQ_LEN=1024,
+        skips_softmax=False,
+        uses_shared_paged_kv_idx=True,
+        use_preallocated_lse=True,
     )
 
 

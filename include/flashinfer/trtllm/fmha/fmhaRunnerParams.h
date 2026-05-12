@@ -224,6 +224,10 @@ struct TllmGenFmhaRunnerParams {
   float2* softmaxStatsPtr;
   // The LSE buffer.
   float* lsePtr;
+  // The stride between different tokens for LSE.
+  int lseStrideTokens;
+  // The stride between different heads for LSE.
+  int lseStrideHeads;
 
   // SageAttention scaling factors (null when SageAttention is not used).
   float const* ptrSageAttnSfsQ;

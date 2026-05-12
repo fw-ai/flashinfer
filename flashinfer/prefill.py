@@ -280,6 +280,7 @@ def get_trtllm_gen_prefill_module():
             skip_softmax_threshold_scale_factor,
             uses_shared_paged_kv_idx,
             is_causal,
+            None,  # lse
         )
         return out
 
@@ -4014,7 +4015,11 @@ def trtllm_batch_context_with_kv_cache(
     skip_softmax_threshold_scale_factor: Optional[float] = None,
     uses_shared_paged_kv_idx: bool = True,
     causal: bool = True,
-) -> Union[torch.Tensor, FP4Tensor]:
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
+) -> Union[
+    torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]
+]:
     """
     Parameters
     ----------
@@ -4118,10 +4123,18 @@ def trtllm_batch_context_with_kv_cache(
         Whether to apply a causal mask. This trailing parameter preserves existing positional
         callers. Set to ``False`` to request dense / bidirectional attention. For the TRTLLM-gen
         paged context path, non-causal currently requires ``window_left == -1``.
+
+    return_lse : bool = False
+        Whether to return the log-sum-exp of the attention scores.
+
+    lse : Optional[torch.Tensor] = None
+        Optional output tensor for log-sum-exp values.
+        Shape: ``[num_tokens, num_qo_heads]``.
     Returns
     -------
-    out: Union[torch.Tensor, FP4Tensor]
-        output torch.Tensor or FP4Tensor.
+    out: Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]
+        Output torch.Tensor or FP4Tensor. If ``return_lse`` is ``True``, returns
+        ``(out, lse)``.
     """
 
     if enable_pdl is None:
@@ -4252,6 +4265,21 @@ def trtllm_batch_context_with_kv_cache(
         assert bmm2_scale.dtype == torch.float32
     _check_block_tables_shape(block_tables, uses_shared_paged_kv_idx)
     workspace_size = workspace_buffer.numel() * workspace_buffer.element_size()
+
+    expected_lse_shape = [query.shape[0], query.shape[1]]
+    if return_lse and lse is None:
+        lse = torch.empty(
+            *expected_lse_shape,
+            device=query.device,
+            dtype=torch.float32,
+        )
+    if lse is not None:
+        check_shape_dtype_device(
+            lse, expected_lse_shape, torch.float32, query.device, "lse"
+        )
+        if not lse.is_contiguous():
+            raise ValueError("lse must be contiguous for trtllm-gen backend.")
+
     run_func(
         out,
         out_scale_factor,
@@ -4281,12 +4309,18 @@ def trtllm_batch_context_with_kv_cache(
         skip_softmax_threshold_scale_factor,
         uses_shared_paged_kv_idx,
         causal,
+        lse,
     )
-    return (
+
+    out = (
         out
         if out_dtype != "nvfp4"
         else FP4Tensor(out, out_scale_factor, o_sf_start_index, query.shape)
     )
+    if return_lse:
+        return out, lse
+    else:
+        return out
 
 
 @functools.cache
