@@ -68,8 +68,8 @@ std::vector<int64_t> prioritizePredefinedConfigs(
   if (n /* out_dim */ == 0 && k /* in_dim */ == 0) {
     auto pred = [](BatchedGemmConfig const& config) {
       BatchedGemmOptions const& options = config.mOptions;
-      return options.mNumStages == 4 && options.mNumStagesMma == 2 && options.mTileK == 256 &&
-             options.mTileScheduler == TileScheduler::Persistent;
+      return options.mNumStagesA == 4 && options.mNumStagesB == 4 && options.mNumStagesMma == 2 &&
+             options.mTileK == 256 && options.mTileScheduler == TileScheduler::Persistent;
     };
     prioritizedIndices = bubbleUpConfig(sortedIndices, pred);
   }
@@ -91,9 +91,11 @@ TrtllmGenBatchedGemmRunner::TrtllmGenBatchedGemmRunner(
   auto const configs = bmm.getBatchedGemmConfigs();
 
   mPassingConfigIndices.clear();
+  auto sm_version = getSMVersion();
 
   for (size_t i = 0; i < bmm.getNumBatchedGemmConfigs(); ++i) {
-    auto const options = configs[i].mOptions;
+    auto const config = configs[i];
+    auto const options = config.mOptions;
     auto const tileSize = mOptions.transposeMmaOutput ? options.mTileN : options.mTileM;
     // When we include low-latency kernels we can set transposeMmaOutput via constructor
     if (options.mDtypeA == mOptions.dtypeA && options.mDtypeB == mOptions.dtypeB &&
@@ -103,6 +105,14 @@ TrtllmGenBatchedGemmRunner::TrtllmGenBatchedGemmRunner(
         options.mFusedAct == mOptions.fusedAct && options.mIsStaticBatch == mOptions.staticBatch &&
         tileSize == mOptions.tileSize && options.mUseShuffledMatrix == mOptions.useShuffledMatrix &&
         options.mLayoutA == mOptions.weightLayout) {
+      if (mOptions.usePerTokenScaling) {
+        if (options.mTransposeMmaOutput && !options.mUsePerTokenSfB) continue;
+        if (!options.mTransposeMmaOutput && !options.mUsePerTokenSfA) continue;
+      }
+      if (mOptions.usePerChannelScaling) {
+        if (options.mTransposeMmaOutput && !options.mUsePerTokenSfA) continue;
+        if (!options.mTransposeMmaOutput && !options.mUsePerTokenSfB) continue;
+      }
       if (options.mFusedAct) {
         if (options.mActType != static_cast<batchedGemm::gemmGatedAct::ActType>(mOptions.actType)) {
           continue;
@@ -111,8 +121,17 @@ TrtllmGenBatchedGemmRunner::TrtllmGenBatchedGemmRunner(
       if ((int64_t)options.mEltwiseActType != (int64_t)mOptions.eltwiseActType) {
         continue;
       }
-
+      // if patchF2fp is enabled, sm100f cubins cannot be used for sm103
+      if (options.mPatchF2fp && sm_version == 103) {
+        if (config.mSm != tg::CudaArch::Sm103a) continue;
+      }
+      if (options.mPatchF2fp && sm_version == 100) {
+        if (config.mSm != tg::CudaArch::Sm100a && config.mSm != tg::CudaArch::Sm100f) continue;
+      }
       if (mOptions.transposeMmaOutput && options.mEpilogueTileM == mOptions.epilogueTileM) {
+        // Skip cubins with clusterZ > 1 due to correctness issues described in
+        // https://github.com/flashinfer-ai/flashinfer/issues/3197
+        if (options.mClusterDimZ > 1) continue;
         mPassingConfigIndices.push_back(i);
       }
     }
@@ -128,7 +147,9 @@ TrtllmGenBatchedGemmRunner::TrtllmGenBatchedGemmRunner(
             << ", mEltwiseActType: " << (int64_t)mOptions.eltwiseActType
             << ", mTransposeMmaOutput: " << mOptions.transposeMmaOutput
             << ", mRouteAct: " << mOptions.routeAct << ", mFusedAct: " << mOptions.fusedAct
-            << ", mIsStaticBatch: " << mOptions.staticBatch << ", mTileSize: " << mOptions.tileSize;
+            << ", mIsStaticBatch: " << mOptions.staticBatch << ", mTileSize: " << mOptions.tileSize
+            << ", mUsePerTokenScaling: " << mOptions.usePerTokenScaling
+            << ", mUsePerChannelScaling: " << mOptions.usePerChannelScaling;
   FLASHINFER_CHECK(!mPassingConfigIndices.empty(), error_msg.str());
 }
 
@@ -214,6 +235,9 @@ void TrtllmGenBatchedGemmRunner::run(
   gemmData.mProblemDimensions.mM = mOptions.transposeMmaOutput ? n : m;
   gemmData.mProblemDimensions.mN = mOptions.transposeMmaOutput ? m : n;
   gemmData.mProblemDimensions.mK = k;
+  gemmData.mProblemDimensions.mValidM = gemmData.mProblemDimensions.mM;
+  gemmData.mProblemDimensions.mValidN = gemmData.mProblemDimensions.mN;
+  gemmData.mProblemDimensions.mValidK = gemmData.mProblemDimensions.mK;
   gemmData.mProblemDimensions.mRank = 0;
   gemmData.mProblemDimensions.mWorldSize = 1;
 
@@ -252,15 +276,12 @@ void TrtllmGenBatchedGemmRunner::run(
   int32_t multiProcessorCount;
   cudaDeviceGetAttribute(&multiProcessorCount, cudaDevAttrMultiProcessorCount, device);
 
-  gemmData.mProblemDimensions.mValidM = gemmData.mProblemDimensions.mM;
-  gemmData.mProblemDimensions.mValidN = gemmData.mProblemDimensions.mN;
-  gemmData.mProblemDimensions.mValidK = gemmData.mProblemDimensions.mK;
-
   // FIXME once we start using all-reduce in the epilogue of the bmm this can be moved elsewhere
   bmm.runInitBeforeWorldSync(config, gemmData, static_cast<void*>(stream));
 
-  auto const err = bmm.run(config, workspace, gemmData, static_cast<void*>(stream),
-                           multiProcessorCount, enable_pdl, globalTrtllmGenBatchedGemmModuleCache);
+  auto const err =
+      bmm.run(config, workspace, gemmData, static_cast<void*>(stream), multiProcessorCount,
+              enable_pdl, /*pinnedHostBuffer=*/nullptr, globalTrtllmGenBatchedGemmModuleCache);
 
   FLASHINFER_CHECK(err == 0,
                    "Error occurred when running GEMM!"
@@ -449,6 +470,9 @@ bool TrtllmGenBatchedGemmRunner::isValidConfigIndex(int32_t configIndex, int32_t
   gemmData.mProblemDimensions.mM = mOptions.transposeMmaOutput ? n : m;
   gemmData.mProblemDimensions.mN = mOptions.transposeMmaOutput ? m : n;
   gemmData.mProblemDimensions.mK = k;
+  gemmData.mProblemDimensions.mValidM = gemmData.mProblemDimensions.mM;
+  gemmData.mProblemDimensions.mValidN = gemmData.mProblemDimensions.mN;
+  gemmData.mProblemDimensions.mValidK = gemmData.mProblemDimensions.mK;
   gemmData.mProblemDimensions.mRank = 0;
   gemmData.mProblemDimensions.mWorldSize = 1;
   gemmData.mProblemDimensions.mMaxNumCtasInTokenDim = maxNumCtasInBatchDim;

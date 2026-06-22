@@ -51,14 +51,21 @@ Example (Wrapper API with CUDA Graph):
 
 from typing import Any, Dict, Optional, Tuple
 
+import weakref
+
 import torch
 
 from ...api_logging import flashinfer_api
-from ...autotuner import AutoTuner
+from ...trace.templates.moe import (
+    cute_dsl_fused_moe_nvfp4_trace,
+    cute_dsl_moe_wrapper_run_trace,
+)
+from ...autotuner import AutoTuner, is_in_profile_measurement
+from ...utils import supported_compute_capability
 from .moe_utils import (
     allocate_moe_sort_buffers,
     get_max_num_permuted_tokens,
-    moe_output_memset,
+    moe_output_memset_inplace,
     moe_sort,
 )
 from .blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion import (
@@ -70,6 +77,7 @@ from .blockscaled_contiguous_grouped_gemm_finalize_fusion import (
 from .tuner import (
     ALL_MOE_TACTICS,
     CuteDslFusedMoENvfp4Runner,
+    VALID_TILE_SIZES,
 )
 
 
@@ -137,13 +145,14 @@ def _moe_core_impl(
     # Options
     output_dtype: torch.dtype = torch.bfloat16,
     use_async_memset: bool = True,
+    enable_pdl: bool = True,
 ) -> torch.Tensor:
     """Core MoE implementation shared by functional and wrapper APIs.
 
     This function handles:
     1. moe_sort: Token routing computation
     2. GEMM1 + SwiGLU: First projection with activation
-    3. Async moe_output_memset: Zero output buffer (overlapped with GEMM1)
+    3. Async output zero: Zero output buffer (overlapped with GEMM1)
     4. GEMM2 + Finalize: Second projection with atomic scatter
 
     Args:
@@ -183,12 +192,19 @@ def _moe_core_impl(
     num_tokens = token_selected_experts.size(0)
     hidden_size = w2_weight.size(1)
 
-    # Allocate output if not provided
+    # Allocate output if not provided.  The caller (wrapper or functional
+    # API) should pass a [:num_tokens] slice of the pre-allocated buffer
+    # when using CUDA graphs.  The buffer is zeroed in Step 3 below.
     if moe_output is None:
         moe_output = torch.empty(
             (num_tokens, hidden_size),
             dtype=output_dtype,
             device=x.device,
+        )
+    else:
+        assert moe_output.size(0) == num_tokens, (
+            f"moe_output must be sliced to num_tokens rows before calling "
+            f"_moe_core_impl (got {moe_output.size(0)}, expected {num_tokens})"
         )
 
     # Get stream resources if using async memset
@@ -243,31 +259,32 @@ def _moe_core_impl(
             c_dtype="float4_e2m1fn",
             mma_tiler_mn=gemm1_mma_tiler_mn,
             cluster_shape_mn=gemm1_cluster_shape_mn,
+            enable_pdl=enable_pdl,
         )
     )
 
-    # Step 3: Async moe_output_memset on auxiliary stream
+    # Step 3: Zero the active output slice before GEMM2 finalize.
+    # Finalize uses atomic scatter-add into `moe_output`, so it must start
+    # from zero each call. We zero only the active slice, not the full
+    # preallocated buffer.
+    #
+    # `moe_output_memset_inplace` mirrors TRT-LLM's `moe_output_memset_inplace`
+    # Path A (dense cudaMemsetAsync). TRT-LLM's Path B (sparse moeOutputMemset
+    # kernel for the internal-alltoall case) is not exposed here — current
+    # callers of this API handle all-to-all outside this function.
+    #
+    # The wrapper issues cudaMemsetAsync on the current PyTorch CUDA stream,
+    # so the `with torch.cuda.stream(aux_stream):` context below correctly
+    # places the memset on the aux stream for overlap with the main-stream
+    # GEMM1.
     if use_async_memset:
-        max_num_permuted_tokens = get_max_num_permuted_tokens(
-            num_tokens, top_k, num_local_experts, tile_size
-        )
         with torch.cuda.stream(aux_stream):
             main_event.wait()
-            moe_output_memset(
-                output=moe_output,
-                tile_idx_to_mn_limit=tile_idx_to_mn_limit,
-                expanded_idx_to_permuted_idx=expanded_idx_to_permuted_idx,
-                permuted_idx_to_expanded_idx=permuted_idx_to_expanded_idx,
-                num_non_exiting_tiles=num_non_exiting_tiles,
-                max_num_permuted_tokens=max_num_permuted_tokens,
-                top_k=top_k,
-                tile_size=tile_size,
-            )
+            moe_output_memset_inplace(moe_output)
             memset_event.record()
         memset_event.wait()
     else:
-        # Simple zero without async
-        moe_output[:num_tokens].zero_()
+        moe_output_memset_inplace(moe_output)
 
     # Step 4: GEMM2 + Finalize
     blockscaled_contiguous_grouped_gemm_finalize_fusion_nvfp4(
@@ -284,6 +301,7 @@ def _moe_core_impl(
         out=moe_output,
         mma_tiler_mn=gemm2_mma_tiler_mn,
         cluster_shape_mn=gemm2_cluster_shape_mn,
+        enable_pdl=enable_pdl,
     )
 
     return moe_output[:num_tokens]
@@ -300,6 +318,8 @@ class CuteDslMoEWrapper:
     This wrapper pre-allocates all necessary buffers when `use_cuda_graph=True`,
     enabling CUDA graph capture and replay. It also supports auto-tuning via
     the `tactic` parameter or by calling inside `autotune()` context.
+
+    Supported architectures: SM100, SM103.
 
     Attributes:
         num_experts: Total number of experts.
@@ -332,6 +352,7 @@ class CuteDslMoEWrapper:
         ...     output = moe.run(x, x_sf, topk_ids, topk_weights, w1, w1_sf, ...)
     """
 
+    @supported_compute_capability([100, 103])
     @flashinfer_api
     def __init__(
         self,
@@ -347,6 +368,7 @@ class CuteDslMoEWrapper:
         sf_vec_size: int = 16,
         output_dtype: torch.dtype = torch.bfloat16,
         device: str = "cuda",
+        enable_pdl: bool = True,
     ):
         """Initialize the MoE wrapper.
 
@@ -363,6 +385,7 @@ class CuteDslMoEWrapper:
             sf_vec_size: Scale factor vector size. Default: 16.
             output_dtype: Output data type. Default: torch.bfloat16.
             device: Device for buffer allocation. Default: "cuda".
+            enable_pdl: Enable Programmatic Dependent Launch. Default: True.
         """
         self.num_experts = num_experts
         self.top_k = top_k
@@ -376,6 +399,7 @@ class CuteDslMoEWrapper:
         self.sf_vec_size = sf_vec_size
         self.output_dtype = output_dtype
         self.device = device
+        self.enable_pdl = enable_pdl
 
         # Pre-allocated buffers
         self._moe_sort_buffers: Optional[Dict[str, torch.Tensor]] = None
@@ -386,45 +410,93 @@ class CuteDslMoEWrapper:
         self._main_event: Optional[torch.cuda.Event] = None
         self._memset_event: Optional[torch.cuda.Event] = None
 
-        # Create auto-tuner runner
+        wrapper_ref = weakref.ref(self)
+
+        def _forward_with_tactic_weak(*args, **kwargs):
+            wrapper = wrapper_ref()
+            if wrapper is None:
+                raise RuntimeError(
+                    "CuteDslMoEWrapper was destroyed before runner invocation"
+                )
+            return wrapper._forward_with_tactic(*args, **kwargs)
+
+        # Create auto-tuner runner. Use a weak trampoline instead of a bound
+        # method so the runner cannot keep CUDA graph resources alive after the
+        # wrapper drops out of scope.
         self._runner = CuteDslFusedMoENvfp4Runner(
-            forward_impl=self._forward_with_tactic,
+            forward_impl=_forward_with_tactic_weak,
             num_experts=num_experts,
             top_k=top_k,
             num_local_experts=self.num_local_experts,
             local_expert_offset=local_expert_offset,
             use_fused_finalize=True,
             output_dtype=output_dtype,
+            enable_pdl=enable_pdl,
         )
 
         if use_cuda_graph:
             self._allocate_buffers()
 
     def _allocate_buffers(self) -> None:
-        """Pre-allocate all buffers for CUDA graph compatibility."""
-        max_num_permuted_tokens = get_max_num_permuted_tokens(
-            self.max_num_tokens, self.top_k, self.num_local_experts, self.tile_size
+        """Pre-allocate all buffers for CUDA graph compatibility.
+
+        Buffers are sized to fit *any* ``tile_size in VALID_TILE_SIZES``,
+        not just ``self.tile_size``.  Two distinct buffer-shape concerns:
+
+        - ``max_num_permuted_tokens`` is monotonically *increasing* in
+          ``tile_size`` (the ``(tile - 1) * num_local_experts`` padding
+          term grows faster than ``max_num_tiles`` shrinks), so
+          permuted-token-indexed buffers (``_gemm1_output``,
+          ``_gemm1_output_scale``,
+          ``out_permuted_idx_to_expanded_idx``) must be sized using
+          ``max(VALID_TILE_SIZES)``.
+        - ``max_num_tiles`` is monotonically *decreasing* in
+          ``tile_size``, so the tile-count-indexed moe_sort buffers
+          (``out_tile_idx_to_expert_idx``,
+          ``out_tile_idx_to_mn_limit``) must be sized using
+          ``min(VALID_TILE_SIZES)``.
+
+        Sizing this way means the ``use_prealloc`` gate at
+        ``_forward_with_tactic`` doesn't need a ``tile_size ==
+        self.tile_size`` check at runtime: whichever tactic the
+        autotuner picked, the prealloc fits.  This preserves the
+        wrapper's CUDA-graph contract (``run()`` is graph-safe with
+        ``use_cuda_graph=True``) regardless of which ``tile_size`` the
+        autotuner ends up choosing.
+        """
+        smallest_tile = min(VALID_TILE_SIZES)
+        largest_tile = max(VALID_TILE_SIZES)
+        max_permuted_across_tiles = get_max_num_permuted_tokens(
+            self.max_num_tokens, self.top_k, self.num_local_experts, largest_tile
         )
 
-        # moe_sort buffers
+        # moe_sort buffers — allocate using smallest_tile so the
+        # tile-count-indexed buffers (out_tile_idx_to_expert_idx,
+        # out_tile_idx_to_mn_limit) are large enough for any tile_size,
+        # then override out_permuted_idx_to_expanded_idx (which scales
+        # with tile_size in the opposite direction) to fit the largest
+        # tile_size's max_num_permuted_tokens.
         self._moe_sort_buffers = allocate_moe_sort_buffers(
             num_tokens=self.max_num_tokens,
             num_experts=self.num_experts,
             top_k=self.top_k,
             num_local_experts=self.num_local_experts,
-            tile_tokens_dim=self.tile_size,
+            tile_tokens_dim=smallest_tile,
             device=self.device,
+        )
+        self._moe_sort_buffers["out_permuted_idx_to_expanded_idx"] = torch.empty(
+            (max_permuted_across_tiles,), dtype=torch.int32, device=self.device
         )
 
         # GEMM1 output (FP4 quantized)
         self._gemm1_output = torch.empty(
-            (max_num_permuted_tokens, self.intermediate_size // 2),
+            (max_permuted_across_tiles, self.intermediate_size // 2),
             dtype=torch.uint8,
             device=self.device,
         )
 
         # GEMM1 output scale
-        scale_size = max_num_permuted_tokens * (
+        scale_size = max_permuted_across_tiles * (
             self.intermediate_size // self.sf_vec_size
         )
         self._gemm1_output_scale = torch.empty(
@@ -468,9 +540,34 @@ class CuteDslMoEWrapper:
         output_dtype: torch.dtype = torch.bfloat16,
         use_fused_finalize: bool = True,
         moe_output: Optional[torch.Tensor] = None,
+        enable_pdl: bool = True,
         **kwargs,
     ) -> torch.Tensor:
         """Forward implementation called by auto-tuner."""
+        # Pre-allocated buffers are sized to fit any ``tile_size in
+        # VALID_TILE_SIZES`` (see ``_allocate_buffers``).  Fall back to
+        # dynamic allocation when:
+        #
+        # - the autotuner is in its per-tactic measurement window
+        #   (``is_in_profile_measurement()``): every probed tactic must
+        #   see the same allocation overhead so the comparison is
+        #   unbiased.  Note: this is intentionally narrower than
+        #   ``is_tuning_mode`` -- it excludes cache lookups,
+        #   ``do_preparation`` calls, the final invocation after
+        #   ``choose_one`` returns, and other threads' inference, which
+        #   all benefit from prealloc.
+        # - the tactic's ``tile_size`` is somehow outside the canonical
+        #   enumeration (defensive; should never fire for tactics from
+        #   ``ALL_MOE_TACTICS``).
+        # - the batch exceeds what the buffers were sized for (e.g.
+        #   autotuner probing larger buckets than ``max_num_tokens``).
+        num_tokens = x.shape[0]
+        use_prealloc = (
+            self.use_cuda_graph
+            and not is_in_profile_measurement()
+            and tile_size in VALID_TILE_SIZES
+            and num_tokens <= self.max_num_tokens
+        )
         return _moe_core_impl(
             x=x,
             x_sf=x_sf,
@@ -492,20 +589,22 @@ class CuteDslMoEWrapper:
             gemm1_cluster_shape_mn=gemm1_cluster_shape_mn,
             gemm2_mma_tiler_mn=gemm2_mma_tiler_mn,
             gemm2_cluster_shape_mn=gemm2_cluster_shape_mn,
-            moe_sort_buffers=self._moe_sort_buffers if self.use_cuda_graph else None,
-            gemm1_out=self._gemm1_output if self.use_cuda_graph else None,
-            gemm1_out_scale=self._gemm1_output_scale if self.use_cuda_graph else None,
+            moe_sort_buffers=self._moe_sort_buffers if use_prealloc else None,
+            gemm1_out=self._gemm1_output if use_prealloc else None,
+            gemm1_out_scale=self._gemm1_output_scale if use_prealloc else None,
             moe_output=moe_output
             if moe_output is not None
-            else (self._moe_output if self.use_cuda_graph else None),
+            # Slice the CUDA-graph buffer to the active batch.
+            else (self._moe_output[: x.shape[0]] if use_prealloc else None),
             aux_stream=self._aux_stream,
             main_event=self._main_event,
             memset_event=self._memset_event,
             output_dtype=output_dtype,
             use_async_memset=True,
+            enable_pdl=enable_pdl,
         )
 
-    @flashinfer_api
+    @flashinfer_api(trace=cute_dsl_moe_wrapper_run_trace)
     def run(
         self,
         x: torch.Tensor,
@@ -527,7 +626,7 @@ class CuteDslMoEWrapper:
         Supports auto-tuning via `tactic` parameter or `autotune()` context.
 
         Args:
-            x: Input tensor, NVFP4 quantized [num_tokens, hidden_size // 2].
+            x: NVFP4-quantized input [num_tokens, hidden_size // 2].
             x_sf: Scale factors for x.
             token_selected_experts: Expert assignments [num_tokens, top_k].
             token_final_scales: Routing weights [num_tokens, top_k].
@@ -550,9 +649,10 @@ class CuteDslMoEWrapper:
                 f"num_tokens ({num_tokens}) exceeds max_num_tokens ({self.max_num_tokens})"
             )
 
-        # Allocate output buffer if not using pre-allocated one
+        # Slice the pre-allocated buffer to the active batch so that
+        # _moe_core_impl only zeros num_tokens rows, not max_num_tokens.
         if self.use_cuda_graph:
-            moe_output = self._moe_output
+            moe_output = self._moe_output[:num_tokens]
         else:
             moe_output = torch.empty(
                 (num_tokens, self.hidden_size),
@@ -586,7 +686,7 @@ class CuteDslMoEWrapper:
         _, best_tactic = tuner.choose_one(
             "CuteDslMoEWrapper::run",
             [self._runner],
-            CuteDslFusedMoENvfp4Runner.tuning_config,
+            self._runner.tuning_config,
             inputs,
         )
 
@@ -627,6 +727,7 @@ def _cute_dsl_fused_moe_nvfp4_impl(
     use_fused_finalize: bool = True,
     moe_output: Optional[torch.Tensor] = None,
     aux_stream: Optional[torch.cuda.Stream] = None,
+    enable_pdl: bool = True,
 ) -> torch.Tensor:
     """Internal implementation called by auto-tuner for functional API."""
     return _moe_core_impl(
@@ -654,10 +755,12 @@ def _cute_dsl_fused_moe_nvfp4_impl(
         aux_stream=aux_stream,
         output_dtype=output_dtype,
         use_async_memset=True,
+        enable_pdl=enable_pdl,
     )
 
 
-@flashinfer_api
+@supported_compute_capability([100, 103])
+@flashinfer_api(trace=cute_dsl_fused_moe_nvfp4_trace)
 def cute_dsl_fused_moe_nvfp4(
     x: torch.Tensor,
     x_sf: torch.Tensor,
@@ -678,8 +781,11 @@ def cute_dsl_fused_moe_nvfp4(
     use_fused_finalize: bool = True,
     moe_output: Optional[torch.Tensor] = None,
     aux_stream: Optional[torch.cuda.Stream] = None,
+    enable_pdl: bool = True,
 ) -> torch.Tensor:
     """Run fused MoE computation using CuteDSL NVFP4 kernels.
+
+    Supported architectures: SM100, SM103.
 
     This is the simple functional API. For CUDA graph support, use
     `CuteDslMoEWrapper` instead.
@@ -690,7 +796,7 @@ def cute_dsl_fused_moe_nvfp4(
         ...     output = cute_dsl_fused_moe_nvfp4(...)
 
     Args:
-        x: Input tensor, NVFP4 quantized [num_tokens, hidden_size // 2].
+        x: NVFP4-quantized input [num_tokens, hidden_size // 2].
         x_sf: Scale factors for x.
         token_selected_experts: Expert assignments [num_tokens, top_k].
         token_final_scales: Routing weights [num_tokens, top_k].
@@ -736,6 +842,7 @@ def cute_dsl_fused_moe_nvfp4(
         local_expert_offset=local_expert_offset,
         use_fused_finalize=use_fused_finalize,
         output_dtype=output_dtype,
+        enable_pdl=enable_pdl,
     )
 
     inputs = [
@@ -756,7 +863,7 @@ def cute_dsl_fused_moe_nvfp4(
     _, best_tactic = tuner.choose_one(
         "CuteDslFusedMoE::run_moe_nvfp4",
         [runner],
-        CuteDslFusedMoENvfp4Runner.tuning_config,
+        runner.tuning_config,
         inputs,
         aux_stream=aux_stream,
     )

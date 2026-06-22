@@ -25,9 +25,16 @@ SCALE_FACTOR_RANGE = (-1, 1)
 
 
 def _run_correctness_worker(
-    world_size, rank, dtype, hidden_dim, distributed_init_port, legacy_api=True
+    world_size,
+    rank,
+    dtype,
+    hidden_dim,
+    distributed_init_port,
+    legacy_api=True,
+    weight_bias=0.0,
+    gpu_offset=0,
 ):
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"cuda:{rank + gpu_offset}")
     torch.cuda.set_device(device)
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
     dist.init_process_group(
@@ -39,7 +46,6 @@ def _run_correctness_worker(
     group = dist.group.WORLD
 
     try:
-        device = torch.device(f"cuda:{rank}")
         token_nums = [1, 128, 1024, 2048]
         pattern_codes = [
             comm.AllReduceFusionPattern.kAllReduce,
@@ -110,7 +116,7 @@ def _run_correctness_worker(
                                     dist.barrier(group=group)
                                     test_passed = True
                                     print(
-                                        f"test RANK {rank}: token{token_num}-hidden_dim{hidden_dim}-dtype{dtype}-pattern{pattern_code}-layout{swizzled_layout_code}-pdl{launch_with_pdl} start"
+                                        f"test RANK {rank}: token{token_num}-hidden_dim{hidden_dim}-dtype{dtype}-pattern{pattern_code}-layout{swizzled_layout_code}-pdl{launch_with_pdl}-isOneShot{use_oneshot}-isTriggerCompletionAtEnd{trigger_completion_at_end}-isFP32Acc{fp32_acc} start"
                                     )
                                     dist.barrier(group=group)
                                     torch.cuda.synchronize()
@@ -203,6 +209,7 @@ def _run_correctness_worker(
                                                     scale_out=scale_out,
                                                     rms_gamma=rms_gamma,
                                                     rms_eps=rms_eps,
+                                                    weight_bias=weight_bias,
                                                     scale_factor=scale_factor,
                                                     layout_code=swizzled_layout_code,
                                                     metadata=workspace_metadata,
@@ -233,6 +240,7 @@ def _run_correctness_worker(
                                                     scale_out=scale_out,
                                                     rms_gamma=rms_gamma,
                                                     rms_eps=rms_eps,
+                                                    weight_bias=weight_bias,
                                                     scale_factor=scale_factor,
                                                     layout_code=swizzled_layout_code,
                                                     pattern=pattern_code,
@@ -267,6 +275,7 @@ def _run_correctness_worker(
                                                     scale_out=scale_out,
                                                     rms_gamma=rms_gamma,
                                                     rms_eps=rms_eps,
+                                                    weight_bias=weight_bias,
                                                     scale_factor=scale_factor,
                                                     layout_code=swizzled_layout_code,
                                                     metadata=workspace_metadata,
@@ -297,6 +306,7 @@ def _run_correctness_worker(
                                                     scale_out=scale_out,
                                                     rms_gamma=rms_gamma,
                                                     rms_eps=rms_eps,
+                                                    weight_bias=weight_bias,
                                                     scale_factor=scale_factor,
                                                     layout_code=swizzled_layout_code,
                                                     pattern=pattern_code,
@@ -344,8 +354,8 @@ def _run_correctness_worker(
                                         variance + rms_eps
                                     )
                                     ref_norm_out = (
-                                        rms_gamma.to(torch.float32) * hidden_states
-                                    )
+                                        weight_bias + rms_gamma.to(torch.float32)
+                                    ) * hidden_states
 
                                     # check correctness
                                     tolerance = 8e-2 if dtype == torch.float16 else 8e-1
@@ -384,11 +394,11 @@ def _run_correctness_worker(
                                     dist.barrier(group=group)
                                     if test_passed:
                                         print(
-                                            f"test RANK {rank}: token{token_num}-hidden_dim{hidden_dim}-dtype{dtype}-pattern{pattern_code}-layout{swizzled_layout_code}-pdl{launch_with_pdl} passed"
+                                            f"test RANK {rank}: token{token_num}-hidden_dim{hidden_dim}-dtype{dtype}-pattern{pattern_code}-layout{swizzled_layout_code}-pdl{launch_with_pdl}-isOneShot{use_oneshot}-isTriggerCompletionAtEnd{trigger_completion_at_end}-isFP32Acc{fp32_acc} passed"
                                         )
                                     else:
                                         print(
-                                            f"test RANK {rank}: token{token_num}-hidden_dim{hidden_dim}-dtype{dtype}-pattern{pattern_code}-layout{swizzled_layout_code}-pdl{launch_with_pdl} failed"
+                                            f"test RANK {rank}: token{token_num}-hidden_dim{hidden_dim}-dtype{dtype}-pattern{pattern_code}-layout{swizzled_layout_code}-pdl{launch_with_pdl}-isOneShot{use_oneshot}-isTriggerCompletionAtEnd{trigger_completion_at_end}-isFP32Acc{fp32_acc} failed"
                                         )
     finally:
         dist.barrier(group=group)
@@ -422,6 +432,7 @@ def multi_process_parallel(
     hidden_dim: int,
     test_target: Any,
     target_args: tuple = (),
+    gpu_offset: int = 0,
 ) -> None:
     mp.set_start_method("spawn", force=True)
 
@@ -429,12 +440,16 @@ def multi_process_parallel(
     distributed_init_port = get_open_port()
     for i in range(world_size):
         proc_args = (
-            world_size,
-            i,
-            dtype,
-            hidden_dim,
-            distributed_init_port,
-        ) + target_args
+            (
+                world_size,
+                i,
+                dtype,
+                hidden_dim,
+                distributed_init_port,
+            )
+            + target_args
+            + (gpu_offset,)
+        )
         proc = mp.Process(target=test_target, args=proc_args, name=f"Worker-{i}")
         proc.start()
         procs.append(proc)
@@ -451,7 +466,11 @@ def multi_process_parallel(
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("hidden_dim", [1024, 2048, 4096, 7168, 8192])
 @pytest.mark.parametrize("legacy_api", [True, False])
-def test_trtllm_allreduce_fusion(world_size, dtype, hidden_dim, legacy_api):
+@pytest.mark.parametrize("weight_bias", [0.0, 1.0])
+def test_trtllm_allreduce_fusion(
+    world_size, dtype, hidden_dim, legacy_api, weight_bias
+):
+    # weight_bias=0.0 -> standard RMSNorm; weight_bias=1.0 -> Gemma / Qwen3.5 RMSNorm.
     np.random.seed(42)
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
@@ -461,21 +480,71 @@ def test_trtllm_allreduce_fusion(world_size, dtype, hidden_dim, legacy_api):
             f"world_size {world_size} is greater than available_gpus {available_gpus}"
         )
     api_str = "legacy" if legacy_api else "unified"
-    print(f"Running test for world_size={world_size} with {api_str} API")
+    print(
+        f"Running test for world_size={world_size} with {api_str} API, "
+        f"weight_bias={weight_bias}"
+    )
 
     multi_process_parallel(
         world_size,
         dtype,
         hidden_dim,
         _run_correctness_worker,
-        target_args=(legacy_api,),
+        target_args=(legacy_api, weight_bias),
     )
-    print(f"allreduce fusion tp = {world_size} ({api_str} API): OK")
+    print(
+        f"allreduce fusion tp = {world_size} ({api_str} API, "
+        f"weight_bias={weight_bias}): OK"
+    )
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("legacy_api", [True, False])
+def test_trtllm_allreduce_fusion_gpu_offset(world_size, dtype, legacy_api):
+    """Test allreduce fusion when CUDA device index != TP rank (base_gpu_id > 0).
+
+    Simulates sglang colocate mode where inference engines run on non-zero
+    base GPUs (e.g. GPUs 4-7 with TP ranks 0-3).
+    See: https://github.com/flashinfer-ai/flashinfer/pull/2662
+    """
+    np.random.seed(42)
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+    available_gpus = torch.cuda.device_count()
+    gpu_offset = available_gpus - world_size
+    if gpu_offset <= 0:
+        pytest.skip(
+            f"Need more than {world_size} GPUs to test gpu_offset>0 "
+            f"(have {available_gpus})"
+        )
+    api_str = "legacy" if legacy_api else "unified"
+    print(
+        f"Running gpu_offset test: world_size={world_size}, gpu_offset={gpu_offset}, "
+        f"{api_str} API (GPUs {gpu_offset}..{gpu_offset + world_size - 1})"
+    )
+
+    multi_process_parallel(
+        world_size,
+        dtype,
+        1024,
+        _run_correctness_worker,
+        # weight_bias must be passed positionally so gpu_offset (appended after
+        # target_args) reaches the worker correctly.
+        target_args=(legacy_api, 0.0),
+        gpu_offset=gpu_offset,
+    )
+    print(f"gpu_offset allreduce fusion tp={world_size} ({api_str} API): OK")
 
 
 if __name__ == "__main__":
-    # Test both legacy and unified APIs
-    print("Testing legacy API...")
-    test_trtllm_allreduce_fusion(2, torch.float16, 1024, legacy_api=True)
-    print("\nTesting unified API...")
-    test_trtllm_allreduce_fusion(2, torch.float16, 1024, legacy_api=False)
+    # Test both legacy and unified APIs, both standard and Gemma RMSNorm.
+    for wb in (0.0, 1.0):
+        print(f"Testing legacy API (weight_bias={wb})...")
+        test_trtllm_allreduce_fusion(
+            2, torch.float16, 1024, legacy_api=True, weight_bias=wb
+        )
+        print(f"\nTesting unified API (weight_bias={wb})...")
+        test_trtllm_allreduce_fusion(
+            2, torch.float16, 1024, legacy_api=False, weight_bias=wb
+        )

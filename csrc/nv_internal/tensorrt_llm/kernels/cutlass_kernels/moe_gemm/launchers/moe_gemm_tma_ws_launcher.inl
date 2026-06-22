@@ -48,6 +48,7 @@
 #include <math.h>
 
 #include <sstream>
+#include <type_traits>
 
 namespace tensorrt_llm {
 namespace kernels {
@@ -59,7 +60,7 @@ using EpilogueFusion = TmaWarpSpecializedGroupedGemmInput::EpilogueFusion;
 // This forces the if constexpr branch to properly pruned be when called from in non-template
 // functions
 template <bool FLAG, class ReturnType, class... Args>
-ReturnType construct_if_true(Args&&... args) {
+std::decay_t<ReturnType> construct_if_true(Args&&... args) {
   if constexpr (FLAG) {
     return ReturnType{std::forward<Args>(args)...};
   } else {
@@ -255,7 +256,7 @@ using namespace cutlass::epilogue;
       static_assert(cutlass::platform::is_same<T, WeightType>::value || IsWFP4AFP8,                                                                                                                                                                                                                                     \
                     "TMA warp specialized MOE implementation does not support mixed input types");                                                                                                                                                                                                                      \
                                                                                                                                                                                                                                                                                                                         \
-      constexpr static bool IsBlockScaled = IsFP4 || IsWFP4AFP8;                                                                                                                                                                                                                                                        \
+      constexpr static bool IsBlockScaled = IsFP4 || IsWFP4AFP8 || IsMXFPX;                                                                                                                                                                                                                                             \
       static_assert(!IsBlockScaled || IsBlackwell, "Block scaled is only implemented for SM100");                                                                                                                                                                                                                       \
                                                                                                                                                                                                                                                                                                                         \
       static_assert(FUSION == EpilogueFusion::NONE || FUSION == EpilogueFusion::FINALIZE,                                                                                                                                                                                                                               \

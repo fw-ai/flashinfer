@@ -64,6 +64,12 @@
                      ") at ", __FILE__, ":", __LINE__, " in ", STR(func));                  \
   } while (0)
 
+#define FLASHINFER_CHECK_ALIGNMENT(ptr, size_bytes)                            \
+  FLASHINFER_CHECK(reinterpret_cast<uintptr_t>(ptr) % (size_bytes) == 0, #ptr, \
+                   " must be aligned to ", (size_bytes), " bytes, got address ", (uintptr_t)(ptr))
+
+#define FLASHINFER_CHECK_TMA_ALIGNED(ptr) FLASHINFER_CHECK_ALIGNMENT(ptr, 128)
+
 #define DISPATCH_USE_FP16_QK_REDUCTION(use_fp16_qk_reduction, USE_FP16_QK_REDUCTION, ...) \
   if (use_fp16_qk_reduction) {                                                            \
     FLASHINFER_ERROR("FP16_QK_REDUCTION disabled at compile time");                       \
@@ -438,6 +444,22 @@ __forceinline__ __device__ int get_lane_id() {
   int lane_id;
   asm("mov.u32 %0, %%laneid;" : "=r"(lane_id));
   return lane_id;
+}
+
+/*!
+ * \brief Non-atomic global load for short (2 bytes) with cache streaming hint
+ */
+__forceinline__ __device__ short ld_na_global_s16(const short* addr) {
+  short val;
+  asm volatile("ld.global.cs.b16 %0, [%1];" : "=h"(val) : "l"(addr));
+  return val;
+}
+
+/*!
+ * \brief Non-atomic global store for short (2 bytes) with cache streaming hint
+ */
+__forceinline__ __device__ void st_na_global_s16(short* addr, short val) {
+  asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(addr), "h"(val));
 }
 
 /*!

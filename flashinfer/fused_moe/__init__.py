@@ -15,12 +15,10 @@ limitations under the License.
 """
 
 from .core import (
-    ActivationType,
-    Fp8QuantizationType,
-    RoutingMethodType,
-    WeightLayout,
     convert_to_block_layout,
     cutlass_fused_moe,
+    interleave_moe_scales_for_sm90_mixed_gemm,
+    interleave_moe_weights_for_sm90_mixed_gemm,
     gen_cutlass_fused_moe_sm120_module,
     gen_cutlass_fused_moe_sm103_module,
     gen_cutlass_fused_moe_sm100_module,
@@ -33,7 +31,15 @@ from .core import (
     trtllm_fp8_block_scale_routed_moe,
     trtllm_fp8_per_tensor_scale_moe,
     trtllm_bf16_moe,
+    trtllm_bf16_routed_moe,
     trtllm_mxint4_block_scale_moe,
+)
+
+from ..tllm_enums import (
+    ActivationType,
+    Fp8QuantizationType,
+    WeightLayout,
+    RoutingMethodType,
 )
 
 from .fused_routing_dsv3 import (  # noqa: F401
@@ -45,6 +51,8 @@ try:
     from .cute_dsl import (
         cute_dsl_fused_moe_nvfp4,
         CuteDslMoEWrapper,
+        b12x_fused_moe,
+        B12xMoEWrapper,
     )
 
     _cute_dsl_available = True
@@ -58,6 +66,8 @@ __all__ = [
     "WeightLayout",
     "convert_to_block_layout",
     "cutlass_fused_moe",
+    "interleave_moe_scales_for_sm90_mixed_gemm",
+    "interleave_moe_weights_for_sm90_mixed_gemm",
     "gen_cutlass_fused_moe_sm120_module",
     "gen_cutlass_fused_moe_sm103_module",
     "gen_cutlass_fused_moe_sm100_module",
@@ -65,6 +75,7 @@ __all__ = [
     "gen_trtllm_gen_fused_moe_sm100_module",
     "reorder_rows_for_gated_act_gemm",
     "trtllm_bf16_moe",
+    "trtllm_bf16_routed_moe",
     "trtllm_fp4_block_scale_moe",
     "trtllm_fp4_block_scale_routed_moe",
     "trtllm_fp8_block_scale_moe",
@@ -79,4 +90,6 @@ if _cute_dsl_available:
     __all__ += [
         "cute_dsl_fused_moe_nvfp4",
         "CuteDslMoEWrapper",
+        "b12x_fused_moe",
+        "B12xMoEWrapper",
     ]

@@ -225,20 +225,17 @@ def _run_correctness_worker(
                             f"max diff ref value: {torch_output_hidden_states.to(torch.float32).view(-1)[torch.argmax(torch.abs(norm_out.to(torch.float32) - torch_output_hidden_states.to(torch.float32)))]}"
                         )
 
-                    # bfloat16 with multiple ranks accumulates more rounding errors
-                    # due to order-of-operations differences vs PyTorch reference
-                    tol = 0.2 if dtype == torch.float16 else 0.5
                     torch.testing.assert_close(
                         residual_out.to(torch.float32),
                         torch_residual.to(torch.float32),
-                        rtol=tol,
-                        atol=tol,
+                        rtol=0.2,
+                        atol=0.2,
                     )
                     torch.testing.assert_close(
                         norm_out.to(torch.float32),
                         torch_output_hidden_states.to(torch.float32),
-                        rtol=tol,
-                        atol=tol,
+                        rtol=0.2,
+                        atol=0.2,
                     )
 
                 dist.barrier(group=group)
