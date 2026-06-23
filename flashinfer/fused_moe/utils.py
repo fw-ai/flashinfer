@@ -1,8 +1,9 @@
 import contextlib
+import functools
 import threading
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Sequence, Tuple
+from typing import Callable, Dict, List, Sequence, Tuple
 
 import torch
 
@@ -287,6 +288,22 @@ def map_to_hybrid_bucket(x: int, max_num_tokens: int) -> int:
     if x <= _PHASE3_END:
         return min(_ceil_to_step(x, _PHASE3_STEP), max_num_tokens)
     return min(next_positive_power_of_2(x), max_num_tokens)
+
+
+@functools.cache
+def make_hybrid_bucket_mapper(max_num_tokens: int) -> Callable[[int], int]:
+    """Return an identity-stable mapper for hybrid token buckets.
+
+    The autotuner hashes ``DynamicTensorSpec.map_to_tuning_buckets`` by object
+    ``id()`` (see ``AutoTuner._find_nearest_profile``'s unbounded ``lru_cache``).
+    Building a fresh ``lambda x: map_to_hybrid_bucket(x, N)`` on every inference
+    call produces a new ``id()`` -- and a new cache entry -- on every call, even
+    when the input shape is unchanged, leaking the cache unboundedly.
+
+    ``functools.cache`` guarantees the same ``partial`` object (same ``id()``)
+    is returned for a given ``max_num_tokens``, keeping the cache key stable.
+    """
+    return functools.partial(map_to_hybrid_bucket, max_num_tokens=max_num_tokens)
 
 
 def map_to_hybrid_bucket_uncapped(x: int) -> int:
