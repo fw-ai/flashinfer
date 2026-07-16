@@ -170,6 +170,7 @@ def build_common_cflags(
 def build_cflags(
     common_cflags: List[str],
     extra_cflags: Optional[List[str]] = None,
+    use_environment_flags: bool = True,
 ) -> List[str]:
     """Build C++ compilation flags."""
     cflags = [
@@ -179,9 +180,10 @@ def build_cflags(
     if extra_cflags is not None:
         cflags += extra_cflags
 
-    env_extra_cflags = parse_env_flags("FLASHINFER_EXTRA_CFLAGS")
-    if env_extra_cflags is not None:
-        cflags += env_extra_cflags
+    if use_environment_flags:
+        env_extra_cflags = parse_env_flags("FLASHINFER_EXTRA_CFLAGS")
+        if env_extra_cflags is not None:
+            cflags += env_extra_cflags
 
     return cflags
 
@@ -189,10 +191,11 @@ def build_cflags(
 def build_cuda_cflags(
     common_cflags: List[str],
     extra_cuda_cflags: Optional[List[str]] = None,
+    use_environment_flags: bool = True,
 ) -> List[str]:
     """Build CUDA compilation flags."""
     cuda_cflags: List[str] = []
-    cc_env = os.environ.get("CC")
+    cc_env = os.environ.get("CC") if use_environment_flags else None
     if cc_env is not None:
         cuda_cflags += ["-ccbin", cc_env]
     cuda_cflags += [
@@ -228,9 +231,10 @@ def build_cuda_cflags(
         # No module flags, use global flags
         cuda_cflags += global_flags
 
-    env_extra_cuda_cflags = parse_env_flags("FLASHINFER_EXTRA_CUDAFLAGS")
-    if env_extra_cuda_cflags is not None:
-        cuda_cflags += env_extra_cuda_cflags
+    if use_environment_flags:
+        env_extra_cuda_cflags = parse_env_flags("FLASHINFER_EXTRA_CUDAFLAGS")
+        if env_extra_cuda_cflags is not None:
+            cuda_cflags += env_extra_cuda_cflags
 
     return cuda_cflags
 
@@ -243,11 +247,22 @@ def generate_ninja_build_for_op(
     extra_ldflags: Optional[List[str]],
     extra_include_dirs: Optional[List[Path]],
     needs_device_linking: bool = False,
+    cxx: Optional[str] = None,
+    nvcc: Optional[str] = None,
+    cxx_launcher: Optional[str] = None,
+    nvcc_launcher: Optional[str] = None,
+    use_environment_flags: bool = True,
 ) -> str:
     cuda_home = get_cuda_path()
     common_cflags = build_common_cflags(cuda_home, extra_include_dirs)
-    cflags = build_cflags(common_cflags, extra_cflags)
-    cuda_cflags = build_cuda_cflags(common_cflags, extra_cuda_cflags)
+    cflags = build_cflags(
+        common_cflags, extra_cflags, use_environment_flags=use_environment_flags
+    )
+    cuda_cflags = build_cuda_cflags(
+        common_cflags,
+        extra_cuda_cflags,
+        use_environment_flags=use_environment_flags,
+    )
 
     ldflags = [
         "-shared",
@@ -257,18 +272,31 @@ def generate_ninja_build_for_op(
         "-lcuda",
     ]
 
-    env_extra_ldflags = parse_env_flags("FLASHINFER_EXTRA_LDFLAGS")
-    if env_extra_ldflags is not None:
-        ldflags += env_extra_ldflags
+    if use_environment_flags:
+        env_extra_ldflags = parse_env_flags("FLASHINFER_EXTRA_LDFLAGS")
+        if env_extra_ldflags is not None:
+            ldflags += env_extra_ldflags
 
     if extra_ldflags is not None:
         ldflags += extra_ldflags
 
-    cxx = os.environ.get("CXX", "c++")
-    nvcc = os.environ.get("FLASHINFER_NVCC", "$cuda_home/bin/nvcc")
+    cxx = cxx if cxx is not None else os.environ.get("CXX", "c++")
+    nvcc = (
+        nvcc
+        if nvcc is not None
+        else os.environ.get("FLASHINFER_NVCC", "$cuda_home/bin/nvcc")
+    )
     # Compiler launchers (e.g., sccache, ccache) — empty string when unset
-    cxx_launcher = os.environ.get("FLASHINFER_CXX_LAUNCHER", "")
-    nvcc_launcher = os.environ.get("FLASHINFER_NVCC_LAUNCHER", "")
+    cxx_launcher = (
+        cxx_launcher
+        if cxx_launcher is not None
+        else os.environ.get("FLASHINFER_CXX_LAUNCHER", "")
+    )
+    nvcc_launcher = (
+        nvcc_launcher
+        if nvcc_launcher is not None
+        else os.environ.get("FLASHINFER_NVCC_LAUNCHER", "")
+    )
 
     lines = [
         "ninja_required_version = 1.3",

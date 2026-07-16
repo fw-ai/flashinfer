@@ -224,6 +224,11 @@ class JitSpec:
     extra_include_dirs: Optional[List[Path]]
     is_class: bool = False
     needs_device_linking: bool = False
+    cxx: Optional[str] = None
+    nvcc: Optional[str] = None
+    cxx_launcher: Optional[str] = None
+    nvcc_launcher: Optional[str] = None
+    use_environment_flags: bool = True
 
     @property
     def ninja_path(self) -> Path:
@@ -279,6 +284,11 @@ class JitSpec:
             extra_ldflags=self.extra_ldflags,
             extra_include_dirs=self.extra_include_dirs,
             needs_device_linking=self.needs_device_linking,
+            cxx=self.cxx,
+            nvcc=self.nvcc,
+            cxx_launcher=self.cxx_launcher,
+            nvcc_launcher=self.nvcc_launcher,
+            use_environment_flags=self.use_environment_flags,
         )
         write_if_different(ninja_path, content)
 
@@ -337,8 +347,16 @@ class JitSpec:
 
         # Build flags
         common_cflags = build_common_cflags(cuda_home, self.extra_include_dirs)
-        cflags = build_cflags(common_cflags, self.extra_cflags)
-        cuda_cflags = build_cuda_cflags(common_cflags, self.extra_cuda_cflags)
+        cflags = build_cflags(
+            common_cflags,
+            self.extra_cflags,
+            use_environment_flags=self.use_environment_flags,
+        )
+        cuda_cflags = build_cuda_cflags(
+            common_cflags,
+            self.extra_cuda_cflags,
+            use_environment_flags=self.use_environment_flags,
+        )
 
         # Replace $common_cflags and $cuda_home placeholders
         def expand_flags(
@@ -362,8 +380,12 @@ class JitSpec:
         cuda_cflags_expanded = expand_flags(cuda_cflags, common_cflags_expanded)
 
         # Get compilers
-        cxx = os.environ.get("CXX", "c++")
-        nvcc = os.environ.get("FLASHINFER_NVCC", f"{cuda_home}/bin/nvcc")
+        cxx = self.cxx if self.cxx is not None else os.environ.get("CXX", "c++")
+        nvcc = (
+            self.nvcc
+            if self.nvcc is not None
+            else os.environ.get("FLASHINFER_NVCC", f"{cuda_home}/bin/nvcc")
+        )
 
         # Build directory
         build_dir = str(self.build_dir.resolve())
@@ -409,6 +431,11 @@ def gen_jit_spec(
     extra_ldflags: Optional[List[str]] = None,
     extra_include_paths: Optional[List[Union[str, Path]]] = None,
     needs_device_linking: bool = False,
+    cxx: Optional[str] = None,
+    nvcc: Optional[str] = None,
+    cxx_launcher: Optional[str] = None,
+    nvcc_launcher: Optional[str] = None,
+    use_environment_flags: bool = True,
 ) -> JitSpec:
     check_cuda_arch()
     # Use FLASHINFER_JIT_DEBUG if set, otherwise use FLASHINFER_JIT_VERBOSE (for backward compatibility)
@@ -476,6 +503,11 @@ def gen_jit_spec(
             else None
         ),
         needs_device_linking=needs_device_linking,
+        cxx=cxx,
+        nvcc=nvcc,
+        cxx_launcher=cxx_launcher,
+        nvcc_launcher=nvcc_launcher,
+        use_environment_flags=use_environment_flags,
     )
 
     # Register the spec in the global registry

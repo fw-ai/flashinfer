@@ -54,6 +54,7 @@ from ..jit.fused_moe import (
     gen_cutlass_fused_moe_sm89_module,
     gen_trtllm_gen_fused_moe_sm100_module,
 )
+from ..jit.situ_b552 import load_trtllm_gen_fused_moe_situ_b552_module
 from ..utils import (
     check_shape_dtype_device,
     device_support_pdl,
@@ -70,6 +71,7 @@ from .utils import (
 )
 from ..tllm_enums import (
     ActivationType,
+    RoutingMethodType,
     WeightLayout,
     DtypeTrtllmGen,
     Fp8QuantizationType,
@@ -1138,16 +1140,186 @@ def _unpack_trtllm_moe_output(
         ]
 
 
+def _adapt_situ_b552_valid_config_args(args):
+    """Map the current valid-config ABI to immutable PR #2917's ABI."""
+    if len(args) != 13:
+        raise RuntimeError(
+            f"Unexpected SiTU b552 valid-config ABI: {len(args)} arguments"
+        )
+    if args[10]:
+        raise NotImplementedError("SiTU b552 does not support per-token scaling")
+    if args[12]:
+        raise NotImplementedError("SiTU b552 does not support expert LoRA delta")
+    # b552 predates use_per_token_scaling and has_gemm1_lora_delta.  num_tokens
+    # moved from current index 11 to the final (index 10) native argument.
+    return (*args[:10], args[11])
+
+
+def _adapt_situ_b552_fp4_args(args):
+    """Map the current 36-argument FP4 call to immutable b552's 32 arguments."""
+    if len(args) != 36:
+        raise RuntimeError(f"Unexpected SiTU b552 FP4 ABI: {len(args)} arguments")
+    routing_mode = RoutingInputMode(args[0])
+    routing_logits = args[1]
+    topk_ids = args[2]
+    topk_weights = args[3]
+    per_token_scale = args[19]
+    norm_topk_prob = args[34]
+    routing_replay_out = args[35]
+    if per_token_scale is not None:
+        raise NotImplementedError("SiTU b552 does not support per-token scaling")
+    if not norm_topk_prob:
+        raise NotImplementedError("SiTU b552 requires norm_topk_prob=True")
+    if routing_replay_out is not None:
+        raise NotImplementedError("SiTU b552 does not support routing replay output")
+
+    if routing_mode == RoutingInputMode.FromLogits:
+        # The current custom op has already allocated these (num_tokens, top_k)
+        # buffers.  The b552 native runner writes routing results directly into
+        # them; empty placeholders would be an undersized device write.
+        if topk_ids is None or topk_weights is None:
+            raise RuntimeError("SiTU b552 routing buffers were not allocated")
+        if topk_weights.dtype != torch.bfloat16:
+            raise RuntimeError(
+                "SiTU b552 routing weights must be allocated as bfloat16"
+            )
+        routing_ids = topk_ids
+        routing_weights = topk_weights
+    elif routing_mode == RoutingInputMode.PackedPrecomputed:
+        if topk_ids is None or topk_weights is None:
+            raise RuntimeError("SiTU b552 packed routing tensors are missing")
+        # The private native patch accepts read-only, unpacked IDs and weights.
+        # Decode into a fresh ID tensor so the caller's packed tensor remains
+        # untouched.  topk_weights is an output buffer allocated by the current
+        # custom op, so populate it with the decoded BF16 bits before launch.
+        routing_ids = topk_ids >> 16
+        decoded_weights = (topk_ids & 0xFFFF).to(torch.int16).view(torch.bfloat16)
+        topk_weights.copy_(decoded_weights)
+        routing_weights = topk_weights
+    elif routing_mode == RoutingInputMode.UnpackedPrecomputed:
+        if topk_ids is None or topk_weights is None:
+            raise RuntimeError("SiTU b552 precomputed routing tensors are missing")
+        if topk_weights.dtype != torch.bfloat16:
+            raise ValueError("SiTU b552 unpacked routing weights must be bfloat16")
+        routing_ids = topk_ids
+        routing_weights = topk_weights
+    else:
+        raise ValueError(f"Unsupported SiTU b552 routing mode: {routing_mode}")
+
+    return [
+        routing_logits,
+        routing_ids,
+        routing_weights,
+        *args[4:19],
+        *args[20:34],
+    ]
+
+
+def _make_situ_b552_topk_initializer(routing_input_mode, num_experts):
+    """Create semantically valid dynamic top-k inputs for private autotuning."""
+    routing_input_mode = RoutingInputMode(routing_input_mode)
+
+    def init_topk_ids(shapes, dtype, device):
+        expert_ids = make_random_topk_ids(
+            num_experts=num_experts,
+            num_tokens=math.prod(shapes[:-1]),
+            top_k=shapes[-1],
+            device=device,
+        ).view(shapes)
+        if routing_input_mode != RoutingInputMode.PackedPrecomputed:
+            return expert_ids
+
+        expert_weights = torch.ones(shapes, dtype=torch.bfloat16, device=device).view(
+            torch.int16
+        )
+        return (expert_ids << 16) | expert_weights
+
+    return init_topk_ids
+
+
+def _situ_b552_autotune_cache_name(routing_input_mode):
+    routing_input_mode = RoutingInputMode(routing_input_mode)
+    return (
+        "flashinfer::trtllm_fp4_block_scale_moe_situ_b552::"
+        f"{routing_input_mode.name.lower()}"
+    )
+
+
 @functools.cache
-def get_trtllm_moe_sm100_module():
-    module = gen_trtllm_gen_fused_moe_sm100_module()
-    moe_op = module.build_and_load()
+def _get_trtllm_moe_sm100_module(variant: str):
+    if variant == "standard":
+        module = gen_trtllm_gen_fused_moe_sm100_module()
+        moe_op = module.build_and_load()
+    elif variant == "situ_b552":
+        module, private_op = load_trtllm_gen_fused_moe_situ_b552_module()
+
+        def private_get_valid_moe_configs(*args):
+            return private_op.trtllm_get_valid_situ_moe_configs(
+                *_adapt_situ_b552_valid_config_args(args)
+            )
+
+        def private_fp4_block_scale_logits_moe(*args):
+            if RoutingInputMode(args[0]) != RoutingInputMode.FromLogits:
+                raise ValueError("SiTU b552 logits entry point requires FromLogits")
+            return private_op.trtllm_fp4_block_scale_situ_logits_moe(
+                *_adapt_situ_b552_fp4_args(args)
+            )
+
+        def private_fp4_block_scale_routed_moe(*args):
+            if RoutingInputMode(args[0]) not in {
+                RoutingInputMode.PackedPrecomputed,
+                RoutingInputMode.UnpackedPrecomputed,
+            }:
+                raise ValueError(
+                    "SiTU b552 pre-routed entry point requires precomputed routing"
+                )
+            return private_op.trtllm_fp4_block_scale_situ_routed_moe(
+                *_adapt_situ_b552_fp4_args(args)
+            )
+
+        moe_op = SimpleNamespace(
+            trtllm_fp4_block_scale_logits_moe=private_fp4_block_scale_logits_moe,
+            trtllm_fp4_block_scale_routed_moe=private_fp4_block_scale_routed_moe,
+            trtllm_get_valid_moe_configs=private_get_valid_moe_configs,
+        )
+    else:
+        raise ValueError(f"Unknown TensorRT-LLM MoE module variant: {variant}")
     setup_cubin_loader(str(module.get_library_path()))
+    op_suffix = "" if variant == "standard" else "_situ_b552"
+
+    # The private b552 module only implements the MXFP8-activation/MXFP4-weight
+    # operation. Keep the stock factory structure, but do not register names
+    # for BF16, FP8, or MXINT4 operations that the private native namespace
+    # cannot execute.
+    situ_custom_ops = {"trtllm_fp4_block_scale_moe"}
+
+    def launch_fp4_block_scale_moe(*args):
+        if variant == "standard":
+            return moe_op.trtllm_fp4_block_scale_moe(*args)
+        routing_mode = RoutingInputMode(args[0])
+        if routing_mode == RoutingInputMode.FromLogits:
+            return moe_op.trtllm_fp4_block_scale_logits_moe(*args)
+        if routing_mode in {
+            RoutingInputMode.PackedPrecomputed,
+            RoutingInputMode.UnpackedPrecomputed,
+        }:
+            return moe_op.trtllm_fp4_block_scale_routed_moe(*args)
+        raise ValueError(f"Unsupported SiTU b552 routing mode: {routing_mode}")
+
+    def register_variant_custom_op(name: str, **kwargs):
+        if variant == "situ_b552" and name not in situ_custom_ops:
+            return lambda function: function
+        return register_custom_op(f"flashinfer::{name}{op_suffix}", **kwargs)
+
+    def register_variant_fake_op(name: str):
+        if variant == "situ_b552" and name not in situ_custom_ops:
+            return lambda function: function
+        return register_fake_op(f"flashinfer::{name}{op_suffix}")
 
     class MoERunner(TunableRunner):
         # Cache valid tactics to reduce the overhead of re-querying the kernel.
         # TODO(siyuan): directly cache the runners
-        valid_tactics_dict = dict()
+        valid_tactics_dict: dict[tuple[Any, ...], list[int]] = {}
 
         def __init__(
             self,
@@ -1185,6 +1357,7 @@ def get_trtllm_moe_sm100_module():
             self,
             moe_inputs: "MoEInputs",
             tune_max_num_tokens: int = 8192,
+            routing_input_mode: Optional[int] = None,
             **kwargs,
         ) -> TuningConfig:
             """Build a TuningConfig for this runner instance.
@@ -1221,7 +1394,16 @@ def get_trtllm_moe_sm100_module():
                     shapes, dtype=dtype, device=device
                 )
             if moe_inputs.topk_ids is not None:
-                spec["topk_ids"] = _init_packed_topk_ids
+                if variant == "situ_b552":
+                    if routing_input_mode is None:
+                        raise ValueError(
+                            "SiTU b552 autotuning requires an explicit routing mode"
+                        )
+                    spec["topk_ids"] = _make_situ_b552_topk_initializer(
+                        routing_input_mode, num_experts
+                    )
+                else:
+                    spec["topk_ids"] = _init_packed_topk_ids
             if moe_inputs.expert_weights is not None:
                 spec["expert_weights"] = lambda shapes, dtype, device: torch.ones(
                     shapes, dtype=dtype, device=device
@@ -1536,7 +1718,7 @@ def get_trtllm_moe_sm100_module():
                     kwargs.get("routing_replay_out"),
                 )
             else:
-                moe_op.trtllm_fp4_block_scale_moe(
+                launch_fp4_block_scale_moe(
                     kwargs.get("routing_input_mode", RoutingInputMode.FromLogits),
                     routing_logits,
                     topk_ids,
@@ -1575,8 +1757,8 @@ def get_trtllm_moe_sm100_module():
                     kwargs.get("routing_replay_out"),
                 )
 
-    @register_custom_op(
-        "flashinfer::trtllm_bf16_moe",
+    @register_variant_custom_op(
+        "trtllm_bf16_moe",
         mutates_args=("routing_replay_out",),
     )
     def trtllm_bf16_moe_op(
@@ -1685,7 +1867,7 @@ def get_trtllm_moe_sm100_module():
         )
 
         _, tactic = tuner.choose_one(
-            "flashinfer::trtllm_bf16_moe",
+            f"flashinfer::trtllm_bf16_moe{op_suffix}",
             [moe_runner],
             tuning_config,
             moe_inputs.to_list(),
@@ -1746,7 +1928,7 @@ def get_trtllm_moe_sm100_module():
             intermediate_output, output, do_finalize, gemm1_lora_delta
         )
 
-    @register_fake_op("flashinfer::trtllm_bf16_moe")
+    @register_variant_fake_op("trtllm_bf16_moe")
     def _fake_trtllm_bf16_moe(
         routing_logits: Optional[torch.Tensor],
         routing_bias: Optional[torch.Tensor],
@@ -1783,8 +1965,8 @@ def get_trtllm_moe_sm100_module():
 
         return [hidden_states.new_empty([seq_len, hidden_size], dtype=torch.bfloat16)]
 
-    @register_custom_op(
-        "flashinfer::trtllm_fp8_per_tensor_scale_moe",
+    @register_variant_custom_op(
+        "trtllm_fp8_per_tensor_scale_moe",
         mutates_args=("routing_replay_out",),
     )
     def trtllm_fp8_per_tensor_scale_moe_op(
@@ -1867,7 +2049,7 @@ def get_trtllm_moe_sm100_module():
         )
 
         _, tactic = tuner.choose_one(
-            "flashinfer::trtllm_fp8_per_tensor_scale_moe",
+            f"flashinfer::trtllm_fp8_per_tensor_scale_moe{op_suffix}",
             [moe_runner],
             tuning_config,
             moe_inputs.to_list(),
@@ -1926,7 +2108,7 @@ def get_trtllm_moe_sm100_module():
                 torch.from_dlpack(intermediate_output[2]),
             ]
 
-    @register_fake_op("flashinfer::trtllm_fp8_per_tensor_scale_moe")
+    @register_variant_fake_op("trtllm_fp8_per_tensor_scale_moe")
     def _fake_trtllm_fp8_per_tensor_scale_moe(
         routing_logits: torch.Tensor,
         routing_bias: Optional[torch.Tensor],
@@ -1959,8 +2141,8 @@ def get_trtllm_moe_sm100_module():
 
         return [hidden_states.new_empty([seq_len, hidden_size], dtype=torch.bfloat16)]
 
-    @register_custom_op(
-        "flashinfer::trtllm_fp8_block_scale_moe",
+    @register_variant_custom_op(
+        "trtllm_fp8_block_scale_moe",
         mutates_args=("routing_replay_out",),
     )
     def trtllm_fp8_block_scale_moe_op(
@@ -2107,7 +2289,7 @@ def get_trtllm_moe_sm100_module():
         )
 
         _, tactic = tuner.choose_one(
-            "flashinfer::trtllm_fp8_block_scale_moe",
+            f"flashinfer::trtllm_fp8_block_scale_moe{op_suffix}",
             [moe_runner],
             tuning_config,
             moe_inputs.to_list(),
@@ -2174,7 +2356,7 @@ def get_trtllm_moe_sm100_module():
             result[1] = expert_weights
         return result
 
-    @register_fake_op("flashinfer::trtllm_fp8_block_scale_moe")
+    @register_variant_fake_op("trtllm_fp8_block_scale_moe")
     def _fake_trtllm_fp8_block_scale_moe(
         routing_logits: Optional[torch.Tensor],
         topk_ids: Optional[torch.Tensor],
@@ -2216,8 +2398,8 @@ def get_trtllm_moe_sm100_module():
         # TODO: This is not correct for gemm1_lora_delta or do_finalize=False
         return [hidden_states.new_empty([seq_len, hidden_size], dtype=torch.bfloat16)]
 
-    @register_custom_op(
-        "flashinfer::trtllm_fp4_block_scale_moe",
+    @register_variant_custom_op(
+        "trtllm_fp4_block_scale_moe",
         mutates_args=("routing_replay_out",),
     )
     def trtllm_fp4_block_scale_moe_op(
@@ -2258,6 +2440,46 @@ def get_trtllm_moe_sm100_module():
         norm_topk_prob: bool = True,
         routing_replay_out: Optional[torch.Tensor] = None,
     ) -> List[torch.Tensor]:
+        private_routing_mode = None
+        if variant == "situ_b552":
+            private_routing_mode = _validate_situ_b552_boundary(
+                routing_input_mode=routing_input_mode,
+                routing_logits=routing_logits,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                routing_bias=routing_bias,
+                hidden_states=hidden_states,
+                hidden_states_scale=hidden_states_scale,
+                gemm1_weights=gemm1_weights,
+                gemm1_weights_scale=gemm1_weights_scale,
+                gemm1_bias=gemm1_bias,
+                gemm1_alpha=gemm1_alpha,
+                gemm1_beta=gemm1_beta,
+                gemm1_clamp_limit=gemm1_clamp_limit,
+                gemm2_weights=gemm2_weights,
+                gemm2_weights_scale=gemm2_weights_scale,
+                gemm2_bias=gemm2_bias,
+                output1_scale_scalar=output1_scale_scalar,
+                output1_scale_gate_scalar=output1_scale_gate_scalar,
+                output2_scale_scalar=output2_scale_scalar,
+                per_token_scale=per_token_scale,
+                num_experts=num_experts,
+                top_k=top_k,
+                n_group=n_group,
+                topk_group=topk_group,
+                intermediate_size=intermediate_size,
+                local_expert_offset=local_expert_offset,
+                local_num_experts=num_local_experts,
+                routed_scaling_factor=routed_scaling_factor,
+                routing_method_type=routing_method_type,
+                do_finalize=do_finalize,
+                enable_pdl=enable_pdl,
+                activation_type=activation_type,
+                output=output,
+                tune_max_num_tokens=tune_max_num_tokens,
+                norm_topk_prob=norm_topk_prob,
+                routing_replay_out=routing_replay_out,
+            )
         if routing_logits is None:
             assert topk_ids is not None, (
                 "either topk_ids or routing_logits must be provided."
@@ -2265,7 +2487,12 @@ def get_trtllm_moe_sm100_module():
             assert topk_ids.dtype == torch.int32, "topk_ids must be an int32 tensor."
             routing_dtype = torch.bfloat16
         else:
-            routing_dtype = routing_logits.dtype
+            # Immutable b552 writes routing weights as BF16 even when routing
+            # logits are FP32.  Keep this private ABI rule isolated from the
+            # stock d2c runner, whose output dtype follows the logits dtype.
+            routing_dtype = (
+                torch.bfloat16 if variant == "situ_b552" else routing_logits.dtype
+            )
         hidden_size = hidden_states.shape[-1]
         if hidden_states.dtype == torch.uint8:
             hidden_size = hidden_size * 2
@@ -2342,12 +2569,16 @@ def get_trtllm_moe_sm100_module():
         tuning_config = moe_runner._make_tuning_config(
             moe_inputs,
             tune_max_num_tokens=tune_max_num_tokens,
+            routing_input_mode=private_routing_mode,
             use_cold_l2_cache=True,
             use_cuda_graph=True,
         )
 
+        tuning_cache_name = f"flashinfer::trtllm_fp4_block_scale_moe{op_suffix}"
+        if variant == "situ_b552":
+            tuning_cache_name = _situ_b552_autotune_cache_name(private_routing_mode)
         _, tactic = tuner.choose_one(
-            "flashinfer::trtllm_fp4_block_scale_moe",
+            tuning_cache_name,
             [moe_runner],
             tuning_config,
             moe_inputs.to_list(),
@@ -2378,7 +2609,7 @@ def get_trtllm_moe_sm100_module():
         )
 
         # Call the C++ function for block scale MoE
-        intermediate_output = moe_op.trtllm_fp4_block_scale_moe(
+        intermediate_output = launch_fp4_block_scale_moe(
             routing_input_mode,
             routing_logits,
             topk_ids,
@@ -2425,7 +2656,7 @@ def get_trtllm_moe_sm100_module():
                 torch.from_dlpack(intermediate_output[2]),
             ]
 
-    @register_fake_op("flashinfer::trtllm_fp4_block_scale_moe")
+    @register_variant_fake_op("trtllm_fp4_block_scale_moe")
     def _fake_trtllm_fp4_block_scale_moe(
         routing_input_mode: int,
         routing_logits: Optional[torch.Tensor],
@@ -2470,8 +2701,8 @@ def get_trtllm_moe_sm100_module():
 
         return [hidden_states.new_empty([seq_len, hidden_size], dtype=torch.bfloat16)]
 
-    @register_custom_op(
-        "flashinfer::trtllm_mxint4_block_scale_moe",
+    @register_variant_custom_op(
+        "trtllm_mxint4_block_scale_moe",
         mutates_args=("routing_replay_out",),
     )
     def trtllm_mxint4_block_scale_moe_op(
@@ -2573,7 +2804,7 @@ def get_trtllm_moe_sm100_module():
         )
 
         _, tactic = tuner.choose_one(
-            "flashinfer::trtllm_mxint4_block_scale_moe",
+            f"flashinfer::trtllm_mxint4_block_scale_moe{op_suffix}",
             [moe_runner],
             tuning_config,
             moe_inputs.to_list(),
@@ -2631,7 +2862,7 @@ def get_trtllm_moe_sm100_module():
             intermediate_output, output, do_finalize, gemm1_lora_delta
         )
 
-    @register_fake_op("flashinfer::trtllm_mxint4_block_scale_moe")
+    @register_variant_fake_op("trtllm_mxint4_block_scale_moe")
     def _fake_trtllm_mxint4_block_scale_moe(
         routing_logits: Optional[torch.Tensor],
         routing_bias: Optional[torch.Tensor],
@@ -2668,6 +2899,13 @@ def get_trtllm_moe_sm100_module():
 
         return [hidden_states.new_empty([seq_len, hidden_size], dtype=torch.bfloat16)]
 
+    if variant == "situ_b552":
+        return SimpleNamespace(
+            trtllm_fp4_block_scale_moe=trtllm_fp4_block_scale_moe_op,
+            trtllm_fp4_block_scale_routed_moe=trtllm_fp4_block_scale_moe_op,
+            trtllm_get_valid_moe_configs=moe_op.trtllm_get_valid_moe_configs,
+        )
+
     return SimpleNamespace(
         trtllm_bf16_moe=trtllm_bf16_moe_op,
         trtllm_fp8_per_tensor_scale_moe=trtllm_fp8_per_tensor_scale_moe_op,
@@ -2675,6 +2913,14 @@ def get_trtllm_moe_sm100_module():
         trtllm_fp4_block_scale_moe=trtllm_fp4_block_scale_moe_op,
         trtllm_mxint4_block_scale_moe=trtllm_mxint4_block_scale_moe_op,
     )
+
+
+def get_trtllm_moe_sm100_module():
+    return _get_trtllm_moe_sm100_module("standard")
+
+
+def get_trtllm_moe_situ_b552_module():
+    return _get_trtllm_moe_sm100_module("situ_b552")
 
 
 def _validate_bf16_gemm1_activation_params(
@@ -4086,6 +4332,502 @@ def trtllm_fp4_block_scale_routed_moe(
         output,
         tune_max_num_tokens,
         True,  # norm_topk_prob: not used for pre-computed routing
+    )
+
+
+def _validate_situ_b552_boundary(
+    routing_input_mode: int,
+    routing_logits: Optional[torch.Tensor],
+    topk_ids: Optional[torch.Tensor],
+    topk_weights: Optional[torch.Tensor],
+    routing_bias: Optional[torch.Tensor],
+    hidden_states: torch.Tensor,
+    hidden_states_scale: Optional[torch.Tensor],
+    gemm1_weights: torch.Tensor,
+    gemm1_weights_scale: torch.Tensor,
+    gemm1_bias: Optional[torch.Tensor],
+    gemm1_alpha: Optional[torch.Tensor],
+    gemm1_beta: Optional[torch.Tensor],
+    gemm1_clamp_limit: Optional[torch.Tensor],
+    gemm2_weights: torch.Tensor,
+    gemm2_weights_scale: torch.Tensor,
+    gemm2_bias: Optional[torch.Tensor],
+    output1_scale_scalar: Optional[torch.Tensor],
+    output1_scale_gate_scalar: Optional[torch.Tensor],
+    output2_scale_scalar: Optional[torch.Tensor],
+    per_token_scale: Optional[torch.Tensor],
+    num_experts: int,
+    top_k: int,
+    n_group: Optional[int],
+    topk_group: Optional[int],
+    intermediate_size: int,
+    local_expert_offset: int,
+    local_num_experts: int,
+    routed_scaling_factor: Optional[float],
+    routing_method_type: int,
+    do_finalize: bool,
+    enable_pdl: Optional[bool],
+    activation_type: int,
+    output: Optional[torch.Tensor],
+    tune_max_num_tokens: int,
+    norm_topk_prob: bool,
+    routing_replay_out: Optional[torch.Tensor],
+):
+    """Validate the complete, private b552 ABI before tuning or native access."""
+    if not isinstance(hidden_states, torch.Tensor):
+        raise TypeError("SiTU b552 hidden_states must be a torch.Tensor")
+    hidden_shape = tuple(hidden_states.shape)
+    if len(hidden_shape) != 2:
+        raise ValueError(
+            "SiTU b552 hidden_states must have shape (num_tokens, hidden_size), "
+            f"got {hidden_shape}"
+        )
+    if hidden_states.dtype != torch.float8_e4m3fn:
+        raise ValueError(
+            "SiTU b552 hidden_states must use MXFP8 E4M3 values, "
+            f"got {hidden_states.dtype}"
+        )
+    if hidden_states.device.type != "cuda":
+        raise ValueError("SiTU b552 hidden_states must be a CUDA tensor")
+    if not hidden_states.is_contiguous():
+        raise ValueError("SiTU b552 hidden_states must be contiguous")
+
+    num_tokens, hidden_size = hidden_shape
+    if num_tokens <= 0 or hidden_size <= 0:
+        raise ValueError(
+            f"SiTU b552 hidden_states dimensions must be positive, got {hidden_shape}"
+        )
+    if hidden_size % 32 != 0:
+        raise ValueError(
+            f"SiTU b552 hidden_size must be divisible by 32, got {hidden_size}"
+        )
+
+    def require_int(name, value, minimum=0):
+        if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+            raise ValueError(
+                f"SiTU b552 {name} must be an integer >= {minimum}, got {value!r}"
+            )
+
+    require_int("num_experts", num_experts, 1)
+    require_int("top_k", top_k, 1)
+    require_int("intermediate_size", intermediate_size, 1)
+    require_int("local_expert_offset", local_expert_offset)
+    require_int("local_num_experts", local_num_experts, 1)
+    require_int("tune_max_num_tokens", tune_max_num_tokens, 1)
+    if top_k > num_experts:
+        raise ValueError(f"SiTU b552 top_k must not exceed num_experts ({num_experts})")
+    if local_num_experts > num_experts or (
+        local_expert_offset + local_num_experts > num_experts
+    ):
+        raise ValueError(
+            "SiTU b552 local expert offset/count must be within num_experts"
+        )
+    if intermediate_size % 32 != 0:
+        raise ValueError(
+            "SiTU b552 intermediate_size must be divisible by 32, "
+            f"got {intermediate_size}"
+        )
+
+    if (n_group is None) != (topk_group is None):
+        raise ValueError("SiTU b552 n_group and topk_group must be set together")
+    if n_group is not None:
+        require_int("n_group", n_group, 1)
+        require_int("topk_group", topk_group, 1)
+        if n_group > num_experts or num_experts % n_group != 0:
+            raise ValueError(
+                "SiTU b552 n_group must divide num_experts and not exceed it"
+            )
+        if topk_group > n_group:
+            raise ValueError("SiTU b552 topk_group must not exceed n_group")
+    if routed_scaling_factor is not None and not math.isfinite(
+        float(routed_scaling_factor)
+    ):
+        raise ValueError("SiTU b552 routed_scaling_factor must be finite")
+    if not isinstance(do_finalize, bool):
+        raise ValueError("SiTU b552 do_finalize must be bool")
+    if enable_pdl is not None and not isinstance(enable_pdl, bool):
+        raise ValueError("SiTU b552 enable_pdl must be bool or None")
+
+    device = hidden_states.device
+
+    def validate_tensor(name, value, dtype, shape, required=True):
+        if value is None:
+            if required:
+                raise ValueError(f"SiTU b552 {name} is required")
+            return None
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"SiTU b552 {name} must be a torch.Tensor")
+        allowed_dtypes = dtype if isinstance(dtype, tuple) else (dtype,)
+        if value.dtype not in allowed_dtypes:
+            expected = " or ".join(str(item) for item in allowed_dtypes)
+            raise ValueError(
+                f"SiTU b552 {name} must have dtype {expected}, got {value.dtype}"
+            )
+        if tuple(value.shape) != shape:
+            raise ValueError(
+                f"SiTU b552 {name} must have shape {shape}, got {tuple(value.shape)}"
+            )
+        if value.device.type != "cuda":
+            raise ValueError(f"SiTU b552 {name} must be a CUDA tensor")
+        if value.device != device:
+            raise ValueError(
+                f"SiTU b552 {name} must be on {device}, got {value.device}"
+            )
+        if not value.is_contiguous():
+            raise ValueError(f"SiTU b552 {name} must be contiguous")
+        return value
+
+    validate_tensor(
+        "hidden_states_scale",
+        hidden_states_scale,
+        torch.float8_e4m3fn,
+        (num_tokens, hidden_size // 32),
+    )
+    validate_tensor(
+        "gemm1_weights",
+        gemm1_weights,
+        torch.uint8,
+        (local_num_experts, 2 * intermediate_size, hidden_size // 2),
+    )
+    validate_tensor(
+        "gemm1_weights_scale",
+        gemm1_weights_scale,
+        torch.float8_e4m3fn,
+        (local_num_experts, 2 * intermediate_size, hidden_size // 32),
+    )
+    validate_tensor(
+        "gemm2_weights",
+        gemm2_weights,
+        torch.uint8,
+        (local_num_experts, hidden_size, intermediate_size // 2),
+    )
+    validate_tensor(
+        "gemm2_weights_scale",
+        gemm2_weights_scale,
+        torch.float8_e4m3fn,
+        (local_num_experts, hidden_size, intermediate_size // 32),
+    )
+    for name, value in (
+        ("output1_scale_scalar", output1_scale_scalar),
+        ("output1_scale_gate_scalar", output1_scale_gate_scalar),
+        ("output2_scale_scalar", output2_scale_scalar),
+    ):
+        validate_tensor(name, value, torch.float32, (local_num_experts,), required=True)
+    validate_tensor(
+        "output",
+        output,
+        torch.bfloat16,
+        (num_tokens, hidden_size),
+        required=False,
+    )
+
+    routing_mode = RoutingInputMode(routing_input_mode)
+    if routing_mode == RoutingInputMode.FromLogits:
+        validate_tensor(
+            "routing_logits",
+            routing_logits,
+            (torch.bfloat16, torch.float32),
+            (num_tokens, num_experts),
+        )
+    elif routing_logits is not None:
+        raise ValueError("SiTU b552 pre-routed modes require routing_logits=None")
+    _validate_situ_b552_routing_tensors(
+        routing_mode, topk_ids, topk_weights, hidden_states, top_k
+    )
+
+    validate_tensor(
+        "routing_bias",
+        routing_bias,
+        (torch.bfloat16, torch.float32),
+        (num_experts,),
+        required=False,
+    )
+
+    if gemm1_bias is not None or gemm2_bias is not None:
+        raise NotImplementedError("SiTU b552 does not support expert GEMM bias")
+    if gemm1_clamp_limit is not None:
+        raise ValueError(
+            "SiTU b552 requires gemm1_clamp_limit=None; its cubins implement "
+            "SiTU saturation directly"
+        )
+    if per_token_scale is not None:
+        raise NotImplementedError("SiTU b552 does not support per-token scaling")
+    if norm_topk_prob is not True:
+        raise NotImplementedError("SiTU b552 requires norm_topk_prob=True")
+    if routing_replay_out is not None:
+        raise NotImplementedError("SiTU b552 does not support routing replay output")
+    if activation_type != ActivationType.Swiglu.value:
+        raise ValueError(
+            "SiTU b552 requires the private Swiglu activation ABI sentinel"
+        )
+
+    capability = get_compute_capability(device)
+    if capability not in ((10, 0), (10, 3)):
+        raise RuntimeError(
+            "The private SiTU b552 runner supports only the Blackwell SM100 "
+            f"family (SM100/B200 or SM103/B300), got SM{capability[0]}{capability[1]}"
+        )
+    if routing_method_type not in {
+        RoutingMethodType.Renormalize.value,
+        RoutingMethodType.DeepSeekV3.value,
+        RoutingMethodType.Llama4.value,
+        RoutingMethodType.RenormalizeNaive.value,
+        RoutingMethodType.TopK.value,
+    }:
+        raise ValueError(
+            "SiTU b552 supports only Renormalize, DeepSeekV3, Llama4, "
+            f"RenormalizeNaive, or TopK routing; got {routing_method_type}"
+        )
+    if gemm1_alpha is None:
+        raise ValueError("SiTU b552 requires gemm1_alpha to contain situ_beta")
+    for name, value in (("gemm1_alpha", gemm1_alpha), ("gemm1_beta", gemm1_beta)):
+        if value is None:
+            continue
+        validate_tensor(name, value, torch.float32, (local_num_experts,))
+        torch._assert_async(
+            torch.all(torch.isfinite(value) & (value > 0)),
+            f"SiTU b552 {name} must contain only finite, strictly positive values",
+        )
+
+    return routing_mode
+
+
+def _validate_situ_b552_routing_tensors(
+    routing_mode, topk_ids, topk_weights, hidden_states, top_k
+):
+    """Validate every caller-controlled routing tensor before native flat reads."""
+    routing_mode = RoutingInputMode(routing_mode)
+    expected_shape = (hidden_states.shape[0], top_k)
+
+    def validate(name, value, dtype, required=True):
+        if value is None:
+            if required:
+                raise ValueError(f"SiTU b552 {name} is required")
+            return
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"SiTU b552 {name} must be a torch.Tensor")
+        if tuple(value.shape) != expected_shape:
+            raise ValueError(
+                f"SiTU b552 {name} must have shape {expected_shape}, "
+                f"got {tuple(value.shape)}"
+            )
+        if value.dtype != dtype:
+            raise ValueError(
+                f"SiTU b552 {name} must have dtype {dtype}, got {value.dtype}"
+            )
+        if value.device.type != "cuda":
+            raise ValueError(f"SiTU b552 {name} must be a CUDA tensor")
+        if value.device != hidden_states.device:
+            raise ValueError(
+                f"SiTU b552 {name} must be on {hidden_states.device}, "
+                f"got {value.device}"
+            )
+        if not value.is_contiguous():
+            raise ValueError(f"SiTU b552 {name} must be contiguous")
+
+    if routing_mode == RoutingInputMode.FromLogits:
+        # These are optional caller-supplied output buffers.  If absent, the
+        # custom op allocates exact buffers before invoking the native runner.
+        validate("topk_ids output", topk_ids, torch.int32, required=False)
+        validate("topk_weights output", topk_weights, torch.bfloat16, required=False)
+    elif routing_mode == RoutingInputMode.PackedPrecomputed:
+        validate("packed topk_ids", topk_ids, torch.int32)
+        # Packed weights are decoded into this optional output buffer.  Direct
+        # custom-op callers may supply it, so validate it before copy_/launch.
+        validate(
+            "decoded topk_weights output",
+            topk_weights,
+            torch.bfloat16,
+            required=False,
+        )
+    elif routing_mode == RoutingInputMode.UnpackedPrecomputed:
+        validate("topk_ids", topk_ids, torch.int32)
+        validate("topk_weights", topk_weights, torch.bfloat16)
+    else:
+        raise ValueError(f"Unsupported SiTU b552 routing mode: {routing_mode}")
+
+
+def _parse_situ_b552_pre_routed_inputs(topk, hidden_states, top_k):
+    if isinstance(topk, tuple):
+        if len(topk) != 2:
+            raise ValueError(
+                "SiTU b552 unpacked routing must be exactly a "
+                "(topk_ids, topk_weights) tuple"
+            )
+        topk_ids, topk_weights = topk
+        routing_mode = RoutingInputMode.UnpackedPrecomputed
+    elif isinstance(topk, torch.Tensor):
+        topk_ids = topk
+        topk_weights = None
+        routing_mode = RoutingInputMode.PackedPrecomputed
+    else:
+        raise TypeError(
+            "SiTU b552 pre-routed input must be an int32 packed tensor or "
+            "a (topk_ids, topk_weights) tuple"
+        )
+    _validate_situ_b552_routing_tensors(
+        routing_mode, topk_ids, topk_weights, hidden_states, top_k
+    )
+    return routing_mode, topk_ids, topk_weights
+
+
+def trtllm_fp4_block_scale_situ_moe(
+    routing_logits: torch.Tensor,
+    routing_bias: Optional[torch.Tensor],
+    hidden_states: torch.Tensor,
+    hidden_states_scale: Optional[torch.Tensor],
+    gemm1_weights: torch.Tensor,
+    gemm1_weights_scale: torch.Tensor,
+    gemm1_bias: Optional[torch.Tensor],
+    gemm1_alpha: Optional[torch.Tensor],
+    gemm1_beta: Optional[torch.Tensor],
+    gemm1_clamp_limit: Optional[torch.Tensor],
+    gemm2_weights: torch.Tensor,
+    gemm2_weights_scale: torch.Tensor,
+    gemm2_bias: Optional[torch.Tensor],
+    output1_scale_scalar: Optional[torch.Tensor],
+    output1_scale_gate_scalar: Optional[torch.Tensor],
+    output2_scale_scalar: Optional[torch.Tensor],
+    num_experts: int,
+    top_k: int,
+    n_group: Optional[int],
+    topk_group: Optional[int],
+    intermediate_size: int,
+    local_expert_offset: int,
+    local_num_experts: int,
+    routed_scaling_factor: Optional[float],
+    routing_method_type: int,
+    do_finalize: bool = True,
+    enable_pdl: Optional[bool] = None,
+    per_token_scale: Optional[torch.Tensor] = None,
+    output: Optional[torch.Tensor] = None,
+    tune_max_num_tokens: int = 8192,
+    norm_topk_prob: bool = True,
+    routing_replay_out: Optional[torch.Tensor] = None,
+) -> List[torch.Tensor]:
+    """MXFP8/MXFP4 MoE with the private b552 fused SiTU epilogue.
+
+    ``gemm1_alpha`` is ``situ_beta``.  ``gemm1_beta`` is the optional
+    ``situ_linear_beta``; passing ``None`` leaves the up projection unclamped.
+    This API intentionally has no ``activation_type`` argument.
+    """
+    return get_trtllm_moe_situ_b552_module().trtllm_fp4_block_scale_moe(
+        RoutingInputMode.FromLogits,
+        routing_logits,
+        None,
+        None,
+        routing_bias,
+        hidden_states,
+        hidden_states_scale,
+        gemm1_weights,
+        gemm1_weights_scale,
+        None,
+        gemm1_alpha,
+        gemm1_beta,
+        None,
+        gemm2_weights,
+        gemm2_weights_scale,
+        None,
+        output1_scale_scalar,
+        output1_scale_gate_scalar,
+        output2_scale_scalar,
+        per_token_scale,
+        num_experts,
+        top_k,
+        n_group,
+        topk_group,
+        intermediate_size,
+        local_expert_offset,
+        local_num_experts,
+        routed_scaling_factor,
+        routing_method_type,
+        do_finalize,
+        enable_pdl,
+        ActivationType.Swiglu.value,
+        output,
+        tune_max_num_tokens,
+        norm_topk_prob,
+        routing_replay_out,
+    )
+
+
+def trtllm_fp4_block_scale_situ_routed_moe(
+    topk_ids: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+    routing_bias: Optional[torch.Tensor],
+    hidden_states: torch.Tensor,
+    hidden_states_scale: Optional[torch.Tensor],
+    gemm1_weights: torch.Tensor,
+    gemm1_weights_scale: torch.Tensor,
+    gemm1_bias: Optional[torch.Tensor],
+    gemm1_alpha: Optional[torch.Tensor],
+    gemm1_beta: Optional[torch.Tensor],
+    gemm1_clamp_limit: Optional[torch.Tensor],
+    gemm2_weights: torch.Tensor,
+    gemm2_weights_scale: torch.Tensor,
+    gemm2_bias: Optional[torch.Tensor],
+    output1_scale_scalar: Optional[torch.Tensor],
+    output1_scale_gate_scalar: Optional[torch.Tensor],
+    output2_scale_scalar: Optional[torch.Tensor],
+    num_experts: int,
+    top_k: int,
+    n_group: Optional[int],
+    topk_group: Optional[int],
+    intermediate_size: int,
+    local_expert_offset: int,
+    local_num_experts: int,
+    routed_scaling_factor: Optional[float],
+    routing_method_type: int,
+    do_finalize: bool = True,
+    enable_pdl: Optional[bool] = None,
+    per_token_scale: Optional[torch.Tensor] = None,
+    output: Optional[torch.Tensor] = None,
+    tune_max_num_tokens: int = 8192,
+) -> List[torch.Tensor]:
+    """Pre-routed form of :func:`trtllm_fp4_block_scale_situ_moe`.
+
+    A packed ``int32`` tensor stores the signed expert ID in the high 16 bits
+    and the BF16 routing-weight bits in the low 16 bits.  The unpacked form is
+    exactly ``(int32_ids, bfloat16_weights)``.
+    """
+    routing_mode, topk_ids_tensor, topk_weights = _parse_situ_b552_pre_routed_inputs(
+        topk_ids, hidden_states, top_k
+    )
+    return get_trtllm_moe_situ_b552_module().trtllm_fp4_block_scale_routed_moe(
+        routing_mode,
+        None,
+        topk_ids_tensor,
+        topk_weights,
+        routing_bias,
+        hidden_states,
+        hidden_states_scale,
+        gemm1_weights,
+        gemm1_weights_scale,
+        None,
+        gemm1_alpha,
+        gemm1_beta,
+        None,
+        gemm2_weights,
+        gemm2_weights_scale,
+        None,
+        output1_scale_scalar,
+        output1_scale_gate_scalar,
+        output2_scale_scalar,
+        per_token_scale,
+        num_experts,
+        top_k,
+        n_group,
+        topk_group,
+        intermediate_size,
+        local_expert_offset,
+        local_num_experts,
+        routed_scaling_factor,
+        routing_method_type,
+        do_finalize,
+        enable_pdl,
+        ActivationType.Swiglu.value,
+        output,
+        tune_max_num_tokens,
+        True,
     )
 
 

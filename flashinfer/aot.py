@@ -67,6 +67,7 @@ from .jit.fused_moe import (
     gen_cutlass_fused_moe_sm120_module,
     gen_trtllm_gen_fused_moe_sm100_module,
 )
+from .jit.situ_b552 import gen_trtllm_gen_fused_moe_situ_b552_module
 from .jit.bgmv_moe import gen_bgmv_moe_module
 from .jit.gdn import gen_gdn_prefill_sm90_module
 from .jit.gemm import (
@@ -528,6 +529,11 @@ def gen_all_modules(
             )
             jit_specs.append(gen_tgv_gemm_sm10x_module(torch.float16, use_sm_100f=True))
             jit_specs.append(gen_moe_utils_module())
+        if os.environ.get("FLASHINFER_BUILD_SITU_B552", "").lower() in (
+            "1",
+            "true",
+        ) and (has_sm100 or has_sm100f or has_sm103):
+            jit_specs.append(gen_trtllm_gen_fused_moe_situ_b552_module())
         if has_sm100 or has_sm103:
             jit_specs.append(gen_mm_bf16_cublaslt_module())
         if has_sm103:

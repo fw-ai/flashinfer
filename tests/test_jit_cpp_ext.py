@@ -1,5 +1,7 @@
 import subprocess
 
+from packaging.version import Version
+
 from flashinfer.jit import core, cpp_ext
 
 
@@ -34,6 +36,65 @@ def test_generate_ninja_uses_sccache_compatible_nvcc_depfile_flag(
 
     assert "--generate-dependencies-with-compile -MF $out.d" in ninja
     assert "--dependency-output" not in ninja
+
+
+def test_jit_spec_binds_toolchain_and_ignores_environment_overrides(
+    monkeypatch, tmp_path
+):
+    malicious_environment = {
+        "CC": "/malicious/cc",
+        "CXX": "/malicious/c++",
+        "FLASHINFER_NVCC": "/malicious/nvcc",
+        "FLASHINFER_CXX_LAUNCHER": "malicious-cxx-launcher",
+        "FLASHINFER_NVCC_LAUNCHER": "malicious-nvcc-launcher",
+        "FLASHINFER_EXTRA_CFLAGS": "-DMALICIOUS_HOST",
+        "FLASHINFER_EXTRA_CUDAFLAGS": "-DMALICIOUS_CUDA",
+        "FLASHINFER_EXTRA_LDFLAGS": "-Wl,--malicious-link",
+    }
+    for name, value in malicious_environment.items():
+        monkeypatch.setenv(name, value)
+
+    monkeypatch.setattr(core, "check_cuda_arch", lambda: None)
+    monkeypatch.setattr(core, "get_nvcc_parallelism_flags", lambda: ["--threads=1"])
+    monkeypatch.setattr(cpp_ext, "get_cuda_path", lambda: "/contract/cuda")
+    monkeypatch.setattr(cpp_ext, "get_cuda_version", lambda: Version("13.2"))
+    monkeypatch.setattr(cpp_ext.jit_env, "FLASHINFER_JIT_DIR", tmp_path / "jit")
+
+    cxx = "/contract/toolchain/bin/c++"
+    nvcc = "/contract/cuda/bin/nvcc"
+    spec = core.gen_jit_spec(
+        name="bound_toolchain",
+        sources=[tmp_path / "generated/kernel.cu"],
+        cxx=cxx,
+        nvcc=nvcc,
+        cxx_launcher="",
+        nvcc_launcher="",
+        use_environment_flags=False,
+    )
+    spec.write_ninja()
+    ninja = spec.ninja_path.read_text()
+    variables = {}
+    for line in ninja.splitlines():
+        for name in (
+            "cxx",
+            "nvcc",
+            "cxx_launcher",
+            "nvcc_launcher",
+        ):
+            prefix = f"{name} = "
+            if line.startswith(prefix):
+                variables[name] = line.removeprefix(prefix)
+
+    assert variables == {
+        "cxx": cxx,
+        "nvcc": nvcc,
+        "cxx_launcher": "",
+        "nvcc_launcher": "",
+    }
+    assert "rule link" in ninja
+    assert "command = $cxx $in $ldflags -o $out" in ninja
+    assert "-ccbin" not in ninja
+    assert not any(value in ninja for value in malicious_environment.values())
 
 
 def test_debug_jit_uses_sccache_compatible_nvcc_device_debug_flag(monkeypatch):
