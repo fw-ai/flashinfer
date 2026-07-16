@@ -24,6 +24,8 @@ import re
 import shutil
 import stat
 import subprocess
+import time
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -81,6 +83,9 @@ CUBIN_COMPILE_CONTRACT = {
 }
 DETERMINISTIC_WORK_ROOT = Path(CUBIN_COMPILE_CONTRACT["work_root"])
 _WORK_ROOT_LOCK = ".build.lock"
+_DOWNLOAD_TIMEOUT_SECONDS = 60
+_DOWNLOAD_RETRY_DELAYS_SECONDS = (1, 2, 4)
+_RETRYABLE_HTTP_STATUS = frozenset({403, 408, 429, 500, 502, 503, 504})
 
 BASE_ARTIFACT_ROOT = (
     "b55211623be7f5697c5262ffd8361fc06c147bc9/batched_gemm-b3c1646-c111d7c/"
@@ -259,8 +264,27 @@ def _locked_deterministic_work_root():
 
 
 def _read_url(url: str) -> bytes:
-    with urlopen(url) as response:  # noqa: S310 - immutable, hash-verified inputs
-        return response.read()
+    last_error = None
+    for attempt in range(len(_DOWNLOAD_RETRY_DELAYS_SECONDS) + 1):
+        try:
+            with urlopen(  # noqa: S310 - immutable, hash-verified inputs
+                url, timeout=_DOWNLOAD_TIMEOUT_SECONDS
+            ) as response:
+                return response.read()
+        except HTTPError as error:
+            if error.code not in _RETRYABLE_HTTP_STATUS:
+                raise
+            last_error = error
+        except (URLError, TimeoutError) as error:
+            last_error = error
+
+        if attempt < len(_DOWNLOAD_RETRY_DELAYS_SECONDS):
+            time.sleep(_DOWNLOAD_RETRY_DELAYS_SECONDS[attempt])
+
+    raise RuntimeError(
+        "Failed to download immutable SiTU b552 build input after "
+        f"{len(_DOWNLOAD_RETRY_DELAYS_SECONDS) + 1} attempts: {url}"
+    ) from last_error
 
 
 def _write_verified(path: Path, data: bytes, expected_sha256: str) -> None:

@@ -977,17 +977,30 @@ def test_private_cubin_overlay_preserves_the_complete_stock_tree(tmp_path):
         )
 
     download_source = path.read_text().split("def _download_cubins", 1)[1]
+    staged_overlay_index = download_source.index(
+        "_build_situ_b552_overlay(staged_cubin_dir)"
+    )
+    download_index = download_source.index("artifacts.download_artifacts()")
     authenticated_index = download_source.index(
         "_verify_authenticated_stock_cubin_tree("
     )
-    overlay_index = download_source.index("_build_situ_b552_overlay(cubin_dir)")
+    install_index = download_source.index(
+        "_install_staged_situ_b552_overlay(staged_cubin_dir, cubin_dir)"
+    )
     after_index = download_source.index(
         "stock_after = _snapshot_stock_cubin_tree(cubin_dir)"
     )
     exact_after_index = download_source.index(
         "_assert_exact_stock_cubin_tree(expected_stock, stock_after)"
     )
-    assert authenticated_index < overlay_index < after_index < exact_after_index
+    assert (
+        staged_overlay_index
+        < download_index
+        < authenticated_index
+        < install_index
+        < after_index
+        < exact_after_index
+    )
 
 
 def _function_args(tree: ast.Module, name: str) -> list[str]:

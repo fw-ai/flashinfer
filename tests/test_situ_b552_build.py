@@ -30,6 +30,36 @@ def _load_script_module():
     return module
 
 
+def test_build_input_download_retries_transient_403(monkeypatch):
+    module = _load_script_module()
+    calls = []
+    sleeps = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"pinned-artifact"
+
+    def fake_urlopen(url, *, timeout):
+        calls.append((url, timeout))
+        if len(calls) < 3:
+            raise module.HTTPError(url, 403, "transient edge rejection", None, None)
+        return Response()
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+
+    url = "https://artifacts.example.invalid/pinned.cubin"
+    assert module._read_url(url) == b"pinned-artifact"
+    assert calls == [(url, module._DOWNLOAD_TIMEOUT_SECONDS)] * 3
+    assert sleeps == [1, 2]
+
+
 def _make_source_snapshot(module, root: Path) -> list[Path]:
     source_dir = root / module.SOURCE_RELATIVE_DIR
     source_dir.mkdir(parents=True)

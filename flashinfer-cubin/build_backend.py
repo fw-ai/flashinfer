@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
 from setuptools import build_meta as _orig
@@ -314,6 +316,37 @@ def _build_situ_b552_overlay(cubin_dir: Path) -> None:
         raise RuntimeError(f"SiTU b552 build did not produce required files: {missing}")
 
 
+def _install_staged_situ_b552_overlay(staged_cubin_dir: Path, cubin_dir: Path) -> None:
+    """Replace only the private overlay with a staged build.
+
+    Building the private closure before the much larger stock download avoids
+    starting its FC2 fetches immediately after roughly 16,000 public artifact
+    requests. Keep the staged tree outside the cubin directory until the stock
+    snapshot is authenticated, then prove installing it did not alter stock.
+    """
+    source = staged_cubin_dir / _SITU_OVERLAY_ROOT
+    destination = cubin_dir / _SITU_OVERLAY_ROOT
+    if source.is_symlink() or not source.is_dir():
+        raise RuntimeError(f"Missing or unsafe staged SiTU overlay: {source}")
+    for path in source.rglob("*"):
+        if path.is_symlink():
+            raise RuntimeError(f"Staged SiTU overlay contains a symlink: {path}")
+
+    private_parent = destination.parent
+    if private_parent.is_symlink():
+        raise RuntimeError(f"Unsafe private overlay parent: {private_parent}")
+    private_parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        raise RuntimeError(f"Unsafe existing SiTU overlay: {destination}")
+    if destination.exists():
+        if not destination.is_dir():
+            raise RuntimeError(
+                f"Existing SiTU overlay is not a directory: {destination}"
+            )
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination)
+
+
 def _download_cubins():
     """Download cubins to the source directory before building."""
     from flashinfer import artifacts
@@ -326,7 +359,20 @@ def _download_cubins():
     original_cubin_dir = os.environ.get("FLASHINFER_CUBIN_DIR")
     os.environ["FLASHINFER_CUBIN_DIR"] = str(cubin_dir)
 
+    staged_directory = None
     try:
+        staged_cubin_dir = None
+        if _situ_b552_enabled():
+            # Fetch and compile the small hash-pinned b552 closure before the
+            # stock downloader issues roughly 16,000 public artifact requests.
+            # The ARM wheel build otherwise received a transient HTTP 403 when
+            # it started the private FC2 fetches.
+            staged_directory = tempfile.TemporaryDirectory(
+                prefix="flashinfer-situ-b552-stage-"
+            )
+            staged_cubin_dir = Path(staged_directory.name)
+            _build_situ_b552_overlay(staged_cubin_dir)
+
         print(f"Downloading cubins to {cubin_dir}...")
         artifacts.download_artifacts()
         print(f"Successfully downloaded cubins to {cubin_dir}")
@@ -338,16 +384,18 @@ def _download_cubins():
         expected_stock, stock_before = _verify_authenticated_stock_cubin_tree(
             cubin_dir, artifacts
         )
-        if _situ_b552_enabled():
+        if staged_cubin_dir is not None:
             # The private bundle is additive.  Bind that invariant to every
             # wheel build so no stock d2c cubin, header, or metadata file can
             # be replaced, removed, or added accidentally.
-            _build_situ_b552_overlay(cubin_dir)
+            _install_staged_situ_b552_overlay(staged_cubin_dir, cubin_dir)
             stock_after = _snapshot_stock_cubin_tree(cubin_dir)
             _assert_stock_cubin_tree_unchanged(stock_before, stock_after)
             _assert_exact_stock_cubin_tree(expected_stock, stock_after)
 
     finally:
+        if staged_directory is not None:
+            staged_directory.cleanup()
         # Restore original environment variable
         if original_cubin_dir:
             os.environ["FLASHINFER_CUBIN_DIR"] = original_cubin_dir
