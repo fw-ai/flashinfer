@@ -14,9 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import sys
+import hashlib
 import os
 import platform
+import shutil
+import sys
+import zipfile
 from pathlib import Path
 from setuptools import build_meta as _orig
 from wheel.bdist_wheel import bdist_wheel
@@ -28,6 +31,133 @@ from build_utils import get_git_version
 
 # Skip version check when building flashinfer-jit-cache package
 os.environ["FLASHINFER_DISABLE_VERSION_CHECK"] = "1"
+
+
+_SITU_BUILD_FLAG = "FLASHINFER_BUILD_SITU_B552"
+_SITU_SOURCE_ENV = "FLASHINFER_SITU_B552_SOURCE_ROOT"
+_SITU_CUTLASS_ENV = "FLASHINFER_SITU_B552_CUTLASS_ROOT"
+
+
+def _situ_b552_build_enabled() -> bool:
+    return os.environ.get(_SITU_BUILD_FLAG, "").lower() in ("1", "true")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _require_regular_elf(path: Path, label: str) -> tuple[int, str]:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"{label} must be a regular non-symlink file: {path}")
+    size = path.stat().st_size
+    if size <= 4:
+        raise RuntimeError(f"{label} is empty or truncated: {path}")
+    with path.open("rb") as stream:
+        if stream.read(4) != b"\x7fELF":
+            raise RuntimeError(f"{label} is not an ELF shared object: {path}")
+    return size, _sha256_file(path)
+
+
+def _build_and_stage_situ_b552_aot(
+    output_dir: Path, verbose: bool
+) -> tuple[str, Path] | None:
+    """Build the private module explicitly and add it to the wheel source tree.
+
+    This is intentionally independent from aot.gen_all_modules. The SiTU wheel
+    contract must not silently depend on a generic module-selection predicate,
+    and an installed AOT cache must not satisfy this source build.
+    """
+    if not _situ_b552_build_enabled():
+        return None
+
+    missing_env = [
+        name
+        for name in (_SITU_SOURCE_ENV, _SITU_CUTLASS_ENV)
+        if not os.environ.get(name)
+    ]
+    if missing_env:
+        raise RuntimeError(
+            "SiTU b552 JIT-cache builds require: " + ", ".join(missing_env)
+        )
+
+    from flashinfer.jit import build_jit_specs
+    from flashinfer.jit.situ_b552 import (
+        MODULE_NAME,
+        gen_trtllm_gen_fused_moe_situ_b552_module,
+    )
+
+    spec = gen_trtllm_gen_fused_moe_situ_b552_module()
+    if spec.name != MODULE_NAME:
+        raise RuntimeError(
+            f"SiTU b552 JIT spec name mismatch: {spec.name!r} != {MODULE_NAME!r}"
+        )
+
+    # Always target the source-build path. get_library_path may resolve an
+    # already-installed AOT wheel, which would defeat the matched-wheel build.
+    build_jit_specs([spec], verbose=verbose, skip_prebuilt=False)
+    source = spec.jit_library_path
+    source_size, source_digest = _require_regular_elf(
+        source, "source-built SiTU b552 module"
+    )
+
+    destination = output_dir / MODULE_NAME / f"{MODULE_NAME}.so"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        raise RuntimeError(
+            f"staged SiTU b552 module destination must not be a symlink: {destination}"
+        )
+    shutil.copy2(source, destination)
+    staged_size, staged_digest = _require_regular_elf(
+        destination, "staged SiTU b552 module"
+    )
+    if (staged_size, staged_digest) != (source_size, source_digest):
+        raise RuntimeError(
+            "Staged SiTU b552 module differs from its source-built shared object"
+        )
+    return MODULE_NAME, destination
+
+
+def _verify_situ_b552_wheel(
+    wheel_path: Path, module_name: str, staged_module: Path
+) -> None:
+    staged_size, staged_digest = _require_regular_elf(
+        staged_module, "staged SiTU b552 module"
+    )
+    expected_member = f"flashinfer_jit_cache/jit_cache/{module_name}/{module_name}.so"
+    with zipfile.ZipFile(wheel_path) as wheel:
+        names = wheel.namelist()
+        if len(names) != len(set(names)):
+            raise RuntimeError(
+                f"JIT-cache wheel has duplicate ZIP members: {wheel_path}"
+            )
+        if names.count(expected_member) != 1:
+            raise RuntimeError(
+                f"JIT-cache wheel is missing exact SiTU b552 member {expected_member}"
+            )
+        info = wheel.getinfo(expected_member)
+        if info.file_size != staged_size:
+            raise RuntimeError(
+                "JIT-cache wheel SiTU b552 module size differs from staged module: "
+                f"{info.file_size} != {staged_size}"
+            )
+        member_digest = hashlib.sha256()
+        with wheel.open(info) as stream:
+            magic = stream.read(4)
+            member_digest.update(magic)
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                member_digest.update(chunk)
+    if magic != b"\x7fELF":
+        raise RuntimeError(
+            "JIT-cache wheel SiTU b552 member is not an ELF shared object"
+        )
+    if member_digest.hexdigest() != staged_digest:
+        raise RuntimeError(
+            "JIT-cache wheel SiTU b552 member differs from staged source-built module"
+        )
 
 
 def _create_build_metadata():
@@ -132,6 +262,7 @@ def _compile_jit_cache(output_dir: Path, verbose: bool = True):
         verbose=verbose,
         skip_prebuilt=False,
     )
+    _build_and_stage_situ_b552_aot(output_dir, verbose)
 
 
 def _build_aot_modules():
@@ -218,7 +349,24 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     _prepare_build()
 
     with _MonkeyPatchBdistWheel():
-        return _orig.build_wheel(wheel_directory, config_settings, metadata_directory)
+        wheel_name = _orig.build_wheel(
+            wheel_directory, config_settings, metadata_directory
+        )
+
+    if _situ_b552_build_enabled():
+        from flashinfer.jit.situ_b552 import MODULE_NAME
+
+        staged_module = (
+            Path(__file__).parent
+            / "flashinfer_jit_cache"
+            / "jit_cache"
+            / MODULE_NAME
+            / f"{MODULE_NAME}.so"
+        )
+        _verify_situ_b552_wheel(
+            Path(wheel_directory) / wheel_name, MODULE_NAME, staged_module
+        )
+    return wheel_name
 
 
 def build_editable(wheel_directory, config_settings=None, metadata_directory=None):

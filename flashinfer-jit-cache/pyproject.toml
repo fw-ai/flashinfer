@@ -44,4 +44,4 @@ include-package-data = true
 version = {attr = "flashinfer_jit_cache.__version__"}
 
 [tool.setuptools.package-data]
-flashinfer_jit_cache = ["jit_cache/**/*.so"]
+flashinfer_jit_cache = ["jit_cache/*/*.so"]
