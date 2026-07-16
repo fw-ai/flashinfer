@@ -20,7 +20,9 @@ import platform
 import shutil
 import sys
 import zipfile
-from pathlib import Path
+from email.parser import BytesParser
+from email.policy import compat32
+from pathlib import Path, PurePosixPath
 from setuptools import build_meta as _orig
 from wheel.bdist_wheel import bdist_wheel
 
@@ -127,18 +129,93 @@ def _verify_situ_b552_wheel(
     staged_size, staged_digest = _require_regular_elf(
         staged_module, "staged SiTU b552 module"
     )
-    expected_member = f"flashinfer_jit_cache/jit_cache/{module_name}/{module_name}.so"
+    logical_member = (
+        PurePosixPath("flashinfer_jit_cache/jit_cache")
+        / module_name
+        / f"{module_name}.so"
+    )
     with zipfile.ZipFile(wheel_path) as wheel:
-        names = wheel.namelist()
+        infos = wheel.infolist()
+        names = [info.filename for info in infos]
         if len(names) != len(set(names)):
             raise RuntimeError(
                 f"JIT-cache wheel has duplicate ZIP members: {wheel_path}"
             )
-        if names.count(expected_member) != 1:
+
+        file_members = []
+        for info in infos:
+            if info.is_dir():
+                continue
+            raw_member = info.filename
+            member = PurePosixPath(raw_member)
+            if (
+                member.is_absolute()
+                or ".." in member.parts
+                or "\\" in raw_member
+                or raw_member != member.as_posix()
+            ):
+                raise RuntimeError(
+                    f"JIT-cache wheel has unsafe or noncanonical member {raw_member!r}"
+                )
+            file_members.append((member, info))
+
+        dist_info_roots = sorted(
+            {
+                PurePosixPath(member.parts[0])
+                for member, _ in file_members
+                if member.parts and member.parts[0].endswith(".dist-info")
+            }
+        )
+        if len(dist_info_roots) != 1:
             raise RuntimeError(
-                f"JIT-cache wheel is missing exact SiTU b552 member {expected_member}"
+                "JIT-cache wheel must contain exactly one top-level .dist-info root, "
+                f"found {[str(path) for path in dist_info_roots]}"
             )
-        info = wheel.getinfo(expected_member)
+
+        dist_info_root = dist_info_roots[0]
+        wheel_member = dist_info_root / "WHEEL"
+        wheel_infos = [info for member, info in file_members if member == wheel_member]
+        if len(wheel_infos) != 1:
+            raise RuntimeError(
+                f"JIT-cache wheel must contain exactly one {wheel_member} member"
+            )
+        wheel_info = wheel_infos[0]
+        metadata = BytesParser(policy=compat32).parsebytes(wheel.read(wheel_info))
+        root_is_purelib_values = metadata.get_all("Root-Is-Purelib", [])
+        if len(root_is_purelib_values) != 1:
+            raise RuntimeError(
+                "JIT-cache WHEEL metadata must contain exactly one "
+                "Root-Is-Purelib header"
+            )
+        root_is_purelib_text = root_is_purelib_values[0].strip().lower()
+        if root_is_purelib_text not in ("true", "false"):
+            raise RuntimeError(
+                "JIT-cache WHEEL metadata has invalid Root-Is-Purelib value: "
+                f"{root_is_purelib_values[0]!r}"
+            )
+
+        if root_is_purelib_text == "true":
+            expected_member = logical_member
+        else:
+            dist_info_name = dist_info_root.name
+            data_name = f"{dist_info_name.removesuffix('.dist-info')}.data"
+            expected_member = PurePosixPath(data_name) / "purelib" / logical_member
+
+        logical_parts = logical_member.parts
+        shadow_members = sorted(
+            member
+            for member, _ in file_members
+            if len(member.parts) >= len(logical_parts)
+            and member.parts[-len(logical_parts) :] == logical_parts
+        )
+        if shadow_members != [expected_member]:
+            raise RuntimeError(
+                "JIT-cache wheel must contain exactly one SiTU b552 member at "
+                f"metadata-derived purelib path {expected_member}; found "
+                f"{[str(member) for member in shadow_members]}"
+            )
+
+        info = wheel.getinfo(expected_member.as_posix())
         if info.file_size != staged_size:
             raise RuntimeError(
                 "JIT-cache wheel SiTU b552 module size differs from staged module: "
