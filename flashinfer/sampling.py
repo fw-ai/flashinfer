@@ -33,6 +33,7 @@ from .trace.templates.sampling import (
     top_k_top_p_sampling_from_logits_trace,
     top_k_top_p_sampling_trace,
     top_p_renorm_probs_trace,
+    top_p_mask_trace,
     top_p_sampling_trace,
 )
 from .utils import (
@@ -511,6 +512,41 @@ def get_sampling_module():
     ) -> torch.Tensor:
         return torch.empty_like(probs)
 
+    # torch library for top_p_mask
+
+    @register_custom_op("flashinfer::top_p_mask", mutates_args=("workspace",))
+    def top_p_mask(
+        probs: torch.Tensor,
+        maybe_top_p_arr: Optional[torch.Tensor],
+        top_p_val: float,
+        is_deterministic: bool,
+        workspace: torch.Tensor,
+    ) -> torch.Tensor:
+        probs = probs.float()
+        maybe_top_p_arr = (
+            maybe_top_p_arr.float() if maybe_top_p_arr is not None else None
+        )
+        renorm_probs = torch.empty_like(probs, dtype=torch.bool)
+        module.top_p_mask(
+            probs,
+            renorm_probs,
+            maybe_top_p_arr,
+            top_p_val,
+            is_deterministic,
+            workspace,
+        )
+        return renorm_probs
+
+    @register_fake_op("flashinfer::top_p_mask")
+    def _fake_top_p_mask(
+        probs: torch.Tensor,
+        maybe_top_p_arr: Optional[torch.Tensor],
+        top_p_val: float,
+        is_deterministic: bool,
+        workspace: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty_like(probs, dtype=torch.bool)
+
     # torch library for top_k_renorm_probs
 
     @register_custom_op(
@@ -659,6 +695,7 @@ def get_sampling_module():
         min_p_sampling_from_probs=min_p_sampling_from_probs,
         top_k_top_p_sampling_from_probs=top_k_top_p_sampling_from_probs,
         top_p_renorm_probs=top_p_renorm_probs,
+        top_p_mask=top_p_mask,
         top_k_renorm_probs=top_k_renorm_probs,
         top_k_mask_logits=top_k_mask_logits,
         chain_speculative_sampling=chain_speculative_sampling,
@@ -1802,6 +1839,13 @@ def top_p_renorm_probs(
     sampling_from_probs
     top_k_renorm_probs
     """
+    workspace = _top_p_workspace(probs, is_deterministic)
+    return get_sampling_module().top_p_renorm_probs(
+        probs, *_to_tensor_scalar_tuple(top_p), is_deterministic, workspace
+    )
+
+
+def _top_p_workspace(probs: torch.Tensor, is_deterministic: bool) -> torch.Tensor:
     batch_size = probs.size(0)
     vocab_size = probs.size(1)
     # Workspace size for AIR Top-P radix algorithm.
@@ -1818,8 +1862,57 @@ def top_p_renorm_probs(
         + align256(4 * buf_len * batch_size)  # buf1
         + align256(4 * buf_len * batch_size)  # buf2
     )
-    workspace = torch.empty(ws_size, dtype=torch.uint8, device=probs.device)
-    return get_sampling_module().top_p_renorm_probs(
+    return torch.empty(ws_size, dtype=torch.uint8, device=probs.device)
+
+
+@flashinfer_api(trace=top_p_mask_trace)
+def top_p_mask(
+    probs: torch.Tensor,
+    top_p: Union[torch.Tensor, float],
+    is_deterministic: bool = False,
+) -> torch.Tensor:
+    """Return a bool removal mask for top-p filtering of normalized probabilities.
+
+    True marks entries that ``top_p_renorm_probs`` would make zero, including
+    existing zeros and FP32 values flushed to zero during renormalization.
+    Rows must contain nonnegative probabilities summing to one (up to FP32
+    rounding), or all zeros. Inputs are converted to contiguous FP32.
+
+    Parameters
+    ----------
+    probs : torch.Tensor
+        CUDA probability matrix of shape ``(batch_size, vocab_size)``.
+    top_p : Union[torch.Tensor, float]
+        Scalar threshold or CUDA tensor of shape ``(batch_size,)`` in [0, 1].
+    is_deterministic : bool
+        Use deterministic AIR radix selection. Defaults to False.
+
+    Returns
+    -------
+    torch.Tensor
+        Bool tensor with the same shape and device as ``probs``.
+
+    Notes
+    -----
+    Uses vocabulary-parallel output for 1..64 rows and vocabularies >= 2048.
+    Other shapes use ``top_p_renorm_probs(probs, top_p) == 0``. No probability
+    normalization or host readback is performed to check the input contract.
+    """
+    if probs.ndim != 2 or not probs.is_cuda:
+        raise ValueError("probs must be a 2D CUDA tensor")
+    probs = probs.float().contiguous()
+    if isinstance(top_p, torch.Tensor):
+        if top_p.device != probs.device or top_p.shape != (probs.size(0),):
+            raise ValueError(
+                "top_p must have shape (batch_size,) on the same device as probs"
+            )
+        top_p = top_p.float().contiguous()
+    if probs.numel() == 0:
+        return torch.empty_like(probs, dtype=torch.bool)
+    if probs.size(0) > 64 or probs.size(1) < 2048:
+        return top_p_renorm_probs(probs, top_p, is_deterministic) == 0
+    workspace = _top_p_workspace(probs, is_deterministic)
+    return get_sampling_module().top_p_mask(
         probs, *_to_tensor_scalar_tuple(top_p), is_deterministic, workspace
     )
 

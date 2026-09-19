@@ -58,6 +58,57 @@ void top_p_renorm_probs(TensorView probs, TensorView renorm_probs,
       << "TopPRenormProb failed with error code " << cudaGetErrorString(status);
 }
 
+// The Python API handles small vocabularies with the existing renorm fallback.
+void top_p_mask(TensorView probs, TensorView output, Optional<TensorView> maybe_top_p_arr,
+                double top_p_val, bool is_deterministic, TensorView workspace) {
+  CHECK_INPUT(probs);
+  CHECK_INPUT(output);
+  CHECK_INPUT(workspace);
+  CHECK_DIM(2, probs);
+  CHECK_DIM(2, output);
+  CHECK_DIM(1, workspace);
+  CHECK_DEVICE(probs, output);
+  CHECK_DEVICE(probs, workspace);
+  TVM_FFI_ICHECK(probs.dtype() == dl_float32);
+  TVM_FFI_ICHECK(output.dtype().code == kDLBool && output.dtype().bits == 8);
+  TVM_FFI_ICHECK(workspace.dtype().code == kDLUInt && workspace.dtype().bits == 8);
+  TVM_FFI_ICHECK(output.size(0) == probs.size(0) && output.size(1) == probs.size(1));
+  TVM_FFI_ICHECK(probs.size(0) > 0 && probs.size(0) <= 64);
+  TVM_FFI_ICHECK(probs.size(1) >= sampling::air_top_p::NUM_BUCKETS);
+  check_tensor_param(maybe_top_p_arr, probs);
+  float* top_p_arr = nullptr;
+  if (maybe_top_p_arr.has_value()) {
+    auto param = maybe_top_p_arr.value();
+    CHECK_INPUT(param);
+    CHECK_DEVICE(probs, param);
+    TVM_FFI_ICHECK(param.dtype() == dl_float32);
+    top_p_arr = static_cast<float*>(param.data_ptr());
+  }
+  auto align256 = [](size_t n) { return (n + 255) / 256 * 256; };
+  const auto batch = probs.size(0), vocab = probs.size(1);
+  const size_t required =
+      align256(sizeof(sampling::air_top_p::Counter<float>) * batch) +
+      align256((is_deterministic ? sizeof(uint64_t) : sizeof(float)) * 2048 * batch) +
+      align256(sizeof(sampling::air_top_p::IdxT) * 2048 * batch) +
+      2 * align256(sizeof(float) * sampling::air_top_p::calcBufLen<float>(vocab) * batch);
+  TVM_FFI_ICHECK(workspace.size(0) >= required);
+  ffi::CUDADeviceGuard guard(probs.device().device_id);
+  auto stream = get_stream(probs.device());
+  cudaError_t status;
+  if (is_deterministic) {
+    status = sampling::air_top_p::AirTopPRenormProb<true, float, true>(
+        static_cast<float*>(probs.data_ptr()), static_cast<bool*>(output.data_ptr()), top_p_arr,
+        batch, top_p_val, vocab, workspace.data_ptr(), stream);
+  } else {
+    status = sampling::air_top_p::AirTopPRenormProb<false, float, true>(
+        static_cast<float*>(probs.data_ptr()), static_cast<bool*>(output.data_ptr()), top_p_arr,
+        batch, top_p_val, vocab, workspace.data_ptr(), stream);
+  }
+  TVM_FFI_ICHECK(status == cudaSuccess) << cudaGetErrorString(status);
+  status = cudaGetLastError();
+  TVM_FFI_ICHECK(status == cudaSuccess) << cudaGetErrorString(status);
+}
+
 void top_k_renorm_probs(TensorView probs, TensorView renorm_probs,
                         Optional<TensorView> maybe_top_k_arr, int64_t top_k_val,
                         TensorView row_states_buffer) {

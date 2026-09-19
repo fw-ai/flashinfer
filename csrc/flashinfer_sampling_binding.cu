@@ -63,6 +63,9 @@ void top_p_renorm_probs(TensorView probs, TensorView renorm_probs,
                         Optional<TensorView> maybe_top_p_arr, double top_p_val,
                         bool is_deterministic, TensorView workspace);
 
+void top_p_mask(TensorView probs, TensorView output, Optional<TensorView> maybe_top_p_arr,
+                double top_p_val, bool is_deterministic, TensorView workspace);
+
 void top_k_renorm_probs(TensorView probs, TensorView renorm_probs,
                         Optional<TensorView> maybe_top_k_arr, int64_t top_k_val,
                         TensorView row_states_buffer);
@@ -100,3 +103,5 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(top_p_renorm_probs, top_p_renorm_probs);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(top_k_mask_logits, top_k_mask_logits);
 // Speculative sampling from sequence of probabilities
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(chain_speculative_sampling, chain_speculative_sampling);
+
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(top_p_mask, top_p_mask);

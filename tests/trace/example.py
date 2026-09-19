@@ -1352,6 +1352,8 @@ with contextlib.suppress(Exception):
 with contextlib.suppress(Exception):
     flashinfer.top_p_renorm_probs(_sp_probs, 0.9)
 with contextlib.suppress(Exception):
+    flashinfer.top_p_mask(_sp_probs, 0.9)
+with contextlib.suppress(Exception):
     flashinfer.top_k_renorm_probs(_sp_probs, 50)
 with contextlib.suppress(Exception):
     flashinfer.top_k_mask_logits(_sp_logits, 50)
