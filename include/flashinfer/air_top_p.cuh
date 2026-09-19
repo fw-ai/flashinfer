@@ -456,8 +456,10 @@ __global__ void AirTopPRenormApplyKernel(T const* probs, T* renormedProbs, Count
   }
 }
 
-__global__ void AirTopPMaskKernel(const float* probs, bool* remove, const Counter<float>* counters,
-                                  int vocab) {
+// The FTZ boundary reduction uses all 1024 threads; cap register allocation
+// so this launch remains legal across the supported architectures.
+static __global__ void __launch_bounds__(1024)
+    AirTopPMaskKernel(const float* probs, bool* remove, const Counter<float>* counters, int vocab) {
   const int row = blockIdx.y;
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   const float threshold = twiddleOut<float>(counters[row].kthValueBits, false);
