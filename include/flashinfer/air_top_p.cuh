@@ -22,6 +22,7 @@
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 
+#include <cfloat>
 #include <cub/cub.cuh>
 #include <cuda/atomic>
 #include <cuda/std/limits>
@@ -455,6 +456,40 @@ __global__ void AirTopPRenormApplyKernel(T const* probs, T* renormedProbs, Count
   }
 }
 
+// The FTZ boundary reduction uses all 1024 threads; cap register allocation
+// so this launch remains legal across the supported architectures.
+static __global__ void __launch_bounds__(1024)
+    AirTopPMaskKernel(const float* probs, bool* remove, const Counter<float>* counters, int vocab) {
+  const int row = blockIdx.y;
+  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+  const float threshold = twiddleOut<float>(counters[row].kthValueBits, false);
+  const float value = col < vocab ? probs[static_cast<size_t>(row) * vocab + col] : 0.f;
+  const bool selected = value >= threshold;
+  float norm = 1.f;
+  // Normalized FP32 rows may sum slightly above one after rounding. Only
+  // retained values near FLT_MIN can then cross the FTZ boundary on renorm.
+  // Reproduce the original 1024-thread reduction for those rare tiles.
+  const bool boundary = col < vocab && selected && value >= FLT_MIN && value <= 2 * FLT_MIN;
+  if (__syncthreads_or(boundary)) {
+    float thread_sum = 0.f;
+    for (int i = threadIdx.x; i < vocab; i += 1024) {
+      const float x = probs[static_cast<size_t>(row) * vocab + i];
+      if (x >= threshold) thread_sum += x;
+    }
+    using Reduction = cub::BlockReduce<float, 1024>;
+    __shared__ typename Reduction::TempStorage storage;
+    __shared__ float shared_norm;
+    const float sum = Reduction(storage).Sum(thread_sum);
+    if (threadIdx.x == 0) shared_norm = sum > 1e-8f ? 1.f / sum : 1.f;
+    __syncthreads();
+    norm = shared_norm;
+  }
+  if (col < vocab) {
+    // Keep FlashInfer's FTZ multiply, including zero/subnormal handling.
+    remove[static_cast<size_t>(row) * vocab + col] = !selected || value * norm == 0.f;
+  }
+}
+
 // ======================== Block num calculation ========================
 
 template <bool IsDeterministic, typename T>
@@ -489,10 +524,11 @@ uint32_t CalcAirTopPBlockNum(int batchSize, int len, int smCnt) {
 
 // ======================== Host launcher ========================
 
-template <bool IsDeterministic, typename DType>
-cudaError_t AirTopPRenormProb(DType* probs, DType* renormed_prob, float* top_p_arr,
-                              uint32_t batch_size, float top_p_val, uint32_t d, void* workspace,
-                              cudaStream_t stream = 0) {
+template <bool IsDeterministic, typename DType, bool ReturnMask = false>
+cudaError_t AirTopPRenormProb(DType* probs,
+                              std::conditional_t<ReturnMask, bool, DType>* renormed_prob,
+                              float* top_p_arr, uint32_t batch_size, float top_p_val, uint32_t d,
+                              void* workspace, cudaStream_t stream = 0) {
   using HisT_ = HisT<IsDeterministic, DType>;
 
   int dev, smCnt;
@@ -524,8 +560,14 @@ cudaError_t AirTopPRenormProb(DType* probs, DType* renormed_prob, float* top_p_a
         <<<grid, BLOCK_SIZE, 0, stream>>>(counters, histograms, countHistograms, pass, buf1, buf2);
   }
 
-  AirTopPRenormApplyKernel<DType>
-      <<<batch_size, 1024, 0, stream>>>(probs, renormed_prob, counters, d);
+  if constexpr (ReturnMask) {
+    static_assert(std::is_same_v<DType, float>, "Mask output requires FP32 probabilities");
+    AirTopPMaskKernel<<<dim3((d + 1023) / 1024, batch_size), 1024, 0, stream>>>(
+        probs, renormed_prob, counters, d);
+  } else {
+    AirTopPRenormApplyKernel<DType>
+        <<<batch_size, 1024, 0, stream>>>(probs, renormed_prob, counters, d);
+  }
 
   return cudaSuccess;
 }

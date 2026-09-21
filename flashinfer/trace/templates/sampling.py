@@ -527,6 +527,17 @@ top_p_renorm_probs_trace = TraceTemplate(
 )
 
 
+top_p_mask_trace = TraceTemplate(
+    op_type="sampling",
+    name_prefix="top_p_mask",
+    description="Bool removal mask for top-p filtering of normalized probabilities.",
+    axes={"batch_size": Var(), "vocab_size": Const(abbrev="v")},
+    inputs={"probs": Tensor(["batch_size", "vocab_size"]), "top_p": Scalar("float32")},
+    outputs={"mask": Tensor(["batch_size", "vocab_size"], dtype="bool")},
+    init=_top_p_renorm_probs_init,
+)
+
+
 @torch.no_grad()
 def _top_k_renorm_probs_reference(probs, top_k, **_unused):
     """Renormalise probs by top-k thresholding."""
